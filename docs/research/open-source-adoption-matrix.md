@@ -193,7 +193,7 @@ Andromeda 自行实现 Windows Application Bridge，底层采用 KVM/QEMU、libv
 | 不带 T2 的选定 Intel Mac | Pilot→Supported | 逐机型白名单 |
 | 带 T2 的 Intel Mac | Experimental | 依赖 apple-bce；不承诺休眠/音频/SEP |
 | 选定 M1/M2 Mac | Developer Preview | 复用 Asahi；硬件缺口公开 |
-| M3/M4 Mac | Watch/Unsupported | 等待 Asahi 官方安装器与核心硬件支持 |
+| M3 及更新 Apple silicon | Watch/Unsupported | M3/M4 等待官方安装器与核心硬件；尚未列入 Asahi 功能表的更新代际（如 M5）不进入安装范围 |
 | 标准 UEFI+ACPI arm64 PC | Pilot | 不外推到任意手机/开发板 |
 
 ### 5.2 Mac 项目

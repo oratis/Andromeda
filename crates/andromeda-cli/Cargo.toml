@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 andromeda-core.workspace = true
+andromeda-hardware.workspace = true
 andromeda-policy.workspace = true
 andromeda-runtime.workspace = true
 chrono.workspace = true

@@ -14,7 +14,7 @@
 4. **Mac 必须拆成三条产品线。**
    - 不带 T2 的 Intel Mac：最接近普通 x86 PC，可对少数实测机型提供 `Supported`，但不能按“所有 Intel Mac”承诺。
    - 带 T2 的 Intel Mac：键盘、触控板、摄像头、音频等依赖 `apple-bce` 桥接；休眠、音频、混合显卡和 T2 Secure Enclave 仍有关键缺口，只适合 `Community/Experimental`。
-   - Apple silicon：不是 UEFI PC，必须采用 Asahi 的 m1n1/U-Boot、Apple Device Tree 和配对固件体系。M1/M2 可做独立预览版；截至调研日，Asahi 对 M3/M4 仍无安装器，不能列入 Andromeda 可交付范围。
+   - Apple silicon：不是 UEFI PC，必须采用 Asahi 的 m1n1/U-Boot、Apple Device Tree 和配对固件体系。M1/M2 可做独立预览版；截至调研日，Asahi 对 M3/M4 仍无可交付安装路径，其[官方功能总览](https://asahilinux.org/docs/platform/feature-support/overview/)也尚未列出 M5，因此 M3 及更新代际都不能列入 Andromeda 可交付范围。
 5. **“从 Windows/macOS 无缝切换”应通过源系统迁移代理实现，而不是赌目标系统能直接读写 NTFS/APFS。** Linux 的 NTFS3 已可完整读写 NTFS 3.1（[内核文档](https://docs.kernel.org/filesystems/ntfs3.html)）；但 Linux APFS 写支持仍属实验性质，且 FileVault、APFS volume group、云占位文件和 Keychain 都无法靠裸挂载正确迁移。因此应在原 Windows/macOS 内运行只读盘点与导出代理，经端到端加密、可续传协议传给 Andromeda。
 6. **驱动支持是持续服务，不是安装镜像里的静态功能。** 发布门槛必须包括启动、安装、OTA/回滚、休眠循环、坞站热插拔、GPU、摄像头、音频、网络、功耗和固件升级的实机 CI。HCM 只有在指定固件和系统版本通过这些测试后才能签名发布。
 
@@ -29,6 +29,7 @@
 | 带 T2 的 Intel Mac | Experimental | 关键桥接驱动未完整上游，Suspend、音频、SEP/Touch ID 仍有缺口 |
 | 选定 M1/M2 Mac | Developer Preview，后续逐机型升级 | Asahi 已实现大量功能，但 Thunderbolt/DP、SEP/Touch ID、视频编解码、ANE、上游休眠仍不完整 |
 | M3/M4 Mac | Unsupported / Watch | 截至 2026-07-26，Asahi 官方功能表仍显示安装器不可用 |
+| M5 及尚未列入 Asahi 功能表的更新 Mac | Unsupported / Watch | 不从 CPU 名称推断兼容；等待上游建立对应机型页、安装器和核心驱动 |
 
 ## 2. “所有硬件”的工程定义
 
@@ -139,7 +140,7 @@ Linux 的驱动绑定、总线、DMA、IOMMU、中断、内存管理、网络、
 - GPU reset 后桌面是否可恢复，不能把单个游戏挂死升级成系统重启；
 - NVIDIA 内核模块与 Secure Boot、内核 ABI 和 OTA 的原子性。
 
-对 Apple GPU，Mesa 文档明确其 Asahi 驱动源于对 AGX 的逆向工程（[Mesa Asahi](https://docs.mesa3d.org/drivers/asahi.html)）；Fedora Asahi 当前宣称 M1/M2 已提供 conformant OpenGL 4.6、OpenGL ES 3.2、OpenCL 3.0 和 Vulkan 1.4（[Fedora Asahi](https://asahilinux.org/fedora/)）。这证明路线可行，但不应外推到 M3/M4。
+对 Apple GPU，Mesa 文档明确其 Asahi 驱动源于对 AGX 的逆向工程（[Mesa Asahi](https://docs.mesa3d.org/drivers/asahi.html)）；Fedora Asahi 当前宣称 M1/M2 已提供 conformant OpenGL 4.6、OpenGL ES 3.2、OpenCL 3.0 和 Vulkan 1.4（[Fedora Asahi](https://asahilinux.org/fedora/)）。这证明路线可行，但不应外推到 M3 及更新代际。
 
 ### 3.2 Wi-Fi 与蓝牙
 
@@ -237,7 +238,7 @@ Linux 已建立 `/dev/accel/accel*` 的 compute accelerator 子系统，并复�
 
 - Intel NPU 从 Core Ultra/Meteor Lake 起有 `ivpu` 内核驱动和 Intel Level Zero/OpenVINO 用户态；Intel 官方仓库仍持续发布，但 2026 OpenVINO 对 Linux NPU 支持仍标为特定 Ubuntu 版本/preview，并要求额外驱动（[OpenVINO system requirements](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html?language=en)）。
 - AMD `amdxdna` 已进入内核 accel 子系统，支持 Phoenix/Hawk Point/Strix Point，用户态仍需要 XRT shim 与编译器（[内核 AMD XDNA](https://docs.kernel.org/accel/amdxdna/amdnpu.html)）。
-- Apple ANE 在 M1/M2 的 Asahi 功能表中仍是 out-of-tree，M3/M4 为 TBA；不可作为首发本地 AI 后端。
+- Apple ANE 在 M1/M2 的 Asahi 功能表中仍是 out-of-tree，M3/M4 为 TBA，更新代际尚无可验证条目；不可作为首发本地 AI 后端。
 
 因此 Andromeda AI Runtime 应建立 CPU/GPU/NPU provider 抽象和能力探测：
 
@@ -358,7 +359,7 @@ M1/M2 的 16 KiB 原生页还影响 x86 游戏兼容；Asahi 的游戏栈用 4 K
 
 **v1 不可承诺：**
 
-- M3/M4 安装；
+- M3 及更新 Apple silicon 安装；
 - Touch ID/SEP、ANE、本地视频编解码、Thunderbolt/USB4/所有 USB-C 外屏；
 - 抹掉所有 Apple 分区后仍正常升级固件和恢复；
 - Apple 新 macOS 固件发布后 Andromeda 不受影响；
@@ -776,7 +777,7 @@ Apple Boot Camp support software 是面向 Windows on Mac 的 Apple 驱动包，
 - 采用 Asahi installer 的安全磁盘/固件流程；
 - 建 16 KiB host + 4 KiB game VM 栈；
 - 明确不支持 Touch ID/ANE/TB 等功能；
-- M3/M4 只有在 Asahi 官方 installer 与核心 block 可用后立项。
+- M3 及更新 Apple silicon 只有在对应 Asahi 官方机型页、installer 与核心 block 可用后立项。
 
 ### Phase H4：OEM Reference
 
@@ -810,7 +811,7 @@ Apple Boot Camp support software 是面向 Windows on Mac 的 Apple 驱动包，
 - 不迁移生物模板、设备身份或活跃登录 cookie；
 - 不让 APFS 实验写驱动成为正式迁移依赖；
 - 不在没有恢复设备和实体样机的情况下发布 firmware update；
-- 不把 T2、M1/M2、M3/M4 合并成“Mac supported”；
+- 不把 T2、M1/M2、M3/M4 和更新代际合并成“Mac supported”；
 - 不把 M1/M2 的成功外推为所有未来 Apple silicon。
 
 ## 13. 相关驱动、固件与硬件项目目录
@@ -857,7 +858,7 @@ Apple Boot Camp support software 是面向 Windows on Mac 的 Apple 驱动包，
 | AMD `amdxdna` + XRT shim | Ryzen AI/XDNA NPU | kernel GPL-2.0；XRT/shim 混合 Apache-2.0/GPL，逐组件审计 | 中，主线化进行中 | Pilot | [kernel amdxdna](https://docs.kernel.org/accel/amdxdna/index.html)、[AMD repo](https://github.com/amd/xdna-driver) |
 | Asahi m1n1 | Apple silicon 启动、调试和 ABI 转换 | MIT，内嵌组件各自许可 | M1/M2 高 | Adopt（Apple silicon 变体） | [m1n1](https://github.com/AsahiLinux/m1n1) |
 | U-Boot | Apple silicon 上提供后续 UEFI-like 启动层及通用 boot | GPL-2.0-or-later | 高 | Adopt（Apple silicon/arm64） | [U-Boot](https://docs.u-boot.org/) |
-| Asahi Linux kernel/Mesa/audio enablement | Apple silicon Linux 驱动与整机集成 | kernel GPL-2.0；Mesa MIT；组件各自 | M1/M2 中高，M3/M4 早期 | Pilot | [Asahi docs](https://asahilinux.org/docs/)、[feature support](https://asahilinux.org/docs/platform/feature-support/overview/) |
+| Asahi Linux kernel/Mesa/audio enablement | Apple silicon Linux 驱动与整机集成 | kernel GPL-2.0；Mesa MIT；组件各自 | M1/M2 中高，M3/M4 早期；更新代际未列入时不可推断 | Pilot | [Asahi docs](https://asahilinux.org/docs/)、[feature support](https://asahilinux.org/docs/platform/feature-support/overview/) |
 | Asahi installer / firmware tooling | 安全调整 APFS、建立 fuOS 和提取配对固件 | 工具开源；Apple payload 受 Apple 许可 | M1/M2 高 | Adopt 流程，不自行重写 | [Asahi distro policy](https://asahilinux.org/docs/alt/policy/) |
 | t2linux `apple-bce-drv` | T2 BCE、虚拟 USB、键盘/触控板/音频/摄像头通道 | 源文件 GPL-compatible；仓库缺少清晰顶层 LICENSE，需法律审计 | 中低、out-of-tree、suspend 缺口 | Watch / Experimental | [apple-bce](https://github.com/t2linux/apple-bce-drv)、[t2linux state](https://wiki.t2linux.org/state/) |
 | Asahi `tiny-dfr` | Apple silicon Dynamic Function Row daemon | MIT | 中，持续活跃 | Pilot（精确机型） | [上游仓库](https://github.com/AsahiLinux/tiny-dfr)；不能替代底层显示/输入驱动 |
@@ -882,6 +883,6 @@ Andromeda 的硬件战略不应是“承诺越多机型越好”，而应是：
 5. Windows/macOS 源迁移代理与 PMM；
 6. 少量非 T2 Intel Mac；
 7. 基于 Asahi 的 M1/M2 独立 Preview；
-8. T2、M3/M4 保持透明的 Experimental/Watch，不用营销承诺倒逼不安全实现。
+8. T2、M3 及更新 Apple silicon 保持透明的 Experimental/Watch，不用营销承诺倒逼不安全实现。
 
 只有这样，“从现在的 PC 和 Mac 无缝切换”才不是一句安装口号，而是可验证、可回滚、可长期维护的产品能力。

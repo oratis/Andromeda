@@ -16,6 +16,12 @@ Andromeda 的目标是探索一个以 AI agent 为核心、覆盖尽可能广泛
 - [Andromeda 产品开发计划](./product-development-plan.md)
 - [专题研究索引与研究方法](./research/README.md)
 
+## 开发
+
+- [开发者入门](./development/getting-started.md)
+- [任务控制面](./development/task-control-plane.md)
+- [Hardware Compatibility Manifest](./development/hardware-compatibility.md)
+
 ## 文档约定
 
 - 优先引用操作系统项目、厂商和标准组织的一手资料。

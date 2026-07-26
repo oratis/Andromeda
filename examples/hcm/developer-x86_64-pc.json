@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "developer-x86-64-pc",
+  "name": "Generic x86-64 developer PC",
+  "tier": "community",
+  "selectors": [
+    {
+      "os_family": "linux",
+      "architectures": [
+        "x86_64"
+      ],
+      "manufacturer_contains": null,
+      "model_prefix": null
+    }
+  ],
+  "requirements": [
+    {
+      "type": "memory_bytes",
+      "minimum": 8589934592
+    },
+    {
+      "type": "boot",
+      "uefi": true,
+      "secure_boot": null,
+      "tpm2": null,
+      "virtualization": true
+    }
+  ],
+  "kernel_channels": [
+    "stable",
+    "hardware-enable"
+  ],
+  "notes": [
+    "Community is not a certification claim.",
+    "GPU, networking, audio, suspend, and update evidence must be added per exact machine."
+  ]
+}

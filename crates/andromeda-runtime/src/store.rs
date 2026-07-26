@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,12 @@ pub enum StoreError {
     NotFound(TaskId),
     #[error("task {task_id} revision conflict: expected {expected}, found {actual}")]
     RevisionConflict {
+        task_id: TaskId,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("task {task_id} record revision must be {expected}, found {actual}")]
+    InvalidRecordRevision {
         task_id: TaskId,
         expected: u64,
         actual: u64,
@@ -53,10 +60,17 @@ impl FileTaskStore {
     /// error when durable persistence fails.
     pub fn create(&self, record: &TaskRecord) -> Result<(), StoreError> {
         let lock = self.lock_exclusive()?;
-        let path = self.task_path(record.plan.task_id);
-        if path.exists() {
+        if record.revision != 0 {
+            return Err(StoreError::InvalidRecordRevision {
+                task_id: record.plan.task_id,
+                expected: 0,
+                actual: record.revision,
+            });
+        }
+        if self.latest_path(record.plan.task_id)?.is_some() {
             return Err(StoreError::AlreadyExists(record.plan.task_id));
         }
+        let path = self.task_path(record.plan.task_id, record.revision);
         self.write_atomic(&path, record)?;
         FileExt::unlock(&lock)?;
         Ok(())
@@ -69,10 +83,9 @@ impl FileTaskStore {
     /// Returns [`StoreError::NotFound`] when the task is absent, or a parsing
     /// or I/O error for corrupted/unreadable state.
     pub fn get(&self, task_id: TaskId) -> Result<TaskRecord, StoreError> {
-        let path = self.task_path(task_id);
-        if !path.exists() {
-            return Err(StoreError::NotFound(task_id));
-        }
+        let path = self
+            .latest_path(task_id)?
+            .ok_or(StoreError::NotFound(task_id))?;
         Self::read_record(&path)
     }
 
@@ -83,16 +96,19 @@ impl FileTaskStore {
     /// Returns an I/O or parsing error if the state directory is unreadable or
     /// contains a malformed task record.
     pub fn list(&self) -> Result<Vec<TaskRecord>, StoreError> {
-        let mut paths = fs::read_dir(&self.root)?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths.iter().map(|path| Self::read_record(path)).collect()
+        let mut latest = BTreeMap::<TaskId, TaskRecord>::new();
+        for path in self.record_paths()? {
+            let record = Self::read_record(&path)?;
+            latest
+                .entry(record.plan.task_id)
+                .and_modify(|current| {
+                    if record.revision > current.revision {
+                        current.clone_from(&record);
+                    }
+                })
+                .or_insert(record);
+        }
+        Ok(latest.into_values().collect())
     }
 
     /// Replaces a task only when its current revision matches `expected`.
@@ -111,13 +127,48 @@ impl FileTaskStore {
                 actual: current.revision,
             });
         }
-        self.write_atomic(&self.task_path(record.plan.task_id), record)?;
+        let next = expected.saturating_add(1);
+        if record.revision != next {
+            return Err(StoreError::InvalidRecordRevision {
+                task_id: record.plan.task_id,
+                expected: next,
+                actual: record.revision,
+            });
+        }
+        self.write_atomic(
+            &self.task_path(record.plan.task_id, record.revision),
+            record,
+        )?;
         FileExt::unlock(&lock)?;
         Ok(())
     }
 
-    fn task_path(&self, task_id: TaskId) -> PathBuf {
-        self.root.join(format!("{task_id}.json"))
+    fn task_path(&self, task_id: TaskId, revision: u64) -> PathBuf {
+        self.root.join(format!("{task_id}.{revision:020}.json"))
+    }
+
+    fn latest_path(&self, task_id: TaskId) -> Result<Option<PathBuf>, StoreError> {
+        let prefix = format!("{task_id}.");
+        Ok(self
+            .record_paths()?
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix))
+            })
+            .max())
+    }
+
+    fn record_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
+        Ok(fs::read_dir(&self.root)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect())
     }
 
     fn lock_exclusive(&self) -> Result<File, StoreError> {
@@ -149,7 +200,17 @@ impl FileTaskStore {
         writer.flush()?;
         writer.get_ref().sync_all()?;
         fs::rename(&temporary, destination)?;
-        File::open(&self.root)?.sync_all()?;
+        sync_directory(&self.root)?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+const fn sync_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }

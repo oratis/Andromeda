@@ -292,10 +292,10 @@ mod tests {
 
     #[test]
     fn allows_scoped_read_inside_sandbox() {
-        let capability = file_capability("/workspace", FileAccess::Read);
+        let capability = file_capability(workspace_root(), FileAccess::Read);
         let action = action(
             ActionKind::ReadFile,
-            "/workspace/README.md",
+            workspace_file(),
             RiskLevel::L1Sandboxed,
             &capability,
         );
@@ -309,10 +309,10 @@ mod tests {
 
     #[test]
     fn deny_rules_override_a_matching_capability() {
-        let capability = file_capability("/", FileAccess::ReadWrite);
+        let capability = file_capability(system_root(), FileAccess::ReadWrite);
         let action = action(
             ActionKind::WriteFile,
-            "/etc/passwd",
+            denied_system_file(),
             RiskLevel::L1Sandboxed,
             &capability,
         );
@@ -326,10 +326,10 @@ mod tests {
 
     #[test]
     fn strong_isolation_cannot_be_downgraded_by_a_capability() {
-        let capability = file_capability("/downloads", FileAccess::Read);
+        let capability = file_capability(downloads_root(), FileAccess::Read);
         let action = action(
             ActionKind::ParseUntrustedContent,
-            "/downloads/unknown.zip",
+            unknown_download(),
             RiskLevel::L2StrongIsolation,
             &capability,
         );
@@ -366,5 +366,65 @@ mod tests {
             &EvaluationContext::current(IsolationLevel::Brokered, &capabilities, false),
         );
         assert_eq!(decision.effect, DecisionEffect::Ask);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn workspace_root() -> &'static str {
+        "/workspace"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn workspace_root() -> &'static str {
+        r"C:\workspace"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn workspace_file() -> &'static str {
+        "/workspace/README.md"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn workspace_file() -> &'static str {
+        r"C:\workspace\README.md"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn system_root() -> &'static str {
+        "/"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn system_root() -> &'static str {
+        r"C:\"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn denied_system_file() -> &'static str {
+        "/etc/passwd"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn denied_system_file() -> &'static str {
+        r"C:\Windows\System32\config\SAM"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn downloads_root() -> &'static str {
+        "/downloads"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn downloads_root() -> &'static str {
+        r"C:\downloads"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn unknown_download() -> &'static str {
+        "/downloads/unknown.zip"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn unknown_download() -> &'static str {
+        r"C:\downloads\unknown.zip"
     }
 }
