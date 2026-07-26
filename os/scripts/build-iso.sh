@@ -15,6 +15,9 @@ fi
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
 readonly OUTPUT_DIR
+rm -f \
+    "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso" \
+    "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso.sha256"
 
 "${engine[@]}" build \
     --tag localhost/andromeda:v1 \
@@ -54,8 +57,15 @@ readonly OUTPUT_DIR
     --bootc-default-fs ext4 \
     bootc-generic-iso
 
-mv -f "${OUTPUT_DIR}/install.iso" \
-    "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso"
+shopt -s nullglob
+built_isos=("${OUTPUT_DIR}"/*.iso)
+shopt -u nullglob
+if [[ "${#built_isos[@]}" -ne 1 ]]; then
+    printf 'Expected exactly one image-builder ISO, found %d.\n' \
+        "${#built_isos[@]}" >&2
+    exit 1
+fi
+mv -f "${built_isos[0]}" "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso"
 (
     cd "${OUTPUT_DIR}"
     sha256sum Andromeda-Developer-Preview-x86_64.iso \

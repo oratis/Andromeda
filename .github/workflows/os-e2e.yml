@@ -61,8 +61,8 @@ jobs:
         with:
           name: Andromeda-Developer-Preview-x86_64-${{ github.sha }}
           path: |
-            output/Andromeda-Developer-Preview-x86_64.iso
-            output/Andromeda-Developer-Preview-x86_64.iso.sha256
+            output/*.iso
+            output/*.sha256
             output/install-serial.log
             output/boot-serial.log
             output/update-server.log
