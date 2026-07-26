@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+install -d -m 0700 /var/lib/andromeda
+temporary_report="$(mktemp /var/lib/andromeda/hardware.json.XXXXXX)"
+trap 'rm -f "${temporary_report}"' EXIT
+/usr/bin/andromeda hardware probe > "${temporary_report}"
+chmod 0600 "${temporary_report}"
+mv -f "${temporary_report}" /var/lib/andromeda/hardware.json
+trap - EXIT

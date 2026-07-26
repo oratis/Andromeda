@@ -1,0 +1,65 @@
+#!/usr/bin/bash
+set -euo pipefail
+
+readonly STATE_DIR=/var/lib/andromeda-ci
+readonly STATE_FILE="${STATE_DIR}/state"
+readonly UPDATE_ARCHIVE=/var/tmp/andromeda-v2.tar
+readonly UPDATE_URL=http://10.0.2.2:8080/andromeda-v2.tar
+
+emit() {
+    local message="$1"
+    printf '%s\n' "${message}" | tee /dev/ttyS0
+    systemd-cat -t andromeda-ci printf '%s\n' "${message}"
+}
+
+require_runtime_health() {
+    test -d /sys/firmware/efi
+    test -s /var/lib/andromeda/hardware.json
+    systemctl is-active --quiet andromeda-taskd.service
+    systemctl is-active --quiet sddm.service
+    curl --fail --silent --show-error --retry 30 --retry-delay 2 \
+        http://127.0.0.1:7777/healthz >/dev/null
+}
+
+install -d -m 0700 "${STATE_DIR}"
+revision="$(tr -d '[:space:]' < /usr/lib/andromeda/image-revision)"
+state="first-boot"
+if [[ -f "${STATE_FILE}" ]]; then
+    state="$(tr -d '[:space:]' < "${STATE_FILE}")"
+fi
+
+require_runtime_health
+
+case "${state}:${revision}" in
+    first-boot:1)
+        emit "ANDROMEDA_FIRST_BOOT_OK revision=1"
+        curl --fail --location --show-error --retry 60 --retry-delay 2 \
+            --output "${UPDATE_ARCHIVE}" "${UPDATE_URL}"
+        skopeo copy --retry-times 5 \
+            "oci-archive:${UPDATE_ARCHIVE}" \
+            containers-storage:localhost/andromeda:v2
+        bootc switch --transport containers-storage localhost/andromeda:v2
+        printf '%s\n' updating > "${STATE_FILE}"
+        emit "ANDROMEDA_UPDATE_STAGED_OK revision=2"
+        systemctl reboot
+        ;;
+    updating:2)
+        emit "ANDROMEDA_UPDATE_BOOT_OK revision=2"
+        bootc rollback
+        printf '%s\n' rolling-back > "${STATE_FILE}"
+        emit "ANDROMEDA_ROLLBACK_STAGED_OK revision=1"
+        systemctl reboot
+        ;;
+    rolling-back:1)
+        emit "ANDROMEDA_ROLLBACK_BOOT_OK revision=1"
+        printf '%s\n' complete > "${STATE_FILE}"
+        emit "ANDROMEDA_E2E_OK"
+        ;;
+    complete:1)
+        emit "ANDROMEDA_E2E_OK"
+        ;;
+    *)
+        emit "ANDROMEDA_E2E_FAILED state=${state} revision=${revision}"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,32 @@
+[Unit]
+Description=Andromeda local AI task control plane
+After=local-fs.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=andromeda-taskd
+Environment=ANDROMEDA_LISTEN=127.0.0.1:7777
+Environment=ANDROMEDA_STATE_DIR=/var/lib/andromeda-taskd/state
+ExecStart=/usr/bin/andromeda-taskd
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Andromeda installation, update, and rollback verifier
+ConditionKernelCommandLine=andromeda.ci=1
+After=network-online.target andromeda-hardware-report.service andromeda-taskd.service sddm.service
+Wants=network-online.target andromeda-hardware-report.service andromeda-taskd.service sddm.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/andromeda-ci-verify
+TimeoutStartSec=20min
+
+[Install]
+WantedBy=graphical.target

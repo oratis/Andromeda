@@ -1,0 +1,120 @@
+# syntax=docker/dockerfile:1.7
+
+ARG RUST_VERSION=1.85
+FROM docker.io/library/rust:${RUST_VERSION}-bookworm AS rust-builder
+
+WORKDIR /src
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates ./crates
+RUN cargo build --release --locked --bin andromeda --bin andromeda-taskd
+
+FROM quay.io/fedora/fedora-bootc:43 AS payload
+
+ARG IMAGE_REVISION=1
+
+RUN dnf -y install \
+        NetworkManager \
+        curl \
+        dolphin \
+        firewall-config \
+        firewalld \
+        firefox \
+        glibc-langpack-en \
+        glibc-langpack-zh \
+        jq \
+        konsole \
+        kwin \
+        linux-firmware \
+        mesa-dri-drivers \
+        mesa-vulkan-drivers \
+        openssh-server \
+        plasma-desktop \
+        plasma-nm \
+        plasma-workspace \
+        podman \
+        qemu-guest-agent \
+        sddm \
+        skopeo \
+        sudo \
+        vulkan-loader \
+        wireplumber \
+        xdg-desktop-portal-kde \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY --from=rust-builder /src/target/release/andromeda /usr/bin/andromeda
+COPY --from=rust-builder /src/target/release/andromeda-taskd /usr/bin/andromeda-taskd
+COPY os/files/ /
+
+RUN printf '%s\n' "${IMAGE_REVISION}" > /usr/lib/andromeda/image-revision \
+    && systemctl enable \
+        NetworkManager.service \
+        andromeda-hardware-report.service \
+        andromeda-taskd.service \
+        andromeda-ci-verify.service \
+        firewalld.service \
+        qemu-guest-agent.service \
+        sddm.service \
+        sshd.service \
+    && systemctl set-default graphical.target \
+    && bootc container lint
+
+FROM payload AS installer
+
+ARG INSTALLER_DEFAULT=0
+
+RUN dnf -y install \
+        anaconda \
+        anaconda-dracut \
+        anaconda-install-img-deps \
+        default-fonts-core-sans \
+        default-fonts-other-sans \
+        dracut-config-generic \
+        dracut-network \
+        google-noto-sans-cjk-fonts \
+        grub2-efi-x64-cdboot \
+        net-tools \
+        plymouth \
+        squashfs-tools \
+        xorrisofs \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+COPY os/installer/iso.yaml /usr/lib/image-builder/bootc/iso.yaml
+COPY os/installer/interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
+COPY os/installer/andromeda-ci.ks /usr/share/anaconda/andromeda-ci.ks
+
+RUN sed -i "s/^  default: 0$/  default: ${INSTALLER_DEFAULT}/" \
+        /usr/lib/image-builder/bootc/iso.yaml \
+    && mkdir -p /boot/efi \
+    && cp -ra /usr/lib/efi/*/*/EFI /boot/efi \
+    && printf '%s\n' \
+        'install:x:0:0:root:/root:/usr/libexec/anaconda/run-anaconda' \
+        >> /etc/passwd \
+    && printf '%s\n' 'install::14438:0:99999:7:::' >> /etc/shadow \
+    && passwd -d root \
+    && mv /usr/share/anaconda/list-harddrives-stub /usr/bin/list-harddrives \
+    && mv /etc/yum.repos.d /etc/anaconda.repos.d \
+    && rm -f /etc/systemd/system/default.target \
+    && ln -s /usr/lib/systemd/system/anaconda.target /etc/systemd/system/default.target \
+    && rm -f /usr/lib/systemd/system-generators/systemd-gpt-auto-generator \
+    && rm -f /usr/lib/systemd/system/autovt@.service \
+    && ln -s /usr/lib/systemd/system/anaconda-shell@.service \
+        /usr/lib/systemd/system/autovt@.service \
+    && mkdir -p /usr/lib/systemd/logind.conf.d \
+    && printf '%s\n' '[Login]' 'ReserveVT=2' \
+        > /usr/lib/systemd/logind.conf.d/anaconda-shell.conf \
+    && mkdir -p "$(realpath /root)" \
+    && kernel="$(kernel-install list --json pretty \
+        | jq -r '.[] | select(.has_kernel == true) | .version')" \
+    && DRACUT_NO_XATTR=1 dracut --force --verbose --zstd --reproducible \
+        --no-hostonly \
+        --add anaconda \
+        --include /usr/share/anaconda/andromeda-ci.ks /andromeda-ci.ks \
+        "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}" \
+    && mkdir -p /etc/systemd/user/pipewire.service.d \
+        /etc/systemd/user/pipewire.socket.d \
+    && printf '%s\n' '[Unit]' 'ConditionUser=' \
+        > /etc/systemd/user/pipewire.service.d/allowroot.conf \
+    && printf '%s\n' '[Unit]' 'ConditionUser=' \
+        > /etc/systemd/user/pipewire.socket.d/allowroot.conf
