@@ -46,7 +46,8 @@ COPY --from=rust-builder /src/target/release/andromeda /usr/bin/andromeda
 COPY --from=rust-builder /src/target/release/andromeda-taskd /usr/bin/andromeda-taskd
 COPY os/files/ /
 
-RUN printf '%s\n' "${IMAGE_REVISION}" > /usr/lib/andromeda/image-revision \
+RUN mkdir -p /usr/lib/andromeda \
+    && printf '%s\n' "${IMAGE_REVISION}" > /usr/lib/andromeda/image-revision \
     && systemctl enable \
         NetworkManager.service \
         andromeda-hardware-report.service \
