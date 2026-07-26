@@ -5,6 +5,16 @@ Andromeda 的目标是探索一个以 AI agent 为核心、覆盖尽可能广泛
 ## 调研
 
 - [PC 与 macOS 操作系统全景及 Andromeda 架构建议](./os-landscape-and-andromeda-architecture.md)
+- [Windows 游戏、Office 与文件格式兼容](./research/windows-gaming-office-formats.md)
+- [PC/Mac 硬件、驱动与迁移](./research/hardware-drivers-and-migration.md)
+- [可靠更新、隔离与 AI Agent](./research/reliability-update-ai-agent.md)
+- [桌面平台与发行工程](./research/desktop-platform-and-distribution.md)
+- [开源组件采用矩阵](./research/open-source-adoption-matrix.md)
+
+## 产品
+
+- [Andromeda 产品开发计划](./product-development-plan.md)
+- [专题研究索引与研究方法](./research/README.md)
 
 ## 文档约定
 
