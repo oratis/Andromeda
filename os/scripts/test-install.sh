@@ -15,7 +15,7 @@ readonly OVMF_VARS="${OUTPUT_DIR}/OVMF_VARS.fd"
 http_pid=""
 qemu_pid=""
 
-# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
     if [[ -n "${qemu_pid}" ]]; then
         kill "${qemu_pid}" 2>/dev/null || true
