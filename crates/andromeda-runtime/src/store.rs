@@ -200,6 +200,7 @@ impl FileTaskStore {
         writer.flush()?;
         writer.get_ref().sync_all()?;
         fs::rename(&temporary, destination)?;
+        #[cfg(unix)]
         sync_directory(&self.root)?;
         Ok(())
     }
@@ -208,9 +209,4 @@ impl FileTaskStore {
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-const fn sync_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
 }

@@ -8,7 +8,7 @@ use crate::{BootInfo, CpuInfo, HardwareIdentity, HardwareReport, MemoryInfo, OsF
 use super::{ProbeError, logical_cores};
 
 pub(super) fn probe() -> Result<HardwareReport, ProbeError> {
-    let script = r#"
+    let script = r"
 $cs = Get-CimInstance Win32_ComputerSystem
 $bios = Get-CimInstance Win32_BIOS
 $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
@@ -26,7 +26,7 @@ try { $tpm = (Get-Tpm).TpmPresent } catch {}
   tpm2 = $tpm
   virtualization = [bool]$cs.HypervisorPresent
 } | ConvertTo-Json -Compress
-"#;
+";
     let output = Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
         .output()?;

@@ -104,20 +104,12 @@ fn collect_devices(root: &str, bus: &str) -> Vec<DeviceInfo> {
         .collect()
 }
 
-const fn vendor_file(bus: &str) -> &str {
-    if bus.as_bytes().len() == 3 && bus.as_bytes()[0] == b'u' {
-        "idVendor"
-    } else {
-        "vendor"
-    }
+fn vendor_file(bus: &str) -> &str {
+    if bus == "usb" { "idVendor" } else { "vendor" }
 }
 
-const fn product_file(bus: &str) -> &str {
-    if bus.as_bytes().len() == 3 && bus.as_bytes()[0] == b'u' {
-        "idProduct"
-    } else {
-        "device"
-    }
+fn product_file(bus: &str) -> &str {
+    if bus == "usb" { "idProduct" } else { "device" }
 }
 
 fn driver_name(path: &Path) -> Option<String> {
