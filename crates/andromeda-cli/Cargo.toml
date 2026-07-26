@@ -1,0 +1,24 @@
+[package]
+name = "andromeda-cli"
+description = "Developer CLI for Andromeda task planning and policy evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "andromeda"
+path = "src/main.rs"
+
+[dependencies]
+andromeda-core.workspace = true
+andromeda-policy.workspace = true
+andromeda-runtime.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

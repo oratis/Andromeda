@@ -1,0 +1,41 @@
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use andromeda_policy::PolicyEngine;
+use andromeda_runtime::{FileTaskStore, TaskService};
+use clap::Parser;
+use tracing::info;
+use tracing_subscriber::EnvFilter;
+
+#[derive(Debug, Parser)]
+#[command(about = "Andromeda durable task control plane")]
+struct Args {
+    #[arg(long, env = "ANDROMEDA_LISTEN", default_value = "127.0.0.1:7777")]
+    listen: SocketAddr,
+    #[arg(long, env = "ANDROMEDA_STATE_DIR", default_value = ".andromeda/state")]
+    state_dir: PathBuf,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+    let args = Args::parse();
+    let store = FileTaskStore::open(&args.state_dir)?;
+    let service = TaskService::new(store, PolicyEngine::default());
+    let listener = tokio::net::TcpListener::bind(args.listen).await?;
+    info!(listen = %args.listen, state_dir = %args.state_dir.display(), "task service ready");
+    axum::serve(listener, andromeda_taskd::app(service))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+async fn shutdown_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::error!(%error, "failed to install shutdown signal");
+    }
+}
