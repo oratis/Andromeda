@@ -72,6 +72,7 @@ RUN dnf -y install \
         default-fonts-other-sans \
         dracut-config-generic \
         dracut-network \
+        efibootmgr \
         google-noto-sans-cjk-fonts \
         grub2-efi-x64 \
         grub2-efi-x64-cdboot \
