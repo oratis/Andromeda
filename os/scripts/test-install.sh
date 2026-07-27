@@ -158,8 +158,9 @@ while IFS= read -r installed_log; do
     tail -n 1000 "${installed_log}" \
         >>"${DIAGNOSTICS_DIR}/root/log-excerpts.txt" 2>&1 || true
 done <"${DIAGNOSTICS_DIR}/root/log-paths.txt"
-find "${root_mount}" -name andromeda-uefi-fallback.log -type f -print \
-    -exec cat {} \; | tee "${OUTPUT_DIR}/install-post.log"
+grep --text --extended-regexp \
+    'ANDROMEDA_INSTALLER_EFI_(START|OK)' "${INSTALL_LOG}" \
+    | tee "${OUTPUT_DIR}/install-post.log"
 
 test -f "${esp_mount}/EFI/fedora/shimx64.efi"
 test -f "${esp_mount}/EFI/fedora/grubx64.efi"
