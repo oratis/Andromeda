@@ -10,7 +10,7 @@ Andromeda 是一个面向 PC 与 Mac 硬件的 AI 原生桌面操作系统项目
 
 项目已经进入首个**可安装 Developer Preview**：
 
-- 有基于 Fedora bootc 43 与 KDE Plasma 的 x86-64 UEFI 离线安装 ISO；
+- 有基于 Fedora bootc 44 与 KDE Plasma 的 x86-64 UEFI 离线安装 ISO；
 - 有从 ISO 安装到空白磁盘、移除 ISO 后首次启动的 QEMU/OVMF 自动验收；
 - 有 bootc 更新到 revision 2、重启验证、回滚到 revision 1 的生命周期验收；
 - 有可编译、可测试的 Rust workspace；

@@ -9,7 +9,7 @@ timezone UTC --utc
 
 zerombr
 clearpart --all --initlabel
-reqpart
+reqpart --add-boot
 part / --fstype=ext4 --size=8192 --grow --label=andromeda-root
 
 bootloader --timeout=1 --append="console=tty0 console=ttyS0,115200n8 andromeda.ci=1"

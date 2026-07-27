@@ -67,7 +67,9 @@ jobs:
             output/esp-tree.txt
             output/install-post.log
             output/ovmf-vars.txt
+            output/diagnostics/**
           retention-days: 14
+          include-hidden-files: true
           if-no-files-found: warn
 
       - name: Upload installer

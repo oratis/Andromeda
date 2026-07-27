@@ -1,7 +1,7 @@
 # Andromeda Developer Preview image
 
 This directory turns the Rust control plane into an installable x86-64 UEFI
-Developer Preview based on Fedora bootc 43 and KDE Plasma.
+Developer Preview based on Fedora bootc 44 and KDE Plasma.
 
 ## Safety boundary
 

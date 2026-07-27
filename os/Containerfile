@@ -8,7 +8,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 RUN cargo build --release --locked --bin andromeda --bin andromeda-taskd
 
-FROM quay.io/fedora/fedora-bootc:43 AS payload
+FROM quay.io/fedora/fedora-bootc:44 AS payload
 
 ARG IMAGE_REVISION=1
 

@@ -69,5 +69,5 @@ mv -f "${built_isos[0]}" "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso"
 (
     cd "${OUTPUT_DIR}"
     sha256sum Andromeda-Developer-Preview-x86_64.iso \
-        > Andromeda-Developer-Preview-x86_64.iso.sha256
+        | tee Andromeda-Developer-Preview-x86_64.iso.sha256
 )

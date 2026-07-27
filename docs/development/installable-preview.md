@@ -11,7 +11,7 @@
 | 固件 | UEFI |
 | 已自动验收 | QEMU/KVM + OVMF + VirtIO 空白磁盘 |
 | 桌面 | KDE Plasma + SDDM |
-| 系统基础 | Fedora bootc 43 |
+| 系统基础 | Fedora bootc 44 |
 | 文件系统 | ext4 |
 | 安装方式 | 离线 payload + 图形化 Anaconda |
 | AI 控制面 | loopback-only `andromeda-taskd` |
@@ -76,6 +76,10 @@ sudo os/scripts/test-install.sh
 7. 导入 revision 2，执行 `bootc switch` 并重启；
 8. 确认 revision 2 已启动，执行 `bootc rollback` 并重启；
 9. 确认 revision 1 恢复，输出 `ANDROMEDA_E2E_OK`。
+
+CI 分区使用 UEFI ESP、独立 `/boot` 和带 `andromeda-root` 标签的根分区。
+独立 `/boot` 遵循 bootc/bootupd 的推荐磁盘布局；验收脚本按 GPT 类型和文件系统
+标签发现分区，不依赖易漂移的 `p1`、`p2` 顺序。
 
 串口必须按顺序出现：
 
