@@ -58,6 +58,7 @@ test -f "${OVMF_VARS_TEMPLATE}"
 
 rm -rf "${DIAGNOSTICS_DIR}"
 mkdir -p \
+    "${DIAGNOSTICS_DIR}/installer" \
     "${DIAGNOSTICS_DIR}/host" \
     "${DIAGNOSTICS_DIR}/nvram" \
     "${DIAGNOSTICS_DIR}/root"
@@ -142,6 +143,10 @@ root_mount="$(mktemp -d "${OUTPUT_DIR}/root.XXXXXX")"
 mount -o ro "${esp_partition}" "${esp_mount}"
 find "${esp_mount}" -maxdepth 4 -type f -printf '%P\n' \
     | sort | tee "${OUTPUT_DIR}/esp-tree.txt"
+if [[ -d "${esp_mount}/EFI/Andromeda/diagnostics" ]]; then
+    cp -a "${esp_mount}/EFI/Andromeda/diagnostics/." \
+        "${DIAGNOSTICS_DIR}/installer/"
+fi
 
 mount -o ro,noload "${root_partition}" "${root_mount}"
 find "${root_mount}" -type f \

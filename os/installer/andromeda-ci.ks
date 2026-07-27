@@ -16,6 +16,14 @@ bootloader --timeout=1 --append="console=tty0 console=ttyS0,115200n8 andromeda.c
 bootc --source-imgref=containers-storage:localhost/andromeda:v1 --target-imgref=ghcr.io/oratis/andromeda:edge --stateroot=andromeda
 shutdown
 
+%pre --erroronfail --log=/tmp/andromeda-installer-preflight.log
+/usr/libexec/andromeda-installer-preflight
+%end
+
+%onerror --log=/tmp/andromeda-installer-onerror.log
+/usr/libexec/andromeda-collect-anaconda-diagnostics
+%end
+
 %post --nochroot --erroronfail --log=/tmp/andromeda-uefi-fallback.log
 /usr/libexec/andromeda-install-uefi-fallback /mnt/sysimage
 %end

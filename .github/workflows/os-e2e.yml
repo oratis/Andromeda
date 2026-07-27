@@ -47,7 +47,7 @@ jobs:
           sudo apt-get clean
 
       - name: Validate scripts
-        run: shellcheck os/scripts/*.sh os/files/usr/libexec/*
+        run: shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
 
       - name: Build payloads and installer ISO
         run: sudo os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
