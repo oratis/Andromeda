@@ -33,6 +33,12 @@ rm -f \
     --file "${REPOSITORY_ROOT}/os/Containerfile" \
     "${REPOSITORY_ROOT}"
 
+"${engine[@]}" history \
+    --human=false \
+    --format json \
+    localhost/andromeda:v1 \
+    | tee "${OUTPUT_DIR}/andromeda-v1-history.json"
+
 "${engine[@]}" save \
     --format oci-archive \
     --output "${OUTPUT_DIR}/andromeda-v2.tar" \
