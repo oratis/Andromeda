@@ -4,7 +4,7 @@ set -euo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPOSITORY_ROOT
 OUTPUT_DIR="${1:-${REPOSITORY_ROOT}/output}"
-readonly IMAGE_BUILDER_IMAGE="${IMAGE_BUILDER_IMAGE:-ghcr.io/osbuild/image-builder-cli:latest}"
+readonly IMAGE_BUILDER_IMAGE="${IMAGE_BUILDER_IMAGE:-ghcr.io/osbuild/image-builder-cli@sha256:67f1c248cf18acbcf8f716ccf29ba5a9b65352b8c5c4996f745efd176c41ee5c}"
 
 if [[ "${EUID}" -eq 0 ]]; then
     engine=(podman)

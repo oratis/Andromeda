@@ -46,6 +46,10 @@ if mountpoint --quiet "${ESP_MOUNT}"; then
         >"${ESP_DIAGNOSTICS}/lsblk.txt" 2>&1 || true
     findmnt --real \
         >"${ESP_DIAGNOSTICS}/findmnt.txt" 2>&1 || true
+    df --human-readable --print-type \
+        >"${ESP_DIAGNOSTICS}/df.txt" 2>&1 || true
+    df --human-readable --inodes \
+        >"${ESP_DIAGNOSTICS}/df-inodes.txt" 2>&1 || true
     efibootmgr --verbose \
         >"${ESP_DIAGNOSTICS}/efibootmgr.txt" 2>&1 || true
     sync "${ESP_DIAGNOSTICS}"

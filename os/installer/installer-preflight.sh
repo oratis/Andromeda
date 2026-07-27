@@ -24,6 +24,9 @@ printf 'embedded images:\n'
 podman images --format '{{.Repository}}:{{.Tag}} {{.ID}}'
 
 podman image exists "${PAYLOAD_IMAGE}"
+printf 'embedded image digest: '
+skopeo inspect --format '{{.Digest}}' \
+    "containers-storage:${PAYLOAD_IMAGE}"
 
 if [[ -c "${SERIAL_DEVICE}" ]]; then
     printf 'ANDROMEDA_INSTALLER_PREFLIGHT_OK payload=%s bootc=%s\n' \
