@@ -37,11 +37,12 @@ The test boots the ISO with UEFI, automatically installs onto a new 32 GiB
 VirtIO disk, removes the ISO, and starts the installed disk. The installed OS
 must then:
 
-1. reach KDE's SDDM display manager;
-2. start the loopback-only Andromeda task service;
-3. generate a hardware report;
-4. stage and boot revision 2 through bootc;
-5. stage a rollback and boot revision 1 again.
+1. be discoverable through the standard UEFI fallback path;
+2. run with SELinux enforcing and reach KDE's SDDM display manager;
+3. start the loopback-only Andromeda task service;
+4. generate a hardware report;
+5. stage and boot revision 2 through bootc;
+6. stage a rollback and boot revision 1 again.
 
 Success is the serial marker `ANDROMEDA_E2E_OK`. GitHub Actions executes the
 same flow and uploads the ISO, checksum, and serial evidence.
