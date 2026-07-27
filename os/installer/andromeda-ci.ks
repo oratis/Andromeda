@@ -25,5 +25,5 @@ shutdown
 %end
 
 %post --nochroot --erroronfail --log=/tmp/andromeda-uefi-fallback.log
-/usr/libexec/andromeda-install-uefi-fallback /mnt/sysimage
+/usr/libexec/andromeda-install-uefi-fallback /mnt/sysimage /mnt/sysroot
 %end

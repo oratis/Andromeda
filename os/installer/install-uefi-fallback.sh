@@ -2,8 +2,11 @@
 set -euo pipefail
 
 target_root_argument="${1:?target root is required}"
+system_root_argument="${2:?system root is required}"
 TARGET_ROOT="$(realpath -e "${target_root_argument}")"
+SYSTEM_ROOT="$(realpath -e "${system_root_argument}")"
 readonly TARGET_ROOT
+readonly SYSTEM_ROOT
 readonly VENDOR_DIR="${TARGET_ROOT}/boot/efi/EFI/fedora"
 readonly FALLBACK_DIR="${TARGET_ROOT}/boot/efi/EFI/BOOT"
 readonly ESP_MOUNT="${TARGET_ROOT}/boot/efi"
@@ -53,6 +56,12 @@ efibootmgr \
     --part "${partition_number}" \
     --label Andromeda \
     --loader '\EFI\fedora\shimx64.efi'
+
+install -d -m 0755 "${SYSTEM_ROOT}/etc/systemd/system"
+ln -sfn /usr/lib/systemd/system/graphical.target \
+    "${SYSTEM_ROOT}/etc/systemd/system/default.target"
+test "$(readlink "${SYSTEM_ROOT}/etc/systemd/system/default.target")" \
+    = /usr/lib/systemd/system/graphical.target
 
 sync "${FALLBACK_DIR}"
 

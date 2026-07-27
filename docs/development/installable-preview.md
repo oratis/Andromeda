@@ -33,7 +33,8 @@ Compatibility Manifest 和真机测试的 PC 也只能视为 Community/Experimen
 用户明确选择磁盘并创建账户。
 
 generic bootc ISO 的临时 SquashFS/OverlayFS 安装环境按 image-builder 上游合约以
-`selinux=0` 启动；这个参数不写入安装后系统。自动验收要求目标系统重新进入
+`inst.selinux=0` 启动；这个参数仅由 Anaconda 处理，不写入安装后内核参数。
+自动验收要求目标系统重新进入
 `SELinux enforcing`，否则失败。
 
 > **危险：** `Automated destructive install (CI only)` 只供 QEMU 验收。它会清空
