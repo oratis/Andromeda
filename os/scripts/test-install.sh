@@ -14,6 +14,9 @@ readonly OVMF_VARS="${OUTPUT_DIR}/OVMF_VARS.fd"
 
 http_pid=""
 qemu_pid=""
+nbd_device=""
+esp_mount=""
+root_mount=""
 
 # shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
@@ -22,6 +25,21 @@ cleanup() {
     fi
     if [[ -n "${http_pid}" ]]; then
         kill "${http_pid}" 2>/dev/null || true
+    fi
+    if [[ -n "${root_mount}" ]] && mountpoint --quiet "${root_mount}"; then
+        umount "${root_mount}" || true
+    fi
+    if [[ -n "${esp_mount}" ]] && mountpoint --quiet "${esp_mount}"; then
+        umount "${esp_mount}" || true
+    fi
+    if [[ -n "${nbd_device}" ]]; then
+        qemu-nbd --disconnect "${nbd_device}" 2>/dev/null || true
+    fi
+    if [[ -n "${root_mount}" ]]; then
+        rmdir "${root_mount}" 2>/dev/null || true
+    fi
+    if [[ -n "${esp_mount}" ]]; then
+        rmdir "${esp_mount}" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -64,6 +82,41 @@ timeout 45m qemu-system-x86_64 \
     "${common_qemu[@]}" \
     -drive "if=ide,media=cdrom,readonly=on,file=${ISO_PATH}" \
     -serial "file:${INSTALL_LOG}"
+
+modprobe nbd max_part=16
+for candidate in /dev/nbd{0..15}; do
+    if [[ ! -e "/sys/block/${candidate##*/}/pid" ]]; then
+        nbd_device="${candidate}"
+        break
+    fi
+done
+test -n "${nbd_device}"
+
+qemu-nbd --connect="${nbd_device}" "${DISK_PATH}"
+udevadm settle
+esp_mount="$(mktemp -d "${OUTPUT_DIR}/esp.XXXXXX")"
+root_mount="$(mktemp -d "${OUTPUT_DIR}/root.XXXXXX")"
+mount -o ro "${nbd_device}p1" "${esp_mount}"
+find "${esp_mount}/EFI" -maxdepth 3 -type f -printf '%P\n' \
+    | sort | tee "${OUTPUT_DIR}/esp-tree.txt"
+test -f "${esp_mount}/EFI/fedora/shimx64.efi"
+test -f "${esp_mount}/EFI/fedora/grubx64.efi"
+test -f "${esp_mount}/EFI/BOOT/BOOTX64.EFI"
+test -f "${esp_mount}/EFI/BOOT/grubx64.efi"
+
+mount -o ro "${nbd_device}p2" "${root_mount}"
+find "${root_mount}" -name andromeda-uefi-fallback.log -type f -print \
+    -exec cat {} \; | tee "${OUTPUT_DIR}/install-post.log"
+umount "${root_mount}"
+umount "${esp_mount}"
+qemu-nbd --disconnect "${nbd_device}"
+nbd_device=""
+rmdir "${root_mount}" "${esp_mount}"
+root_mount=""
+esp_mount=""
+
+strings --encoding=l "${OVMF_VARS}" \
+    | grep Andromeda | tee "${OUTPUT_DIR}/ovmf-vars.txt"
 
 python3 -m http.server 8080 \
     --bind 0.0.0.0 \
