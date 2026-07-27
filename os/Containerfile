@@ -163,6 +163,7 @@ RUN sed -i "s/^  default: 0$/  default: ${INSTALLER_DEFAULT}/" \
         --no-hostonly \
         --add anaconda \
         --include /usr/share/anaconda/andromeda-ci.ks /andromeda-ci.ks \
+        --include /usr/share/anaconda/interactive-defaults.ks /interactive-defaults.ks \
         "/usr/lib/modules/${kernel}/initramfs.img" "${kernel}" \
     && mkdir -p /etc/systemd/user/pipewire.service.d \
         /etc/systemd/user/pipewire.socket.d \

@@ -5,6 +5,7 @@ keyboard us
 lang en_US.UTF-8
 network --bootproto=dhcp --device=link --activate
 rootpw --lock
+selinux --enforcing
 timezone UTC --utc
 
 zerombr

@@ -29,6 +29,15 @@ if [[ -f "${STATE_FILE}" ]]; then
     state="$(tr -d '[:space:]' < "${STATE_FILE}")"
 fi
 
+on_error() {
+    local status="$?"
+    trap - ERR
+    set +e
+    emit "ANDROMEDA_E2E_FAILED state=${state} revision=${revision} status=${status}"
+    exit "${status}"
+}
+trap on_error ERR
+
 require_runtime_health
 
 case "${state}:${revision}" in

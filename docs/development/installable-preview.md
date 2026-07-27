@@ -32,10 +32,10 @@ Compatibility Manifest 和真机测试的 PC 也只能视为 Community/Experimen
 安装器的正常默认项是 **Install Andromeda Developer Preview**，会进入图形界面让
 用户明确选择磁盘并创建账户。
 
-generic bootc ISO 的临时 SquashFS/OverlayFS 安装环境按 image-builder 上游合约以
-`inst.selinux=0` 启动；这个参数仅由 Anaconda 处理，不写入安装后内核参数。
-自动验收要求目标系统重新进入
-`SELinux enforcing`，否则失败。
+generic bootc ISO 的临时 SquashFS/OverlayFS 安装环境以 `selinux=0` 启动，避免
+只读 live 文件系统的安全标签与运行时策略冲突。交互式和 CI Kickstart 都显式使用
+`selinux --enforcing`，因此 Anaconda 不会把 live 环境的禁用状态配置到目标系统。
+自动验收要求安装后的系统进入 `SELinux enforcing`，否则失败。
 
 > **危险：** `Automated destructive install (CI only)` 只供 QEMU 验收。它会清空
 > 第一块安装磁盘，不得在含有用户数据的机器上选择。

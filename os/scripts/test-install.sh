@@ -208,6 +208,11 @@ while (( SECONDS < deadline )); do
         grep -E 'ANDROMEDA_(FIRST_BOOT|UPDATE|ROLLBACK|E2E)' "${BOOT_LOG}"
         exit 0
     fi
+    if grep -q ANDROMEDA_E2E_FAILED "${BOOT_LOG}" 2>/dev/null; then
+        printf 'Installed system emitted a lifecycle failure marker.\n' >&2
+        grep -E 'ANDROMEDA_(FIRST_BOOT|UPDATE|ROLLBACK|E2E)' "${BOOT_LOG}" >&2
+        exit 1
+    fi
     if grep -q 'Shell>' "${BOOT_LOG}" 2>/dev/null; then
         printf 'UEFI firmware could not find an installed bootloader.\n' >&2
         tail -200 "${BOOT_LOG}" >&2
