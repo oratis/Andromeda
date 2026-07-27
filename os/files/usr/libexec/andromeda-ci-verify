@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
 readonly STATE_DIR=/var/lib/andromeda-ci
 readonly STATE_FILE="${STATE_DIR}/state"

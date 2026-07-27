@@ -34,8 +34,9 @@ Compatibility Manifest 和真机测试的 PC 也只能视为 Community/Experimen
 
 generic bootc ISO 的临时 SquashFS/OverlayFS 安装环境以 `selinux=0` 启动，避免
 只读 live 文件系统的安全标签与运行时策略冲突。交互式和 CI Kickstart 都显式使用
-`selinux --enforcing`，因此 Anaconda 不会把 live 环境的禁用状态配置到目标系统。
-自动验收要求安装后的系统进入 `SELinux enforcing`，否则失败。
+`selinux --enforcing`；安装后脚本再通过 OSTree deployment API 重建目标内核参数，
+并拒绝任何仍含 `selinux=0` 的 BLS 启动项。自动验收要求安装后的系统进入
+`SELinux enforcing`，否则失败。
 
 > **危险：** `Automated destructive install (CI only)` 只供 QEMU 验收。它会清空
 > 第一块安装磁盘，不得在含有用户数据的机器上选择。

@@ -3,14 +3,25 @@ set -euo pipefail
 
 target_root_argument="${1:?target root is required}"
 system_root_argument="${2:?system root is required}"
+install_mode="${3:-interactive}"
 TARGET_ROOT="$(realpath -e "${target_root_argument}")"
 SYSTEM_ROOT="$(realpath -e "${system_root_argument}")"
 readonly TARGET_ROOT
 readonly SYSTEM_ROOT
+readonly install_mode
 readonly VENDOR_DIR="${TARGET_ROOT}/boot/efi/EFI/fedora"
 readonly FALLBACK_DIR="${TARGET_ROOT}/boot/efi/EFI/BOOT"
 readonly ESP_MOUNT="${TARGET_ROOT}/boot/efi"
 readonly ESP_PARTITION_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+
+case "${install_mode}" in
+    interactive|ci)
+        ;;
+    *)
+        printf 'Unknown install mode: %s\n' "${install_mode}" >&2
+        exit 1
+        ;;
+esac
 
 if [[ -c /dev/ttyS0 ]]; then
     exec > >(tee -a /dev/ttyS0) 2>&1
@@ -62,6 +73,23 @@ ln -sfn /usr/lib/systemd/system/graphical.target \
     "${SYSTEM_ROOT}/etc/systemd/system/default.target"
 test "$(readlink "${SYSTEM_ROOT}/etc/systemd/system/default.target")" \
     = /usr/lib/systemd/system/graphical.target
+
+target_kargs=()
+if [[ "${install_mode}" == ci ]]; then
+    target_kargs=(
+        "andromeda.ci=1"
+        "console=tty0"
+        "console=ttyS0,115200n8"
+    )
+fi
+OSTREE_SYSROOT="${SYSTEM_ROOT}" ostree admin instutil set-kargs \
+    "${target_kargs[@]}"
+if grep -R -E -- '(^|[[:space:]])selinux=0([[:space:]]|$)' \
+    "${SYSTEM_ROOT}/boot/loader/entries"; then
+    printf 'Target boot entries still disable SELinux.\n' >&2
+    exit 1
+fi
+printf 'ANDROMEDA_INSTALLER_KARGS_OK mode=%s\n' "${install_mode}"
 
 sync "${FALLBACK_DIR}"
 

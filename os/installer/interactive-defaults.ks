@@ -2,5 +2,5 @@ bootc --source-imgref=containers-storage:localhost/andromeda:v1 --target-imgref=
 selinux --enforcing
 
 %post --nochroot --erroronfail --log=/tmp/andromeda-uefi-fallback.log
-/usr/libexec/andromeda-install-uefi-fallback /mnt/sysimage /mnt/sysroot
+/usr/libexec/andromeda-install-uefi-fallback /mnt/sysimage /mnt/sysroot interactive
 %end

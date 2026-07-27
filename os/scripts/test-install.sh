@@ -164,8 +164,9 @@ while IFS= read -r installed_log; do
         >>"${DIAGNOSTICS_DIR}/root/log-excerpts.txt" 2>&1 || true
 done <"${DIAGNOSTICS_DIR}/root/log-paths.txt"
 grep --text --extended-regexp \
-    'ANDROMEDA_INSTALLER_EFI_(START|OK)' "${INSTALL_LOG}" \
+    'ANDROMEDA_INSTALLER_(EFI_(START|OK)|KARGS_OK)' "${INSTALL_LOG}" \
     | tee "${OUTPUT_DIR}/install-post.log"
+grep -q 'ANDROMEDA_INSTALLER_KARGS_OK mode=ci' "${INSTALL_LOG}"
 
 test -f "${esp_mount}/EFI/fedora/shimx64.efi"
 test -f "${esp_mount}/EFI/fedora/grubx64.efi"
