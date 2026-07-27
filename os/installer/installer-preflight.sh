@@ -3,6 +3,7 @@ set -euo pipefail
 
 readonly SERIAL_DEVICE="/dev/ttyS0"
 readonly PAYLOAD_IMAGE="localhost/andromeda:v1"
+readonly LAYER_HEADROOM_BYTES="$((512 * 1024 * 1024))"
 
 if [[ -c "${SERIAL_DEVICE}" ]]; then
     printf 'ANDROMEDA_INSTALLER_PREFLIGHT_START payload=%s\n' \
@@ -28,7 +29,39 @@ printf 'embedded image digest: '
 skopeo inspect --format '{{.Digest}}' \
     "containers-storage:${PAYLOAD_IMAGE}"
 
+printf 'installer memory:\n'
+grep --extended-regexp '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' \
+    /proc/meminfo
+printf 'installer temporary filesystems:\n'
+findmnt --output TARGET,SOURCE,FSTYPE,SIZE,AVAIL /tmp /var/tmp || true
+df --block-size=1 /tmp /var/tmp
+
+payload_manifest="$(skopeo inspect --raw "containers-storage:${PAYLOAD_IMAGE}")"
+max_layer_bytes="$(
+    jq --raw-output '[.layers[]?.size] | max // 0' <<<"${payload_manifest}"
+)"
+var_tmp_available_bytes="$(
+    df --output=avail --block-size=1 /var/tmp | tail -n 1 | tr -d ' '
+)"
+required_var_tmp_bytes="$((max_layer_bytes + LAYER_HEADROOM_BYTES))"
+
+printf 'largest compressed payload layer: %s bytes\n' "${max_layer_bytes}"
+printf 'required /var/tmp capacity with headroom: %s bytes\n' \
+    "${required_var_tmp_bytes}"
+printf 'available /var/tmp capacity: %s bytes\n' \
+    "${var_tmp_available_bytes}"
+
+if (( var_tmp_available_bytes < required_var_tmp_bytes )); then
+    printf 'Insufficient /var/tmp capacity for the largest payload layer: '\
+'need %s bytes, found %s bytes.\n' \
+        "${required_var_tmp_bytes}" "${var_tmp_available_bytes}" >&2
+    exit 1
+fi
+
 if [[ -c "${SERIAL_DEVICE}" ]]; then
-    printf 'ANDROMEDA_INSTALLER_PREFLIGHT_OK payload=%s bootc=%s\n' \
-        "${PAYLOAD_IMAGE}" "$(bootc --version)" >"${SERIAL_DEVICE}"
+    printf 'ANDROMEDA_INSTALLER_PREFLIGHT_OK payload=%s bootc=%s '\
+'max_layer_bytes=%s var_tmp_available_bytes=%s\n' \
+        "${PAYLOAD_IMAGE}" "$(bootc --version)" \
+        "${max_layer_bytes}" "${var_tmp_available_bytes}" \
+        >"${SERIAL_DEVICE}"
 fi
