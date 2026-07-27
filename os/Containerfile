@@ -81,9 +81,10 @@ RUN dnf -y install \
         shim-x64 \
         squashfs-tools \
         xorrisofs \
-    && dnf -y reinstall grub2-efi-x64 shim-x64 \
     && dnf clean all \
-    && rm -rf /var/cache/dnf
+    && rm -rf /var/cache/dnf \
+    && mkdir -p /boot/efi \
+    && cp -ra /usr/lib/efi/*/*/EFI /boot/efi
 
 COPY os/installer/iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY os/installer/interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
