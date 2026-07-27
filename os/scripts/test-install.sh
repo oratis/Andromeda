@@ -77,7 +77,7 @@ common_qemu=(
     -machine "q35,accel=${accel}"
     -cpu "${cpu}"
     -smp 4
-    -m 6144
+    -m 8192
     -nodefaults
     -no-user-config
     -device virtio-vga

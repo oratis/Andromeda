@@ -15,30 +15,58 @@ ARG IMAGE_REVISION=1
 RUN dnf -y install \
         NetworkManager \
         curl \
-        dolphin \
-        firewall-config \
         firewalld \
-        firefox \
-        glibc-langpack-en \
-        glibc-langpack-zh \
         jq \
-        konsole \
-        kwin \
+        openssh-server \
+        qemu-guest-agent \
+        sudo \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        podman \
+        skopeo \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
         linux-firmware \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
         mesa-dri-drivers \
         mesa-vulkan-drivers \
-        openssh-server \
+        vulkan-loader \
+        wireplumber \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        kwin \
         plasma-desktop \
         plasma-nm \
         plasma-workspace \
-        podman \
-        qemu-guest-agent \
         sddm \
-        skopeo \
-        sudo \
-        vulkan-loader \
-        wireplumber \
         xdg-desktop-portal-kde \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        dolphin \
+        firewall-config \
+        konsole \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        firefox \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        glibc-langpack-en \
+        glibc-langpack-zh \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -84,13 +112,11 @@ RUN dnf -y install \
     && dnf clean all \
     && rm -rf /var/cache/dnf \
     && mkdir -p /boot/efi \
-    && cp -ra /usr/lib/efi/*/*/EFI /boot/efi \
-    && mv /usr/bin/bootc /usr/libexec/andromeda-bootc-real
+    && cp -ra /usr/lib/efi/*/*/EFI /boot/efi
 
 COPY os/installer/iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY os/installer/interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
 COPY os/installer/andromeda-ci.ks /usr/share/anaconda/andromeda-ci.ks
-COPY os/installer/bootc-installer-wrapper.sh /usr/bin/bootc
 COPY os/installer/install-uefi-fallback.sh /usr/libexec/andromeda-install-uefi-fallback
 COPY os/installer/installer-preflight.sh /usr/libexec/andromeda-installer-preflight
 COPY os/installer/collect-anaconda-diagnostics.sh /usr/libexec/andromeda-collect-anaconda-diagnostics
