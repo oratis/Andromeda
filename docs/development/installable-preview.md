@@ -69,7 +69,8 @@ sudo os/scripts/test-install.sh
 1. 创建新的 32 GiB qcow2 磁盘；
 2. 以 OVMF UEFI 启动 ISO；
 3. 通过 CI 专用 Kickstart 清空并分区该磁盘；
-4. 从 ISO 内嵌 OCI payload 安装系统，同时写入 UEFI vendor 与标准 fallback 路径；
+4. 从 ISO 内嵌 OCI payload 安装系统，注册 Andromeda UEFI NVRAM 启动项并写入
+   标准 fallback 路径；
 5. 关机、移除 ISO，仅从安装后的磁盘启动；
 6. 验证 UEFI、SELinux enforcing、SDDM、硬件报告和 `taskd /healthz`；
 7. 导入 revision 2，执行 `bootc switch` 并重启；
