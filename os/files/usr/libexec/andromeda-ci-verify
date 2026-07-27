@@ -15,6 +15,7 @@ emit() {
 require_runtime_health() {
     test -d /sys/firmware/efi
     test -s /var/lib/andromeda/hardware.json
+    test "$(getenforce)" = Enforcing
     systemctl is-active --quiet andromeda-taskd.service
     systemctl is-active --quiet sddm.service
     curl --fail --silent --show-error --retry 30 --retry-delay 2 \
