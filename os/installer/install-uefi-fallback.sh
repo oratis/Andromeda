@@ -82,7 +82,7 @@ if [[ "${install_mode}" == ci ]]; then
         "console=ttyS0,115200n8"
     )
 fi
-OSTREE_SYSROOT="${SYSTEM_ROOT}" ostree admin instutil set-kargs \
+OSTREE_SYSROOT="${TARGET_ROOT}" ostree admin instutil set-kargs \
     "${target_kargs[@]}"
 if grep -R -E -- '(^|[[:space:]])selinux=0([[:space:]]|$)' \
     "${SYSTEM_ROOT}/boot/loader/entries"; then
