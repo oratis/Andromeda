@@ -1,17 +1,25 @@
 #!/usr/bin/bash
 set -euo pipefail
 
-readonly TARGET_ROOT="${1:?target root is required}"
+target_root_argument="${1:?target root is required}"
+TARGET_ROOT="$(realpath -e "${target_root_argument}")"
+readonly TARGET_ROOT
 readonly VENDOR_DIR="${TARGET_ROOT}/boot/efi/EFI/fedora"
 readonly FALLBACK_DIR="${TARGET_ROOT}/boot/efi/EFI/BOOT"
 readonly ESP_MOUNT="${TARGET_ROOT}/boot/efi"
 readonly ESP_PARTITION_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
+if [[ -c /dev/ttyS0 ]]; then
+    exec > >(tee -a /dev/ttyS0) 2>&1
+fi
+
+printf 'ANDROMEDA_INSTALLER_EFI_START target=%s\n' "${ESP_MOUNT}"
+
 command -v efibootmgr >/dev/null
 mountpoint --quiet "${ESP_MOUNT}"
 
 read -r esp_device esp_fstype esp_target < <(
-    findmnt --raw --noheadings --mountpoint "${ESP_MOUNT}" \
+    findmnt --raw --noheadings --target "${ESP_MOUNT}" \
         --output SOURCE,FSTYPE,TARGET
 )
 test "${esp_fstype}" = vfat
@@ -20,10 +28,7 @@ test "${esp_target}" = "${ESP_MOUNT}"
 partition_type="$(lsblk --noheadings --output PARTTYPE "${esp_device}" | xargs)"
 test "${partition_type,,}" = "${ESP_PARTITION_TYPE}"
 
-if [[ -c /dev/ttyS0 ]]; then
-    printf 'ANDROMEDA_INSTALLER_EFI_START device=%s\n' \
-        "${esp_device}" >/dev/ttyS0
-fi
+printf 'validated EFI system partition: %s\n' "${esp_device}"
 
 test -f "${VENDOR_DIR}/shimx64.efi"
 test -f "${VENDOR_DIR}/grubx64.efi"
@@ -53,5 +58,5 @@ sync "${FALLBACK_DIR}"
 
 if [[ -c /dev/ttyS0 ]]; then
     printf 'ANDROMEDA_INSTALLER_EFI_OK disk=%s part=%s\n' \
-        "${parent_device}" "${partition_number}" >/dev/ttyS0
+        "${parent_device}" "${partition_number}"
 fi
