@@ -87,6 +87,7 @@ RUN dnf -y install \
 COPY os/installer/iso.yaml /usr/lib/image-builder/bootc/iso.yaml
 COPY os/installer/interactive-defaults.ks /usr/share/anaconda/interactive-defaults.ks
 COPY os/installer/andromeda-ci.ks /usr/share/anaconda/andromeda-ci.ks
+COPY os/installer/install-uefi-fallback.sh /usr/libexec/andromeda-install-uefi-fallback
 
 RUN sed -i "s/^  default: 0$/  default: ${INSTALLER_DEFAULT}/" \
         /usr/lib/image-builder/bootc/iso.yaml \

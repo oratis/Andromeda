@@ -83,6 +83,11 @@ while (( SECONDS < deadline )); do
         grep -E 'ANDROMEDA_(FIRST_BOOT|UPDATE|ROLLBACK|E2E)' "${BOOT_LOG}"
         exit 0
     fi
+    if grep -q 'Shell>' "${BOOT_LOG}" 2>/dev/null; then
+        printf 'UEFI firmware could not find an installed bootloader.\n' >&2
+        tail -200 "${BOOT_LOG}" >&2
+        exit 1
+    fi
     if ! kill -0 "${qemu_pid}" 2>/dev/null; then
         wait "${qemu_pid}"
         printf 'QEMU exited before the end-to-end marker was emitted.\n' >&2
