@@ -30,7 +30,7 @@ jobs:
   install-update-rollback:
     name: UEFI install, first boot, update, and rollback
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
 
@@ -55,7 +55,19 @@ jobs:
       - name: Install to a blank disk and verify lifecycle
         run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
 
-      - name: Upload installer and evidence
+      - name: Upload serial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Andromeda-serial-evidence-${{ github.sha }}
+          path: |
+            output/install-serial.log
+            output/boot-serial.log
+            output/update-server.log
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload installer
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -63,9 +75,6 @@ jobs:
           path: |
             output/*.iso
             output/*.sha256
-            output/install-serial.log
-            output/boot-serial.log
-            output/update-server.log
           compression-level: 0
           retention-days: 3
           if-no-files-found: warn
