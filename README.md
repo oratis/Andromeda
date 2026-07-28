@@ -23,6 +23,12 @@ Andromeda 是一个面向 PC 与 Mac 硬件的 AI 原生桌面操作系统项目
 回滚；它**仍不是可日常使用的完整操作系统**。目前只有 QEMU/KVM x86-64 + OVMF
 达到自动验收门槛，没有宣称任何消费级 PC 或 Mac 已达到 Supported 或 Certified。
 
+2026-07-28 的[可安装 OS 验收 #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852)
+已经在全新 32 GiB 虚拟磁盘上完整通过。受测 ISO 的 SHA-256 为
+`c04d8f6de780f978e261e1867283894abf2a7996b6105525660c52343ae45073`；
+运行证据、产物标识和逐项验收结果见
+[Developer Preview 安装指南](./docs/development/installable-preview.md#已验证构建)。
+
 ## 第一性目标
 
 1. 继续运行用户已有的游戏、Office 工作流与重要文件。

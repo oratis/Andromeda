@@ -97,6 +97,42 @@ ANDROMEDA_E2E_OK
 GitHub Actions 运行同一脚本，并保存 ISO、SHA-256、安装串口和首次启动串口作为
 可审计证据。
 
+## 已验证构建
+
+截至 2026-07-28，Developer Preview 0 已获得首个完整通过的安装与生命周期证据：
+
+| 项目 | 已验证值 |
+|---|---|
+| 源分支提交 | `469869e268220e6be56d9adc19c9fbdd4a58c10c` |
+| GitHub Actions | [Installable OS #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852) |
+| 运行结论 | `success` |
+| ISO SHA-256 | `c04d8f6de780f978e261e1867283894abf2a7996b6105525660c52343ae45073` |
+| ISO artifact | `Andromeda-Developer-Preview-x86_64-e47629d3573764e3c57a495d0a9c05054662c769`（ID `8682102044`） |
+| ISO artifact ZIP digest | `sha256:5318570359dd7bb21347b8a8c0545447fb0cd6211e7b5ab987d2b090d8185fe8` |
+| 串口证据 artifact | `Andromeda-serial-evidence-e47629d3573764e3c57a495d0a9c05054662c769`（ID `8682089312`） |
+| 串口 artifact ZIP digest | `sha256:99ddabef2e7eb1d2481323068b7c1046fa7f5f643684722b78c0e262be1dde8d` |
+
+产物名中的 `e47629d…` 是 pull request 测试使用的临时 merge commit；上表另列出了
+实际源分支提交。GitHub Actions artifact 有保留期限，长期可复核记录以运行日志、
+本节中的 digest 和仓库测试脚本为准。
+
+该运行提供了以下实际证据：
+
+- 在全新 32 GiB qcow2 上建立 600 MiB ESP、2 GiB `/boot` 和
+  29.4 GiB `andromeda-root`，安装器退出状态为 0；
+- ESP 同时包含 Fedora shim/GRUB 和 `EFI/BOOT/BOOTX64.EFI` fallback，OVMF NVRAM
+  包含 `Andromeda` 启动项；
+- 三次硬盘启动都保留同一 `root=UUID` 与 `boot=UUID`，使用
+  `selinux=1 enforcing=1`，没有继承安装环境的 `selinux=0`；
+- 首次启动、revision 2 和回滚后的 revision 1 均通过 UEFI、SELinux enforcing、
+  硬件报告、`andromeda-taskd /healthz` 与 SDDM 检查；
+- 串口依次出现本节上一段列出的六个成功标记，最终为 `ANDROMEDA_E2E_OK`，且没有
+  `ANDROMEDA_E2E_FAILED`；
+- `qemu-img check` 报告磁盘镜像无错误。
+
+这个证据只证明表格中定义的 QEMU/KVM x86-64 + OVMF 边界，不把任何真实 PC 或
+Mac 自动提升为 Supported/Certified。
+
 ## 当前限制
 
 - 只有 QEMU/KVM x86-64 达到自动安装门槛；还没有任何消费级 PC/Mac 获得
