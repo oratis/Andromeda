@@ -1,10 +1,23 @@
 # Andromeda OS 产品开发计划
 
-> 状态：Draft 0.1
+> 状态：Draft 0.2
 >
-> 日期：2026-07-26
+> 日期：2026-07-28
 >
 > 本计划建立在 `docs/research/` 专题研究与 [操作系统全景调研](./os-landscape-and-andromeda-architecture.md) 之上。
+
+## 2026-07-28 工程检查点
+
+首个可安装 **Daily Driver Candidate（虚拟硬件）** 已完成：Fedora bootc 44 +
+KDE Plasma Wayland 镜像可从离线 ISO 安装到空盘，并在真实桌面会话中验证
+PipeWire、Flatpak、Discover、LibreOffice DOCX/XLSX/PPTX/PDF、Firefox、
+打印、防火墙、OOM 保护、zram、trim 和用户数据持久性；随后完成 revision 2
+原子更新和 revision 1 回滚。完整证据见
+[日用消费版端到端验收](./development/daily-driver-e2e.md#已验证运行)。
+
+该检查点提前验证了 Stage 2 的发行与可靠性骨架，不代表 Stage 2 或消费版已经
+整体完成。真实 GPU、Wi‑Fi、蓝牙、摄像头、待机/休眠、固件、Steam/Proton、
+Windows Workspace、Microsoft Office 原版和 PC/Mac 机型认证仍按本计划推进。
 
 ## 1. 产品定义
 

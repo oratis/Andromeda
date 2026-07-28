@@ -44,8 +44,22 @@ must then:
 5. stage and boot revision 2 through bootc;
 6. stage a rollback and boot revision 1 again.
 
-Success is the serial marker `ANDROMEDA_E2E_OK`. GitHub Actions executes the
-same flow and uploads the ISO, checksum, and serial evidence.
+In addition to the base lifecycle, the installed CI system enters a Plasma
+Wayland session and exercises PipeWire, Flatpak, LibreOffice DOCX/XLSX/PPTX/PDF
+conversion, a real Firefox Wayland launch, and persistent user data across update and
+rollback. Success is the serial marker `ANDROMEDA_E2E_OK`. GitHub Actions
+executes the same flow and uploads the ISO, checksum, and serial evidence.
+
+On a disposable Google Compute Engine N2 host with nested KVM, run:
+
+```bash
+sudo env ANDROMEDA_SOURCE_REVISION="$(git rev-parse HEAD)" \
+  os/scripts/test-gcp-nested.sh "$PWD" "$PWD/output"
+```
+
+The GCP provisioning, evidence retrieval, and exact resource cleanup are
+handled separately by the `gcp-os-e2e` Codex skill. See
+[the daily-driver E2E guide](../docs/development/daily-driver-e2e.md).
 
 ## Upstream contracts
 

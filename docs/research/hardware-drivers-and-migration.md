@@ -230,7 +230,14 @@ Andromeda 应：
 
 “可 suspend 一次”不等于支持。任何会随机丢盘、黑屏、风扇失控或耗尽电池的机器不得进入 Certified。
 
-运行时采用 UPower 统一电池/供电状态，`power-profiles-daemon` 提供面向桌面的有限功耗档位；Intel 平台可 Pilot `thermald`，服务器/工作站策略可评估 TuneD，但两者都不能覆盖 OEM 固件缺陷。认证流水线使用 FWTS 检查 ACPI/UEFI，使用 `pm-graph` 定位 suspend/resume 时间线，并把 `pciutils`、`usbutils`、`hwdata` 的规范化设备清单写入 HCM 证据。调优参数必须绑定精确机型和固件版本，通用“省电脚本”不得进入所有机器的默认配置。
+运行时采用 UPower 统一电池/供电状态，并通过
+Power Profiles D-Bus API 提供有限功耗档位；具体 provider 跟随发行版集成，
+Fedora 44 桌面使用 `tuned-ppd`，不能与 `power-profiles-daemon` 同时安装。Intel
+平台可 Pilot `thermald`，服务器/工作站策略可评估 TuneD，但这些组件都不能覆盖
+OEM 固件缺陷。认证流水线使用 FWTS 检查 ACPI/UEFI，使用 `pm-graph` 定位
+suspend/resume 时间线，并把 `pciutils`、`usbutils`、`hwdata` 的规范化设备清单
+写入 HCM 证据。调优参数必须绑定精确机型和固件版本，通用“省电脚本”不得进入
+所有机器的默认配置。
 
 ### 3.9 NPU
 

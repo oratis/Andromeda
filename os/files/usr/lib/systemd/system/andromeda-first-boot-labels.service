@@ -1,0 +1,14 @@
+[Unit]
+Description=Restore SELinux labels on Andromeda mutable state
+DefaultDependencies=no
+After=local-fs.target
+Before=basic.target dbus.service systemd-user-sessions.service sddm.service
+ConditionPathExists=/var/lib/andromeda/selinux-label-restore-required
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/andromeda-first-boot-labels
+RemainAfterExit=yes
+
+[Install]
+WantedBy=graphical.target
