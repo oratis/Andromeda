@@ -74,14 +74,6 @@ ln -sfn /usr/lib/systemd/system/graphical.target \
 test "$(readlink "${SYSTEM_ROOT}/etc/systemd/system/default.target")" \
     = /usr/lib/systemd/system/graphical.target
 
-target_kargs=()
-if [[ "${install_mode}" == ci ]]; then
-    target_kargs=(
-        "andromeda.ci=1"
-        "console=tty0"
-        "console=ttyS0,115200n8"
-    )
-fi
 boot_mount="$(findmnt --raw --noheadings --target "${TARGET_ROOT}/boot" \
     --output TARGET | xargs)"
 test -n "${boot_mount}"
@@ -89,10 +81,22 @@ mount --options remount,rw "${boot_mount}"
 findmnt --raw --noheadings --mountpoint "${boot_mount}" --output OPTIONS \
     | tr ',' '\n' | grep -qx rw
 OSTREE_SYSROOT="${TARGET_ROOT}" ostree admin instutil set-kargs \
-    "${target_kargs[@]}"
+    --merge \
+    --replace=selinux=1 \
+    --replace=enforcing=1
 if grep -R -E -- '(^|[[:space:]])selinux=0([[:space:]]|$)' \
     "${SYSTEM_ROOT}/boot/loader/entries"; then
     printf 'Target boot entries still disable SELinux.\n' >&2
+    exit 1
+fi
+if ! grep -R -E -q -- '(^|[[:space:]])root=(UUID=|LABEL=|/dev/)' \
+    "${SYSTEM_ROOT}/boot/loader/entries"; then
+    printf 'Target boot entries lost the root filesystem argument.\n' >&2
+    exit 1
+fi
+if ! grep -R -E -q -- '(^|[[:space:]])boot=(UUID=|LABEL=|/dev/)' \
+    "${SYSTEM_ROOT}/boot/loader/entries"; then
+    printf 'Target boot entries lost the boot filesystem argument.\n' >&2
     exit 1
 fi
 printf 'ANDROMEDA_INSTALLER_KARGS_OK mode=%s\n' "${install_mode}"
