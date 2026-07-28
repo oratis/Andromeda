@@ -82,6 +82,12 @@ if [[ "${install_mode}" == ci ]]; then
         "console=ttyS0,115200n8"
     )
 fi
+boot_mount="$(findmnt --raw --noheadings --target "${TARGET_ROOT}/boot" \
+    --output TARGET | xargs)"
+test -n "${boot_mount}"
+mount --options remount,rw "${boot_mount}"
+findmnt --raw --noheadings --mountpoint "${boot_mount}" --output OPTIONS \
+    | tr ',' '\n' | grep -qx rw
 OSTREE_SYSROOT="${TARGET_ROOT}" ostree admin instutil set-kargs \
     "${target_kargs[@]}"
 if grep -R -E -- '(^|[[:space:]])selinux=0([[:space:]]|$)' \
