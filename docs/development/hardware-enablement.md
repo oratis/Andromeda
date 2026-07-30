@@ -25,6 +25,8 @@ Andromeda 将目标定义为：
 - Fedora bootc 内核、`kernel-modules-extra` 和完整 `linux-firmware` 路径；
 - 显式固定 AMD/Intel/NVIDIA GPU、Intel/Qualcomm/MediaTek/Realtek/Broadcom/NXP
   无线及 Intel/Cirrus 音频固件子包；
+- 显式固定 AMD CPU microcode，并为旧 Intel `iwlegacy`、部分 b43 开放固件和
+  Qualcomm WWAN 保留可验证路径；
 - `pciutils`、`usbutils`、`tpm2-tools`、`fwupd`；
 - 首次启动生成隐私友好的 `hardware.json` 与 `hardware-diagnosis.json`；
 - 不采集序列号、MAC 地址、磁盘 UUID 或 Apple platform UUID。
@@ -60,9 +62,10 @@ Andromeda 将目标定义为：
 
 ### 音频、摄像头和移动设备
 
-- PipeWire、WirePlumber、ALSA UCM、SOF 与厂商音频固件；
+- PipeWire、WirePlumber、ALSA UCM、SOF/传统 ALSA 固件，以及 32 位游戏音频库；
 - BlueZ 与 Plasma Bluetooth；
-- libcamera、PipeWire libcamera 插件、GStreamer 和 V4L2 工具；
+- libcamera、PipeWire libcamera 插件、GStreamer/V4L2 PipeWire bridge 和
+  V4L2 工具；
 - libinput、libwacom、IIO 方向传感器、指纹守护程序；
 - Thunderbolt `bolt`、Plasma Thunderbolt、UPower、thermald。
 

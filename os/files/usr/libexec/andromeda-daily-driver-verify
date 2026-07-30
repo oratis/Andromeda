@@ -108,25 +108,46 @@ for package in \
     NetworkManager-wifi \
     NetworkManager-wwan \
     ModemManager \
+    alsa-firmware \
+    alsa-lib.i686 \
+    alsa-tools-firmware \
+    amd-ucode-firmware \
     ark \
+    b43-fwcutter \
+    b43-openfwwf \
     btrfs-progs \
     fcitx5 \
     fedora-flathub-remote \
     firefox \
     flatpak \
     fwupd \
+    iwlegacy-firmware \
     libreoffice-calc \
     libreoffice-impress \
     libreoffice-writer \
     mdadm \
     nvme-cli \
     okular \
+    pipewire-gstreamer \
+    pipewire-libs.i686 \
+    pipewire-v4l2 \
     plasma-discover \
+    qcom-wwan-firmware \
     smartmontools \
     switcheroo-control \
     system-config-printer; do
     rpm --quiet --query "${package}"
 done
+
+current_check=media-bridges
+for element in pipewiresrc pipewiresink; do
+    gst-inspect-1.0 "${element}" >/dev/null
+done
+test -e /usr/lib/libasound.so.2
+test -e /usr/lib/libpipewire-0.3.so.0
+modinfo b43 >/dev/null
+modinfo iwl3945 >/dev/null
+modinfo iwl4965 >/dev/null
 
 current_check=desktop-tools
 flatpak --system remotes --columns=name | grep -Eq '^(fedora|fedora-flathub|flathub)$'
