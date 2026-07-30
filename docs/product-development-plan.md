@@ -1,8 +1,8 @@
 # Andromeda OS 产品开发计划
 
-> 状态：Draft 0.2
+> 状态：Draft 0.3
 >
-> 日期：2026-07-28
+> 日期：2026-07-30
 >
 > 本计划建立在 `docs/research/` 专题研究与 [操作系统全景调研](./os-landscape-and-andromeda-architecture.md) 之上。
 
@@ -18,6 +18,19 @@ PipeWire、Flatpak、Discover、LibreOffice DOCX/XLSX/PPTX/PDF、Firefox、
 该检查点提前验证了 Stage 2 的发行与可靠性骨架，不代表 Stage 2 或消费版已经
 整体完成。真实 GPU、Wi‑Fi、蓝牙、摄像头、待机/休眠、固件、Steam/Proton、
 Windows Workspace、Microsoft Office 原版和 PC/Mac 机型认证仍按本计划推进。
+
+## 2026-07-30 硬件普适性检查点
+
+Hardware Enablement Phase 1 已实现：通用 x86-64 镜像加入长尾内核模块、显式
+GPU/无线/音频固件、Wi‑Fi/WWAN、摄像头、触控、存储文件系统、打印扫描和硬件
+诊断工具。`andromeda hardware diagnose` 会阻止关键设备无驱动的机器进入支持
+等级；HCM v2 要求 Supported 及以上固定 artifact、提供未过期测试证据和声明
+到期时间。
+
+虚拟硬件验收从单一 VirtIO profile 扩为 NVMe/SATA/IDE、e1000e/e1000、
+XHCI/UHCI、HDA/AC97 与不同 CPU topology 的 pairwise 矩阵。它只证明模拟设备
+驱动路径，实体 PC、Intel Mac、T2 Mac 与 Apple Silicon 仍必须进入独立实机队列。
+详细边界见[硬件普适性工程](./development/hardware-enablement.md)。
 
 ## 1. 产品定义
 

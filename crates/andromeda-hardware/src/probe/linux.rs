@@ -96,9 +96,13 @@ fn collect_devices(root: &str, bus: &str) -> Vec<DeviceInfo> {
                 address: entry.file_name().into_string().ok(),
                 vendor_id: read_trimmed(path.join(vendor_file(bus))),
                 product_id: read_trimmed(path.join(product_file(bus))),
+                subsystem_vendor_id: read_trimmed(path.join("subsystem_vendor")),
+                subsystem_product_id: read_trimmed(path.join("subsystem_device")),
+                revision: read_trimmed(path.join("revision")),
                 class: read_trimmed(path.join("class")),
                 driver: driver_name(&path),
                 name: read_trimmed(path.join("product")),
+                modalias: read_trimmed(path.join("modalias")),
             }
         })
         .collect()

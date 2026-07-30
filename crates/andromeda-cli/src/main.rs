@@ -6,7 +6,7 @@ use andromeda_core::{
     ActionId, ActionKind, ActionPlan, ActionSpec, Capability, CapabilityId, CapabilityResource,
     FileAccess, Intent, IsolationLevel, RecoverySemantics, RiskLevel, TaskId, TaskState,
 };
-use andromeda_hardware::{HcmManifest, evaluate_manifest, probe_host};
+use andromeda_hardware::{HcmManifest, diagnose_report, evaluate_manifest, probe_host};
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{CreateTaskRequest, FileTaskStore, StateTransitionRequest, TaskService};
 use chrono::Utc;
@@ -76,6 +76,8 @@ enum TaskCommand {
 enum HardwareCommand {
     /// Print a privacy-conscious hardware report.
     Probe,
+    /// Diagnose driver binding and support-relevant device readiness.
+    Diagnose,
     /// Probe this host and evaluate one HCM JSON document.
     Check { manifest: PathBuf },
 }
@@ -147,6 +149,7 @@ fn handle_hardware(command: HardwareCommand) -> Result<(), Box<dyn std::error::E
     let report = probe_host()?;
     match command {
         HardwareCommand::Probe => print_json(&report)?,
+        HardwareCommand::Diagnose => print_json(&diagnose_report(&report))?,
         HardwareCommand::Check { manifest } => {
             let manifest: HcmManifest = serde_json::from_reader(std::fs::File::open(manifest)?)?;
             print_json(&evaluate_manifest(&report, &manifest))?;

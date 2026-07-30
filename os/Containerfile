@@ -25,9 +25,14 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        kernel-modules-extra \
+        libva-intel-media-driver \
+        libva-utils \
         mesa-dri-drivers \
         mesa-vulkan-drivers \
+        switcheroo-control \
         vulkan-loader \
+        vulkan-tools \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -99,6 +104,8 @@ RUN dnf -y install \
 
 RUN dnf -y install \
         alsa-sof-firmware \
+        alsa-ucm \
+        alsa-utils \
         bluez \
         bluez-obexd \
         bluedevil \
@@ -107,12 +114,90 @@ RUN dnf -y install \
         cups-filters \
         fprintd \
         fwupd \
+        libcamera-gstreamer \
         libcamera-tools \
+        pipewire-plugin-libcamera \
+        plasma-print-manager \
+        plasma-thunderbolt \
         powerdevil \
         sane-backends \
+        sane-backends-drivers-scanners \
         system-config-printer \
         thermald \
         upower \
+        v4l-utils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        ModemManager \
+        NetworkManager-bluetooth \
+        NetworkManager-config-connectivity-fedora \
+        NetworkManager-ppp \
+        NetworkManager-wifi \
+        NetworkManager-wwan \
+        iw \
+        mobile-broadband-provider-info \
+        usb_modeswitch \
+        wireless-regdb \
+        wpa_supplicant \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        btrfs-progs \
+        dosfstools \
+        e2fsprogs \
+        exfatprogs \
+        f2fs-tools \
+        kde-partitionmanager \
+        lvm2 \
+        mdadm \
+        ntfs-3g \
+        nvme-cli \
+        smartmontools \
+        udisks2 \
+        udisks2-lvm2 \
+        xfsprogs \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        iio-sensor-proxy \
+        libinput-utils \
+        libwacom \
+        pciutils \
+        tpm2-tools \
+        usbutils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        amd-gpu-firmware \
+        atheros-firmware \
+        brcmfmac-firmware \
+        cirrus-audio-firmware \
+        intel-audio-firmware \
+        intel-gpu-firmware \
+        intel-vsc-firmware \
+        iwlwifi-dvm-firmware \
+        iwlwifi-mvm-firmware \
+        mt7xxx-firmware \
+        nvidia-gpu-firmware \
+        nxpwireless-firmware \
+        realtek-firmware \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        avahi \
+        cups-browsed \
+        cups-pk-helper \
+        ipp-usb \
+        nss-mdns \
+        sane-airscan \
+        simple-scan \
+        system-config-printer-udev \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -196,8 +281,11 @@ RUN mkdir -p /usr/lib/andromeda \
         andromeda-ci-verify.service \
         bluetooth.service \
         cups.service \
+        avahi-daemon.service \
+        avahi-daemon.socket \
         firewalld.service \
         fstrim.timer \
+        fwupd-refresh.timer \
         qemu-guest-agent.service \
         sddm.service \
         systemd-oomd.service \

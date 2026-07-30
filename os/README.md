@@ -50,6 +50,18 @@ conversion, a real Firefox Wayland launch, and persistent user data across updat
 rollback. Success is the serial marker `ANDROMEDA_E2E_OK`. GitHub Actions
 executes the same flow and uploads the ISO, checksum, and serial evidence.
 
+The boot also produces `hardware-diagnosis.json`. Missing boot-critical storage,
+network, graphics, or USB-controller drivers block the E2E run. After the full
+lifecycle succeeds, run the pairwise controller matrix:
+
+```bash
+sudo os/scripts/test-hardware-matrix.sh
+```
+
+It boots independent overlays with Q35/NVMe/e1000e/XHCI, Q35/SATA/e1000e,
+and i440fx/IDE/e1000/UHCI profiles. This validates emulated controller paths;
+physical hardware remains gated by exact-machine HCM evidence.
+
 On a disposable Google Compute Engine N2 host with nested KVM, run:
 
 ```bash

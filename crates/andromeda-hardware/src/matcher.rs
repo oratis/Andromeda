@@ -1,6 +1,8 @@
+use chrono::Utc;
+
 use crate::{
-    CapabilityRequirement, CompatibilityEvaluation, HardwareReport, HardwareSelector, HcmManifest,
-    SupportTier,
+    CapabilityRequirement, CompatibilityEvaluation, EvidenceResult, HardwareReport,
+    HardwareSelector, HcmManifest, SupportTier,
 };
 
 #[must_use]
@@ -16,6 +18,19 @@ pub fn evaluate_manifest(
     let mut evidence = Vec::new();
     let mut missing = Vec::new();
 
+    if manifest.schema_version == HcmManifest::CURRENT_SCHEMA_VERSION {
+        evidence.push(format!(
+            "HCM schema version {} is current",
+            manifest.schema_version
+        ));
+    } else {
+        missing.push(format!(
+            "HCM schema version {} is unsupported; expected {}",
+            manifest.schema_version,
+            HcmManifest::CURRENT_SCHEMA_VERSION
+        ));
+    }
+
     if selector_matched {
         evidence.push("hardware identity matched a manifest selector".into());
     } else {
@@ -25,6 +40,7 @@ pub fn evaluate_manifest(
     for requirement in &manifest.requirements {
         evaluate_requirement(report, requirement, &mut evidence, &mut missing);
     }
+    evaluate_manifest_evidence(manifest, &mut evidence, &mut missing);
 
     let requirements_met = missing.is_empty();
     CompatibilityEvaluation {
@@ -79,32 +95,35 @@ fn evaluate_requirement(
                 missing,
             );
         }
-        CapabilityRequirement::Device {
-            bus,
-            vendor_id,
-            product_id,
-            driver_required,
-        } => evaluate_device(
-            report,
-            bus,
-            vendor_id.as_deref(),
-            product_id.as_deref(),
-            *driver_required,
-            evidence,
-            missing,
-        ),
+        requirement @ CapabilityRequirement::Device { .. } => {
+            evaluate_device(report, requirement, evidence, missing);
+        }
     }
 }
 
 fn evaluate_device(
     report: &HardwareReport,
-    bus: &str,
-    vendor_id: Option<&str>,
-    product_id: Option<&str>,
-    driver_required: bool,
+    requirement: &CapabilityRequirement,
     evidence: &mut Vec<String>,
     missing: &mut Vec<String>,
 ) {
+    let CapabilityRequirement::Device {
+        bus,
+        vendor_id,
+        product_id,
+        subsystem_vendor_id,
+        subsystem_product_id,
+        revision,
+        driver_required,
+    } = requirement
+    else {
+        return;
+    };
+    let vendor_id = vendor_id.as_deref();
+    let product_id = product_id.as_deref();
+    let subsystem_vendor_id = subsystem_vendor_id.as_deref();
+    let subsystem_product_id = subsystem_product_id.as_deref();
+    let revision = revision.as_deref();
     let matched = report.devices.iter().find(|device| {
         device.bus.eq_ignore_ascii_case(bus)
             && vendor_id.is_none_or(|expected| {
@@ -119,9 +138,27 @@ fn evaluate_device(
                     .as_ref()
                     .is_some_and(|actual| id_matches(actual, expected))
             })
+            && subsystem_vendor_id.is_none_or(|expected| {
+                device
+                    .subsystem_vendor_id
+                    .as_ref()
+                    .is_some_and(|actual| id_matches(actual, expected))
+            })
+            && subsystem_product_id.is_none_or(|expected| {
+                device
+                    .subsystem_product_id
+                    .as_ref()
+                    .is_some_and(|actual| id_matches(actual, expected))
+            })
+            && revision.is_none_or(|expected| {
+                device
+                    .revision
+                    .as_ref()
+                    .is_some_and(|actual| id_matches(actual, expected))
+            })
     });
     match matched {
-        Some(device) if !driver_required || device.driver.is_some() => evidence.push(format!(
+        Some(device) if !*driver_required || device.driver.is_some() => evidence.push(format!(
             "{} device {}:{} matched",
             bus,
             vendor_id.unwrap_or("*"),
@@ -136,6 +173,58 @@ fn evaluate_device(
             vendor_id.unwrap_or("*"),
             product_id.unwrap_or("*")
         )),
+    }
+}
+
+fn evaluate_manifest_evidence(
+    manifest: &HcmManifest,
+    evidence: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    let now = Utc::now();
+    if manifest
+        .expires_at
+        .is_some_and(|expiration| expiration <= now)
+    {
+        missing.push("HCM support declaration has expired".into());
+    }
+
+    for item in &manifest.evidence {
+        if item.result == EvidenceResult::Failed {
+            missing.push(format!(
+                "capability evidence '{}' records a failure",
+                item.capability
+            ));
+        } else if item.expires_at <= now {
+            missing.push(format!(
+                "capability evidence '{}' has expired",
+                item.capability
+            ));
+        } else {
+            evidence.push(format!(
+                "capability evidence '{}' is passed and current",
+                item.capability
+            ));
+        }
+    }
+
+    if manifest.tier >= SupportTier::Supported {
+        if manifest.artifacts.is_empty() {
+            missing
+                .push("Supported or higher HCM requires pinned driver/firmware artifacts".into());
+        }
+        if manifest.evidence.is_empty() {
+            missing.push("Supported or higher HCM requires current capability evidence".into());
+        }
+        match manifest.expires_at {
+            Some(expiration) if expiration > now => {
+                evidence.push(format!(
+                    "HCM support declaration is current until {expiration}"
+                ));
+            }
+            Some(_) => {}
+            None => missing.push("Supported or higher HCM requires an expiration date".into()),
+        }
     }
 }
 
@@ -257,10 +346,11 @@ mod tests {
 
     fn manifest() -> HcmManifest {
         HcmManifest {
-            schema_version: 1,
+            schema_version: HcmManifest::CURRENT_SCHEMA_VERSION,
             id: "reference-pc".into(),
             name: "Reference PC".into(),
             tier: SupportTier::Reference,
+            boot_provider: crate::BootProvider::PcUefiShim,
             selectors: vec![HardwareSelector {
                 os_family: Some(OsFamily::Linux),
                 architectures: vec!["x86_64".into()],
@@ -279,6 +369,22 @@ mod tests {
                 },
             ],
             kernel_channels: vec!["stable".into()],
+            artifacts: vec![crate::ArtifactPin {
+                kind: crate::ArtifactKind::Kernel,
+                name: "kernel".into(),
+                version: "test".into(),
+                sha256: "0".repeat(64),
+                source: "test".into(),
+                signing_key_id: Some("test-key".into()),
+            }],
+            evidence: vec![crate::CapabilityEvidence {
+                capability: "boot".into(),
+                result: crate::EvidenceResult::Passed,
+                evidence_uri: "https://example.invalid/evidence".into(),
+                collected_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::days(1),
+            }],
+            expires_at: Some(Utc::now() + chrono::Duration::days(1)),
             notes: Vec::new(),
         }
     }
@@ -319,5 +425,22 @@ mod tests {
         .expect("example manifest");
         assert_eq!(manifest.schema_version, HcmManifest::CURRENT_SCHEMA_VERSION);
         assert!(!manifest.selectors.is_empty());
+    }
+
+    #[test]
+    fn supported_manifest_without_pins_or_evidence_is_blocked() {
+        let mut manifest = manifest();
+        manifest.tier = SupportTier::Supported;
+        manifest.artifacts.clear();
+        manifest.evidence.clear();
+        manifest.expires_at = None;
+        let evaluation = evaluate_manifest(&report(), &manifest);
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("pinned"))
+        );
     }
 }

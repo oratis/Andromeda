@@ -55,6 +55,9 @@ jobs:
       - name: Install to a blank disk and verify lifecycle
         run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
 
+      - name: Verify pairwise virtual hardware matrix
+        run: sudo os/scripts/test-hardware-matrix.sh "$GITHUB_WORKSPACE/output"
+
       - name: Upload serial evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -68,6 +71,7 @@ jobs:
             output/install-post.log
             output/ovmf-vars.txt
             output/diagnostics/**
+            output/hardware-matrix/**
           retention-days: 14
           include-hidden-files: true
           if-no-files-found: warn

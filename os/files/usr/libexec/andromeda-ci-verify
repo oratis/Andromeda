@@ -15,6 +15,10 @@ emit() {
 require_runtime_health() {
     test -d /sys/firmware/efi
     test -s /var/lib/andromeda/hardware.json
+    test -s /var/lib/andromeda/hardware-diagnosis.json
+    jq --exit-status \
+        '.schema_version == 1 and .boot_critical_missing == 0 and .readiness != "blocked"' \
+        /var/lib/andromeda/hardware-diagnosis.json >/dev/null
     test "$(getenforce)" = Enforcing
     systemctl is-active --quiet andromeda-taskd.service
     systemctl is-active --quiet sddm.service

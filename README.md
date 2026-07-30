@@ -21,6 +21,8 @@ Andromeda 是一个面向 PC 与 Mac 硬件的 AI 原生桌面操作系统项目
 - 有模型不可绕过的任务、风险、能力、隔离和状态机契约；
 - 有持久化任务服务、HTTP API 与开发者 CLI；
 - 有 Linux、macOS、Windows 硬件探测和 Hardware Compatibility Manifest（HCM）匹配；
+- 有启动时驱动诊断、HCM v2 artifact/evidence 门禁，以及 NVMe/SATA/IDE、
+  e1000e/e1000、XHCI/UHCI、HDA/AC97 的虚拟硬件矩阵；
 - 有跨平台 CI、产品计划和专题研究。
 
 这个里程碑证明 Andromeda 能构建、安装、进入真实桌面、运行一组日用工作流和 AI
@@ -88,6 +90,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ```bash
 cargo run --bin andromeda -- hardware probe
+cargo run --bin andromeda -- hardware diagnose
 ```
 
 对示例 HCM 做本机匹配：
@@ -136,6 +139,7 @@ curl http://127.0.0.1:7777/healthz
 | 类别 | 当前产品状态 |
 |---|---|
 | QEMU/KVM x86-64 + OVMF | Daily Driver Candidate；安装/桌面/更新/回滚自动验收 |
+| QEMU NVMe/SATA/IDE + e1000e/e1000 | Phase 1 pairwise driver matrix |
 | 选定 x86-64 PC | 下一阶段 Developer Preview 候选 |
 | 未认证通用 PC | Community，探测不等于支持 |
 | 非 T2 Intel Mac | 逐机型 Pilot |
@@ -143,7 +147,9 @@ curl http://127.0.0.1:7777/healthz
 | M1/M2 Mac | 独立 Asahi Preview 候选 |
 | M3 及更新 Apple silicon（含 M5） | Watch；必须等待对应 Asahi 机型页与安装器，不作交付承诺 |
 
-详细规则见[硬件、驱动与迁移研究](./docs/research/hardware-drivers-and-migration.md)和[HCM 开发说明](./docs/development/hardware-compatibility.md)。
+详细规则见[硬件、驱动与迁移研究](./docs/research/hardware-drivers-and-migration.md)、
+[硬件普适性工程](./docs/development/hardware-enablement.md)和
+[HCM 开发说明](./docs/development/hardware-compatibility.md)。
 
 ## 路线
 
@@ -164,6 +170,7 @@ curl http://127.0.0.1:7777/healthz
 - [文档总览](./docs/README.md)
 - [Developer Preview 安装与验收](./docs/development/installable-preview.md)
 - [Daily Driver Candidate 与 GCP E2E](./docs/development/daily-driver-e2e.md)
+- [硬件普适性工程与自动矩阵](./docs/development/hardware-enablement.md)
 - [PC/macOS 操作系统全景](./docs/os-landscape-and-andromeda-architecture.md)
 - [开源组件采用矩阵](./docs/research/open-source-adoption-matrix.md)
 - [Windows 游戏、Office 与文件格式](./docs/research/windows-gaming-office-formats.md)

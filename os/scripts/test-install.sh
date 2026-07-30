@@ -104,8 +104,12 @@ printf '%s\n' "${install_status}" \
     >"${DIAGNOSTICS_DIR}/host/install-exit-status.txt"
 qemu-img info "${DISK_PATH}" \
     >"${DIAGNOSTICS_DIR}/host/qemu-img-info.txt" 2>&1 || true
+image_check_status=0
 qemu-img check "${DISK_PATH}" \
-    >"${DIAGNOSTICS_DIR}/host/qemu-img-check.txt" 2>&1 || true
+    >"${DIAGNOSTICS_DIR}/host/qemu-img-check.txt" 2>&1 \
+    || image_check_status="$?"
+printf '%s\n' "${image_check_status}" \
+    >"${DIAGNOSTICS_DIR}/host/qemu-img-check-status.txt"
 cp -f "${OVMF_VARS}" \
     "${DIAGNOSTICS_DIR}/nvram/OVMF_VARS.after-install.fd"
 
@@ -204,10 +208,18 @@ strings --encoding=l "${OVMF_VARS}" \
     >"${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt"
 grep Andromeda "${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt" \
     | tee "${OUTPUT_DIR}/ovmf-vars.txt"
+grep -F '\EFI\fedora\shimx64.efi' \
+    "${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt" \
+    | tee -a "${OUTPUT_DIR}/ovmf-vars.txt"
 
 if [[ "${install_status}" -ne 0 ]]; then
     printf 'Installer exited with status %s.\n' "${install_status}" >&2
     exit "${install_status}"
+fi
+if [[ "${image_check_status}" -ne 0 ]]; then
+    printf 'Installed disk image failed qemu-img check with status %s.\n' \
+        "${image_check_status}" >&2
+    exit "${image_check_status}"
 fi
 
 python3 -m http.server 8080 \
@@ -224,15 +236,23 @@ qemu_pid="$!"
 
 deadline="$((SECONDS + 2700))"
 while (( SECONDS < deadline )); do
+    if grep -qE 'ANDROMEDA_.*_FAILED' "${BOOT_LOG}" 2>/dev/null; then
+        printf 'Installed system emitted a failure marker.\n' >&2
+        grep -E 'ANDROMEDA_.*_(FAILED|OK)' "${BOOT_LOG}" >&2
+        exit 1
+    fi
     if grep -q ANDROMEDA_E2E_OK "${BOOT_LOG}" 2>/dev/null; then
         grep -E \
             'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
             "${BOOT_LOG}"
         python3 - "${BOOT_LOG}" <<'PY'
 import pathlib
+import re
 import sys
 
-log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+log = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\0", b"").decode(errors="replace")
+log = log.replace("\r", "")
+log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
 markers = [
     "ANDROMEDA_SELINUX_LABELS_OK",
     "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",
@@ -245,18 +265,17 @@ markers = [
     "ANDROMEDA_ROLLBACK_BOOT_OK revision=1",
     "ANDROMEDA_E2E_OK",
 ]
+failures = re.findall(r"ANDROMEDA_[A-Z0-9_]*FAILED[^\n]*", log)
+if failures:
+    raise SystemExit(f"Failure marker present: {failures}")
+counts = [log.count(marker) for marker in markers]
+if counts != [1] * len(markers):
+    raise SystemExit(f"Daily-driver markers must occur exactly once: {counts}")
 positions = [log.find(marker) for marker in markers]
-if any(position < 0 for position in positions) or positions != sorted(positions):
+if positions != sorted(positions):
     raise SystemExit(f"Daily-driver marker sequence invalid: {positions}")
 PY
         exit 0
-    fi
-    if grep -q ANDROMEDA_E2E_FAILED "${BOOT_LOG}" 2>/dev/null; then
-        printf 'Installed system emitted a lifecycle failure marker.\n' >&2
-        grep -E \
-            'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
-            "${BOOT_LOG}" >&2
-        exit 1
     fi
     if grep -q 'Shell>' "${BOOT_LOG}" 2>/dev/null; then
         printf 'UEFI firmware could not find an installed bootloader.\n' >&2
