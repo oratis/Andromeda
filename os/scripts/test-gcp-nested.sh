@@ -19,6 +19,9 @@ on_exit() {
     if [[ -d "${OUTPUT_DIR}/diagnostics" ]]; then
         cp -a "${OUTPUT_DIR}/diagnostics" "${EVIDENCE_DIR}/" 2>/dev/null || true
     fi
+    if [[ -d "${OUTPUT_DIR}/hardware-matrix" ]]; then
+        cp -a "${OUTPUT_DIR}/hardware-matrix" "${EVIDENCE_DIR}/" 2>/dev/null || true
+    fi
     for artifact in \
         boot-serial.log \
         esp-tree.txt \
@@ -64,9 +67,16 @@ test "$(df --output=avail --block-size=1 "${OUTPUT_DIR}" | tail -1 | xargs)" \
     timeout 60m os/scripts/test-install.sh "${OUTPUT_DIR}"
 ) 2>&1 | tee "${EVIDENCE_DIR}/test.log"
 
+(
+    cd "${SOURCE_DIR}"
+    timeout 30m os/scripts/test-hardware-matrix.sh "${OUTPUT_DIR}"
+) 2>&1 | tee "${EVIDENCE_DIR}/hardware-matrix.log"
+
 sha256sum "${OUTPUT_DIR}"/*.iso > "${EVIDENCE_DIR}/iso.sha256"
 LC_ALL=C grep -aoE \
     'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)[[:print:]]*' \
     "${OUTPUT_DIR}/boot-serial.log" \
     > "${EVIDENCE_DIR}/lifecycle-markers.txt"
 grep -qx 'ANDROMEDA_E2E_OK' "${EVIDENCE_DIR}/lifecycle-markers.txt"
+grep -qx 'ANDROMEDA_HARDWARE_MATRIX_OK scenarios=3' \
+    "${EVIDENCE_DIR}/hardware-matrix.log"
