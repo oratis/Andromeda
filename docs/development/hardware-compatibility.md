@@ -55,4 +55,6 @@ Schema 位于 [`schemas/hardware-compatibility-manifest.schema.json`](../../sche
 5. 只有 CI 达到 SLO 后才允许 tier promotion。
 
 通用镜像覆盖、虚拟硬件矩阵和实体机认证清单见
-[硬件普适性工程](./hardware-enablement.md)。
+[硬件普适性工程](./hardware-enablement.md)。从虚拟验证晋级到精确机型
+Supported/Certified 的节点、测试、证据和阻断协议见
+[实体硬件认证测试计划](./hardware-certification-test-plan.md)。

@@ -927,7 +927,7 @@ VTSR 必须绑定版本化任务集、环境、成功断言和人工裁决规则
 7. `windows-workspace-spec.md`
 8. `format-safety-spec.md`
 9. `telemetry-and-privacy-policy.md`
-10. `hardware-certification-test-plan.md`
+10. [`hardware-certification-test-plan.md`](./development/hardware-certification-test-plan.md)
 11. `backup-restore-and-disaster-recovery-spec.md`
 12. `identity-and-session-spec.md`
 13. `storage-encryption-and-key-recovery-spec.md`

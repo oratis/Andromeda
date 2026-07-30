@@ -24,6 +24,7 @@ Andromeda 的目标是探索一个以 AI agent 为核心、覆盖尽可能广泛
 - [任务控制面](./development/task-control-plane.md)
 - [Hardware Compatibility Manifest](./development/hardware-compatibility.md)
 - [硬件普适性工程与自动矩阵](./development/hardware-enablement.md)
+- [实体硬件认证测试计划](./development/hardware-certification-test-plan.md)
 
 ## 文档约定
 
