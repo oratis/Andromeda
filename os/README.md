@@ -33,7 +33,7 @@ Install QEMU and OVMF, then run:
 sudo os/scripts/test-install.sh
 ```
 
-The test boots the ISO with UEFI, automatically installs onto a new 32 GiB
+The test boots the ISO with UEFI, automatically installs onto a new 64 GiB
 VirtIO disk, removes the ISO, and starts the installed disk. The installed OS
 must then:
 

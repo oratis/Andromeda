@@ -63,7 +63,7 @@ mkdir -p \
     "${DIAGNOSTICS_DIR}/nvram" \
     "${DIAGNOSTICS_DIR}/root"
 rm -f "${DISK_PATH}" "${INSTALL_LOG}" "${BOOT_LOG}" "${OVMF_VARS}"
-qemu-img create -f qcow2 "${DISK_PATH}" 32G
+qemu-img create -f qcow2 "${DISK_PATH}" 64G
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS}"
 
 accel=tcg

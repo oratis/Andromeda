@@ -26,7 +26,7 @@ Workspace、Microsoft Office 原版或某款游戏已经通过产品认证。
 
 ## 自动验收场景
 
-`os/scripts/test-install.sh` 在新的 32 GiB VirtIO 磁盘上执行真实 UEFI 生命周期：
+`os/scripts/test-install.sh` 在新的 64 GiB VirtIO 磁盘上执行真实 UEFI 生命周期：
 
 1. 从 ISO 离线安装，移除 ISO 后仅从硬盘启动；
 2. CI 专用账户自动进入 Plasma Wayland 会话；

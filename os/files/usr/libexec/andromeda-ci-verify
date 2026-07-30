@@ -55,6 +55,7 @@ case "${state}:${revision}" in
         skopeo copy --retry-times 5 \
             "oci-archive:${UPDATE_ARCHIVE}" \
             containers-storage:localhost/andromeda:v2
+        rm -f "${UPDATE_ARCHIVE}"
         bootc switch --transport containers-storage localhost/andromeda:v2
         printf '%s\n' updating > "${STATE_FILE}"
         emit "ANDROMEDA_UPDATE_STAGED_OK revision=2"

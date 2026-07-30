@@ -25,7 +25,7 @@ Compatibility Manifest 和真机测试的 PC 也只能视为 Community/Experimen
 ## 安装前要求
 
 - 一台可从 USB 启动的 x86-64 UEFI 测试机，或支持 OVMF 的虚拟机；
-- 至少 32 GiB 空白磁盘和 8 GiB 内存；
+- 至少 64 GiB 空白磁盘和 8 GiB 内存；
 - 已备份所有数据；
 - 暂时关闭 Secure Boot。当前预览尚未完成自有密钥、签名轮换和真实固件矩阵认证。
 
@@ -68,7 +68,7 @@ sudo os/scripts/test-install.sh
 
 脚本执行以下真实状态转换：
 
-1. 创建新的 32 GiB qcow2 磁盘；
+1. 创建新的 64 GiB qcow2 磁盘；
 2. 以 OVMF UEFI 启动 ISO；
 3. 通过 CI 专用 Kickstart 清空并分区该磁盘；
 4. 从 ISO 内嵌 OCI payload 安装系统，注册 Andromeda UEFI NVRAM 启动项并写入
