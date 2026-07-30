@@ -54,7 +54,9 @@ jobs:
         run: shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
 
       - name: Build payloads and installer ISO
-        run: sudo os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
+        run: |
+          sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME \
+            os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
 
       - name: Install to a blank disk and verify lifecycle
         run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
