@@ -57,6 +57,8 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        lcms2 \
+        libssh \
         kwin \
     && dnf clean all \
     && rm -rf /var/cache/dnf
