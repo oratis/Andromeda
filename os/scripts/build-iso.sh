@@ -11,6 +11,9 @@ if [[ "${EUID}" -eq 0 ]]; then
 else
     engine=(sudo podman)
 fi
+if [[ -n "${PODMAN_RUNTIME:-}" ]]; then
+    engine+=(--runtime "${PODMAN_RUNTIME}")
+fi
 
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
