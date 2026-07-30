@@ -45,7 +45,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes binutils ovmf podman qemu-system-x86 qemu-utils runc shellcheck
           sudo apt-get clean
-          printf 'PODMAN_RUNTIME=%s\n' "$(command -v runc)" >> "$GITHUB_ENV"
+          runtime="$(command -v runc)"
+          printf 'PODMAN_RUNTIME=%s\nBUILDAH_RUNTIME=%s\n' \
+            "${runtime}" "${runtime}" >> "$GITHUB_ENV"
           runc --version
 
       - name: Validate scripts
