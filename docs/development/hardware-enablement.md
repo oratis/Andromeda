@@ -18,6 +18,11 @@ Andromeda 将目标定义为：
 探测到设备不等于支持；安装了一个包也不等于设备的 GPU、Wi‑Fi、睡眠或摄像头
 功能已经通过验收。
 
+平台产物也按同一原则隔离。当前 PC ISO 固定声明 `pc_x86_64`、
+`pc_uefi_shim` 和 `pc-mainline`；安装器会拒绝 Apple 硬件。后续非 T2 Intel Mac、
+T2 和 Apple Silicon 各自使用独立 Boot Provider、HEP、安装安全策略和产物
+manifest，不通过运行时条件分支伪装成同一个通用 ISO。
+
 ## 已落地的通用 x86-64 覆盖
 
 ### 内核、固件与诊断

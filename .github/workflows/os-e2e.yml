@@ -47,7 +47,9 @@ jobs:
           sudo apt-get clean
 
       - name: Validate scripts
-        run: shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+        run: |
+          shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+          os/scripts/test-installer-platform-guard.sh
 
       - name: Build payloads and installer ISO
         run: sudo os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
@@ -84,6 +86,7 @@ jobs:
           path: |
             output/*.iso
             output/*.sha256
+            output/*.manifest.json
             output/andromeda-v1-history.json
           compression-level: 0
           retention-days: 3

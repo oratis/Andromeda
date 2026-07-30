@@ -44,6 +44,12 @@ must then:
 5. stage and boot revision 2 through bootc;
 6. stage a rollback and boot revision 1 again.
 
+The build also emits
+`Andromeda-Developer-Preview-x86_64.manifest.json`, binding the ISO checksum,
+payload digest, `pc_x86_64` platform variant, boot provider, and hardware
+enablement profile. Installer preflight rejects Apple hardware and architecture
+or payload-identity mismatches; Mac variants require separate guarded images.
+
 In addition to the base lifecycle, the installed CI system enters a Plasma
 Wayland session and exercises PipeWire, Flatpak, LibreOffice DOCX/XLSX/PPTX/PDF
 conversion, a real Firefox Wayland launch, and persistent user data across update and

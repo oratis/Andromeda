@@ -21,6 +21,10 @@
 
 Intel Mac、T2 Mac 和 Apple silicon 不在这个镜像的已验收范围。未经 Hardware
 Compatibility Manifest 和真机测试的 PC 也只能视为 Community/Experimental。
+当前产物具有不可变的 `pc_x86_64` 平台身份。安装预检会同时验证 CPU 架构、Boot
+Provider、镜像内的 `/usr/lib/andromeda/platform.json` 与内嵌 payload OCI label；
+检测到任何 Apple 硬件时默认拒绝继续。Mac 必须使用保留 macOS/Recovery 的专用
+产物和安装流程，不能复用 PC 清盘路径。
 
 ## 安装前要求
 
@@ -39,7 +43,8 @@ generic bootc ISO 的临时 SquashFS/OverlayFS 安装环境以 `selinux=0` 启�
 `SELinux enforcing`，否则失败。
 
 > **危险：** `Automated destructive install (CI only)` 只供 QEMU 验收。它会清空
-> 第一块安装磁盘，不得在含有用户数据的机器上选择。
+> 第一块安装磁盘，不得在含有用户数据的机器上选择。该入口在预检阶段要求
+> `systemd-detect-virt --vm` 确认虚拟机；真机即使误选也会在分区前停止。
 
 ## 构建 ISO
 
@@ -53,10 +58,13 @@ sudo os/scripts/build-iso.sh
 
 - `output/Andromeda-Developer-Preview-x86_64.iso`
 - `output/Andromeda-Developer-Preview-x86_64.iso.sha256`
+- `output/Andromeda-Developer-Preview-x86_64.manifest.json`
 - `output/andromeda-v2.tar`（仅用于生命周期测试）
 
 ISO 使用 `image-builder` 的 `bootc-generic-iso` 类型，把
 `localhost/andromeda:v1` payload 嵌入安装环境，因此系统安装本身不依赖网络。
+产物 manifest 把 ISO SHA-256、payload digest、架构、Boot Provider 与 HEP ID
+绑定在一起，为后续签名、发布和 HCM 证据关联提供机器可读输入。
 
 ## 自动化空盘验收
 

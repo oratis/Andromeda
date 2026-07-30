@@ -19,7 +19,7 @@ bootc --source-imgref=containers-storage:localhost/andromeda:v1 --target-imgref=
 shutdown
 
 %pre --erroronfail --log=/tmp/andromeda-installer-preflight.log
-/usr/libexec/andromeda-installer-preflight
+/usr/libexec/andromeda-installer-preflight ci
 %end
 
 %onerror --log=/tmp/andromeda-installer-onerror.log
