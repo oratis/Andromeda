@@ -1,6 +1,6 @@
 # Andromeda 硬件普适性工程
 
-> 状态：Hardware Enablement Phase 1  
+> 状态：Hardware Enablement Phase 1
 > 更新：2026-07-30
 
 ## 目标与不可伪造的边界
@@ -189,4 +189,3 @@ Apple boot policy → APFS stub → m1n1 → U-Boot
 
 所有证据都必须绑定镜像 digest、内核、驱动、固件哈希和有效期。证据过期或更新
 改变其中任一关键组件时，认证自动回到 Needs Review。
-
