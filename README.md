@@ -39,8 +39,10 @@ Supported 或 Certified。
 2026-07-28 的 GCP 嵌套 KVM 日用版运行又在全新 32 GiB 虚拟磁盘上完成离线安装、
 Plasma Wayland 首启、revision 2 更新和 revision 1 回滚。受测 3.8 GiB ISO 的
 SHA-256 为
-`6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108`；
-消费能力、完整标记和证据边界见
+`6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108`。
+注意：该 PASS 记录早于证据提取器修复，修复只在原始串口日志上离线复验过；
+用最终版脚本一次性跑绿的完整 GCP 复跑仍在待办中。消费能力、完整标记和证据
+边界见
 [Daily Driver Candidate E2E](./docs/development/daily-driver-e2e.md#已验证运行)。
 
 ## 第一性目标
@@ -82,28 +84,28 @@ flowchart TD
 需要 Rust 1.85 或更新版本。
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 探测当前电脑（报告不收集序列号）：
 
 ```bash
-cargo run --bin andromeda -- hardware probe
-cargo run --bin andromeda -- hardware diagnose
+cargo run --locked --bin andromeda -- hardware probe
+cargo run --locked --bin andromeda -- hardware diagnose
 ```
 
 对示例 HCM 做本机匹配：
 
 ```bash
-cargo run --bin andromeda -- hardware check \
+cargo run --locked --bin andromeda -- hardware check \
   examples/hcm/developer-x86_64-pc.json
 ```
 
 创建一个显式授予只读目录范围的检查任务：
 
 ```bash
-cargo run --bin andromeda -- \
+cargo run --locked --bin andromeda -- \
   --state-dir .andromeda/state \
   task create-inspection . --requested-by local-user
 ```
@@ -111,7 +113,7 @@ cargo run --bin andromeda -- \
 启动本地任务服务：
 
 ```bash
-cargo run --bin andromeda-taskd
+cargo run --locked --bin andromeda-taskd
 curl http://127.0.0.1:7777/healthz
 ```
 

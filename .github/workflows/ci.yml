@@ -45,5 +45,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85.0
       - uses: Swatinem/rust-cache@v2
+      # The quality job already runs the full test suite on ubuntu; skip the
+      # duplicate run and keep only the platform-specific probe there.
       - run: cargo test --workspace --locked
+        if: matrix.os != 'ubuntu-latest'
       - run: cargo run --locked --quiet --bin andromeda -- hardware probe
