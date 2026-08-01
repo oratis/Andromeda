@@ -82,6 +82,9 @@ common_qemu=(
     -no-user-config
     -device virtio-vga
     -device virtio-rng-pci
+    -audiodev "driver=none,id=audio0"
+    -device ich9-intel-hda
+    -device "hda-duplex,audiodev=audio0"
     -device "virtio-net-pci,netdev=net0"
     -netdev "user,id=net0"
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
@@ -116,7 +119,23 @@ done
 test -n "${nbd_device}"
 
 qemu-nbd --read-only --connect="${nbd_device}" "${DISK_PATH}"
+blockdev --rereadpt "${nbd_device}"
+partprobe "${nbd_device}"
+udevadm trigger --settle "${nbd_device}"
 udevadm settle
+
+partition_probe_deadline="$((SECONDS + 30))"
+while (( SECONDS < partition_probe_deadline )); do
+    blkid "${nbd_device}"* >/dev/null 2>&1 || true
+    if lsblk -prno NAME,PARTTYPE "${nbd_device}" \
+        | grep -qi 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' \
+        && lsblk -prno LABEL "${nbd_device}" \
+        | grep -qx 'andromeda-root'; then
+        break
+    fi
+    sleep 1
+done
+
 lsblk --paths --output \
     NAME,SIZE,TYPE,FSTYPE,LABEL,PARTLABEL,PARTTYPE,UUID "${nbd_device}" \
     | tee "${DIAGNOSTICS_DIR}/host/lsblk.txt"
@@ -206,12 +225,37 @@ qemu_pid="$!"
 deadline="$((SECONDS + 2700))"
 while (( SECONDS < deadline )); do
     if grep -q ANDROMEDA_E2E_OK "${BOOT_LOG}" 2>/dev/null; then
-        grep -E 'ANDROMEDA_(FIRST_BOOT|UPDATE|ROLLBACK|E2E)' "${BOOT_LOG}"
+        grep -E \
+            'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
+            "${BOOT_LOG}"
+        python3 - "${BOOT_LOG}" <<'PY'
+import pathlib
+import sys
+
+log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+markers = [
+    "ANDROMEDA_SELINUX_LABELS_OK",
+    "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",
+    "ANDROMEDA_FIRST_BOOT_OK revision=1",
+    "ANDROMEDA_UPDATE_STAGED_OK revision=2",
+    "ANDROMEDA_DAILY_DRIVER_OK phase=updating revision=2",
+    "ANDROMEDA_UPDATE_BOOT_OK revision=2",
+    "ANDROMEDA_ROLLBACK_STAGED_OK revision=1",
+    "ANDROMEDA_DAILY_DRIVER_OK phase=rolling-back revision=1",
+    "ANDROMEDA_ROLLBACK_BOOT_OK revision=1",
+    "ANDROMEDA_E2E_OK",
+]
+positions = [log.find(marker) for marker in markers]
+if any(position < 0 for position in positions) or positions != sorted(positions):
+    raise SystemExit(f"Daily-driver marker sequence invalid: {positions}")
+PY
         exit 0
     fi
     if grep -q ANDROMEDA_E2E_FAILED "${BOOT_LOG}" 2>/dev/null; then
         printf 'Installed system emitted a lifecycle failure marker.\n' >&2
-        grep -E 'ANDROMEDA_(FIRST_BOOT|UPDATE|ROLLBACK|E2E)' "${BOOT_LOG}" >&2
+        grep -E \
+            'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
+            "${BOOT_LOG}" >&2
         exit 1
     fi
     if grep -q 'Shell>' "${BOOT_LOG}" 2>/dev/null; then

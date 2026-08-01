@@ -61,6 +61,109 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        ark \
+        ffmpegthumbs \
+        gwenview \
+        kcalc \
+        kate \
+        kdegraphics-thumbnailers \
+        kinfocenter \
+        kio-extras \
+        okular \
+        plasma-pa \
+        plasma-systemmonitor \
+        spectacle \
+        xorg-x11-server-Xwayland \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        flatpak \
+        fedora-flathub-remote \
+        plasma-discover \
+        plasma-discover-flatpak \
+        qt6-qtwayland \
+        xdg-desktop-portal \
+        xdg-desktop-portal-gtk \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        pipewire \
+        pipewire-alsa \
+        pipewire-pulseaudio \
+        pipewire-utils \
+        wireplumber \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        alsa-sof-firmware \
+        bluez \
+        bluez-obexd \
+        bluedevil \
+        bolt \
+        cups \
+        cups-filters \
+        fprintd \
+        fwupd \
+        libcamera-tools \
+        powerdevil \
+        sane-backends \
+        system-config-printer \
+        thermald \
+        upower \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        libreoffice-calc \
+        libreoffice-draw \
+        libreoffice-impress \
+        libreoffice-writer \
+        poppler-utils \
+        unzip \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        7zip \
+        fcitx5 \
+        fcitx5-autostart \
+        fcitx5-chinese-addons \
+        fcitx5-gtk \
+        fcitx5-qt \
+        ffmpeg-free \
+        google-noto-color-emoji-fonts \
+        gstreamer1-plugins-bad-free \
+        gstreamer1-plugins-base \
+        gstreamer1-plugins-good \
+        gstreamer1-plugins-ugly-free \
+        hunspell \
+        hunspell-en \
+        liberation-fonts-all \
+        unar \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        gamemode \
+        gamescope \
+        mangohud \
+        mesa-dri-drivers.i686 \
+        mesa-vulkan-drivers.i686 \
+        steam-devices \
+        vulkan-loader.i686 \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        systemd-oomd-defaults \
+        zram-generator-defaults \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
         firewall-config \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -84,15 +187,20 @@ ARG IMAGE_REVISION=1
 
 RUN mkdir -p /usr/lib/andromeda \
     && printf '%s\n' "${IMAGE_REVISION}" > /usr/lib/andromeda/image-revision \
+    && systemctl disable sshd.service \
     && systemctl enable \
         NetworkManager.service \
+        andromeda-first-boot-labels.service \
         andromeda-hardware-report.service \
         andromeda-taskd.service \
         andromeda-ci-verify.service \
+        bluetooth.service \
+        cups.service \
         firewalld.service \
+        fstrim.timer \
         qemu-guest-agent.service \
         sddm.service \
-        sshd.service \
+        systemd-oomd.service \
     && systemctl set-default graphical.target \
     && bootc container lint
 

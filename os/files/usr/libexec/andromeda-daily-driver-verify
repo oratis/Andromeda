@@ -1,0 +1,280 @@
+#!/usr/bin/bash
+set -Eeuo pipefail
+
+readonly phase="${1:?lifecycle phase is required}"
+readonly revision="${2:?image revision is required}"
+readonly test_user=andromeda
+readonly test_home="/home/${test_user}"
+readonly evidence_dir="${test_home}/.local/state/andromeda-e2e"
+readonly persistence_file="${test_home}/Documents/andromeda-persistent.txt"
+current_check=initialization
+
+emit() {
+    local message="$1"
+    printf '%s\n' "${message}" | tee /dev/ttyS0
+    systemd-cat -t andromeda-ci printf '%s\n' "${message}"
+}
+
+on_error() {
+    local status="$1"
+    local line="$2"
+    trap - ERR
+    set +e
+    emit \
+        "ANDROMEDA_DAILY_DRIVER_FAILED phase=${phase} revision=${revision} check=${current_check} line=${line} status=${status}"
+    exit "${status}"
+}
+trap 'on_error "$?" "${LINENO}"' ERR
+
+user_environment=()
+run_as_user() {
+    runuser -u "${test_user}" -- env "${user_environment[@]}" "$@"
+}
+
+id "${test_user}" >/dev/null
+test "$(id -u "${test_user}")" -ge 1000
+test "$(stat --format=%U "${test_home}")" = "${test_user}"
+
+current_check=plasma-session
+deadline="$((SECONDS + 180))"
+session_id=
+wayland_socket=
+while (( SECONDS < deadline )); do
+    user_id="$(id -u "${test_user}")"
+    session_id=
+    wayland_socket="$(
+        find "/run/user/${user_id}" -maxdepth 1 -type s -name 'wayland-*' \
+            -print -quit 2>/dev/null || true
+    )"
+    if [[ -S "/run/user/${user_id}/bus" ]] \
+        && [[ -S "${wayland_socket}" ]] \
+        && pgrep -u "${test_user}" -x kwin_wayland >/dev/null \
+        && pgrep -u "${test_user}" -x plasmashell >/dev/null; then
+        while read -r candidate_session; do
+            [[ -n "${candidate_session}" ]] || continue
+            if [[ "$(
+                loginctl show-session "${candidate_session}" \
+                    --property=Type --value 2>/dev/null || true
+            )" = wayland ]] \
+                && [[ "$(
+                    loginctl show-session "${candidate_session}" \
+                        --property=State --value 2>/dev/null || true
+                )" = active ]]; then
+                session_id="${candidate_session}"
+                break
+            fi
+        done < <(
+            loginctl list-sessions --no-legend 2>/dev/null \
+                | awk -v user="${test_user}" '$3 == user { print $1 }'
+        )
+        [[ -n "${session_id}" ]] && break
+    fi
+    sleep 2
+done
+
+user_id="$(id -u "${test_user}")"
+test -S "/run/user/${user_id}/bus"
+pgrep -u "${test_user}" -x kwin_wayland >/dev/null
+pgrep -u "${test_user}" -x plasmashell >/dev/null
+test -n "${session_id}"
+user_environment=(
+    "HOME=${test_home}"
+    "USER=${test_user}"
+    "LOGNAME=${test_user}"
+    "XDG_RUNTIME_DIR=/run/user/${user_id}"
+    "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/${user_id}/bus"
+)
+test -S "${wayland_socket}"
+wayland_display="$(basename "${wayland_socket}")"
+user_environment+=(
+    "WAYLAND_DISPLAY=${wayland_display}"
+    "XDG_SESSION_TYPE=wayland"
+)
+
+test "$(loginctl show-session "${session_id}" --property=Type --value)" = wayland
+test "$(loginctl show-session "${session_id}" --property=State --value)" = active
+
+current_check=pipewire-graph
+run_as_user wpctl status >/dev/null
+for service in pipewire.service wireplumber.service; do
+    current_check="user-service:${service}"
+    run_as_user systemctl --user is-active --quiet "${service}"
+done
+current_check=user-socket:pipewire-pulse.socket
+run_as_user systemctl --user is-active --quiet pipewire-pulse.socket
+
+current_check=consumer-packages
+for package in \
+    ark \
+    fcitx5 \
+    fedora-flathub-remote \
+    firefox \
+    flatpak \
+    fwupd \
+    libreoffice-calc \
+    libreoffice-impress \
+    libreoffice-writer \
+    okular \
+    plasma-discover \
+    system-config-printer; do
+    rpm --quiet --query "${package}"
+done
+
+current_check=desktop-tools
+flatpak --system remotes --columns=name | grep -Eq '^(fedora|fedora-flathub|flathub)$'
+test -x /usr/bin/plasma-discover
+test -x /usr/bin/fcitx5
+fwupdmgr --version >/dev/null
+7z i >/dev/null
+
+current_check=system-services
+systemctl is-active --quiet cups.service
+systemctl is-active --quiet firewalld.service
+systemctl is-active --quiet systemd-oomd.service
+systemctl is-enabled --quiet fstrim.timer
+swapon --noheadings --show=NAME | grep -q /dev/zram
+if systemctl is-active --quiet sshd.service; then
+    printf 'sshd must be disabled in the consumer image.\n' >&2
+    on_error 1 "${LINENO}"
+fi
+if ss --listening --tcp --numeric \
+    | grep -Eq '(^|[[:space:]])0\.0\.0\.0:22([[:space:]]|$)'; then
+    printf 'The consumer image must not expose SSH on every interface.\n' >&2
+    on_error 1 "${LINENO}"
+fi
+
+current_check=disk-space
+available_bytes="$(df --output=avail --block-size=1 /var | tail -1 | xargs)"
+test "${available_bytes}" -ge 5368709120
+
+current_check=user-data-persistence
+install -d -o "${test_user}" -g "${test_user}" -m 0700 "${evidence_dir}"
+install -d -o "${test_user}" -g "${test_user}" -m 0755 "${test_home}/Documents"
+
+if [[ ! -f "${persistence_file}" ]]; then
+    printf '%s\n' 'Andromeda user data survives OS updates and rollbacks.' \
+        > "${persistence_file}"
+    chown "${test_user}:${test_user}" "${persistence_file}"
+fi
+test "$(sha256sum "${persistence_file}" | cut -d' ' -f1)" \
+    = a76c14260fc41a940d6d685ecff6fa6e958eee64c330f03745fbc7c2e67b64c7
+
+case "${phase}" in
+    first-boot)
+        current_check=office-formats
+        work_dir="${evidence_dir}/office"
+        rm -rf "${work_dir}"
+        install -d -o "${test_user}" -g "${test_user}" -m 0700 "${work_dir}"
+
+        printf '%s\n' 'name,value' 'andromeda,42' > "${work_dir}/andromeda.csv"
+        cat > "${work_dir}/andromeda.fodt" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+ office:mimetype="application/vnd.oasis.opendocument.text" office:version="1.3">
+ <office:body><office:text>
+  <text:h text:outline-level="1">Andromeda</text:h>
+  <text:p>Office compatibility smoke test.</text:p>
+ </office:text></office:body>
+</office:document>
+EOF
+        cat > "${work_dir}/andromeda.fodp" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<office:document xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+ xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+ xmlns:presentation="urn:oasis:names:tc:opendocument:xmlns:presentation:1.0"
+ office:mimetype="application/vnd.oasis.opendocument.presentation" office:version="1.3">
+ <office:body><office:presentation>
+  <draw:page draw:name="page1">
+   <draw:frame presentation:class="title" svg:x="1cm" svg:y="1cm"
+    svg:width="20cm" svg:height="3cm"
+    xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0">
+    <draw:text-box><text:p>Andromeda</text:p></draw:text-box>
+   </draw:frame>
+  </draw:page>
+ </office:presentation></office:body>
+</office:document>
+EOF
+        chown -R "${test_user}:${test_user}" "${work_dir}"
+
+        lo_profile="${work_dir}/libreoffice-profile"
+        lo_profile_uri="file://${lo_profile}"
+        current_check=office-docx
+        run_as_user timeout 120s libreoffice "-env:UserInstallation=${lo_profile_uri}" \
+            --headless --convert-to 'docx:Office Open XML Text' \
+            --outdir "${work_dir}" "${work_dir}/andromeda.fodt"
+        current_check=office-xlsx
+        run_as_user timeout 120s libreoffice "-env:UserInstallation=${lo_profile_uri}" \
+            --headless --convert-to 'xlsx:Calc MS Excel 2007 XML' \
+            --outdir "${work_dir}" "${work_dir}/andromeda.csv"
+        current_check=office-pptx
+        run_as_user timeout 120s libreoffice "-env:UserInstallation=${lo_profile_uri}" \
+            --headless --convert-to 'pptx:Impress MS PowerPoint 2007 XML' \
+            --outdir "${work_dir}" "${work_dir}/andromeda.fodp"
+        current_check=office-pdf
+        run_as_user timeout 120s libreoffice "-env:UserInstallation=${lo_profile_uri}" \
+            --headless --convert-to pdf \
+            --outdir "${work_dir}" "${work_dir}/andromeda.docx"
+
+        current_check=office-artifacts
+        for output in andromeda.docx andromeda.xlsx andromeda.pptx andromeda.pdf; do
+            test -s "${work_dir}/${output}"
+        done
+        unzip -t "${work_dir}/andromeda.docx" >/dev/null
+        unzip -t "${work_dir}/andromeda.xlsx" >/dev/null
+        unzip -t "${work_dir}/andromeda.pptx" >/dev/null
+        pdfinfo "${work_dir}/andromeda.pdf" | grep -q '^Pages:'
+
+        current_check=firefox-wayland
+        browser_dir="${evidence_dir}/firefox"
+        install -d -o "${test_user}" -g "${test_user}" -m 0755 "${browser_dir}"
+        printf '%s\n' \
+            '<!doctype html><html><body><h1>Andromeda browser smoke test</h1></body></html>' \
+            > "${browser_dir}/andromeda.html"
+        chown "${test_user}:${test_user}" "${browser_dir}/andromeda.html"
+
+        firefox_unit=andromeda-e2e-firefox.service
+        run_as_user systemctl --user reset-failed "${firefox_unit}" 2>/dev/null || true
+        run_as_user systemd-run --user --quiet --collect \
+            --unit="${firefox_unit}" \
+            --property=Type=exec \
+            --setenv="HOME=${test_home}" \
+            --setenv=MOZ_ENABLE_WAYLAND=1 \
+            --setenv="WAYLAND_DISPLAY=${wayland_display}" \
+            --setenv=XDG_SESSION_TYPE=wayland \
+            firefox --new-instance --no-remote \
+            --profile "${browser_dir}/profile" \
+            "file://${browser_dir}/andromeda.html"
+
+        deadline="$((SECONDS + 30))"
+        until run_as_user systemctl --user is-active --quiet "${firefox_unit}"; do
+            if (( SECONDS >= deadline )); then
+                run_as_user journalctl --user-unit="${firefox_unit}" \
+                    --no-pager -n 100 >&2 || true
+                on_error 1 "${LINENO}"
+            fi
+            sleep 1
+        done
+        sleep 5
+        run_as_user systemctl --user is-active --quiet "${firefox_unit}"
+        printf '%s\n' 'Firefox remained active in the real Wayland session.' \
+            > "${browser_dir}/firefox-wayland-ok.txt"
+        chown "${test_user}:${test_user}" "${browser_dir}/firefox-wayland-ok.txt"
+        run_as_user systemctl --user stop "${firefox_unit}"
+        ;;
+    updating|rolling-back|complete)
+        current_check=update-rollback-persistence
+        test -s "${evidence_dir}/office/andromeda.docx"
+        test -s "${evidence_dir}/office/andromeda.xlsx"
+        test -s "${evidence_dir}/office/andromeda.pptx"
+        test -s "${evidence_dir}/office/andromeda.pdf"
+        test -s "${evidence_dir}/firefox/firefox-wayland-ok.txt"
+        ;;
+    *)
+        printf 'Unknown lifecycle phase: %s\n' "${phase}" >&2
+        on_error 1 "${LINENO}"
+        ;;
+esac
+
+emit "ANDROMEDA_DAILY_DRIVER_OK phase=${phase} revision=${revision}"

@@ -2,32 +2,44 @@
 
 [![CI](https://github.com/oratis/Andromeda/actions/workflows/ci.yml/badge.svg)](https://github.com/oratis/Andromeda/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-installable%20developer%20preview-orange.svg)](#当前状态)
+[![Status](https://img.shields.io/badge/status-daily%20driver%20candidate-blue.svg)](#当前状态)
 
 Andromeda 是一个面向 PC 与 Mac 硬件的 AI 原生桌面操作系统项目。它希望保留 Windows 的游戏、Office 和文件兼容能力，吸收 macOS 的可靠性与软硬件体验，同时把 Codex/Claude Code 式的任务执行、权限、验证和恢复能力变成 OS 的基础设施。
 
 ## 当前状态
 
-项目已经进入首个**可安装 Developer Preview**：
+项目已经进入首个**可安装 Daily Driver Candidate（虚拟硬件）**：
 
 - 有基于 Fedora bootc 44 与 KDE Plasma 的 x86-64 UEFI 离线安装 ISO；
 - 有从 ISO 安装到空白磁盘、移除 ISO 后首次启动的 QEMU/OVMF 自动验收；
 - 有 bootc 更新到 revision 2、重启验证、回滚到 revision 1 的生命周期验收；
+- 有 Flatpak/Discover、LibreOffice、Firefox、中文输入、音视频、打印/扫描、
+  固件、游戏运行基础和常见文件格式支持；
+- 有真实 Plasma Wayland、PipeWire、Office 格式、浏览器启动、安全暴露面和
+  用户数据跨更新/回滚持久性的自动验收；
 - 有可编译、可测试的 Rust workspace；
 - 有模型不可绕过的任务、风险、能力、隔离和状态机契约；
 - 有持久化任务服务、HTTP API 与开发者 CLI；
 - 有 Linux、macOS、Windows 硬件探测和 Hardware Compatibility Manifest（HCM）匹配；
 - 有跨平台 CI、产品计划和专题研究。
 
-这个里程碑证明 Andromeda 能构建、安装、首次启动、运行 AI 任务控制面并完成更新与
-回滚；它**仍不是可日常使用的完整操作系统**。目前只有 QEMU/KVM x86-64 + OVMF
-达到自动验收门槛，没有宣称任何消费级 PC 或 Mac 已达到 Supported 或 Certified。
+这个里程碑证明 Andromeda 能构建、安装、进入真实桌面、运行一组日用工作流和 AI
+任务控制面，并完成更新与回滚；它**仍不是已完成认证的消费操作系统**。目前只有
+QEMU/KVM x86-64 + OVMF 达到自动验收门槛，没有宣称任何消费级 PC 或 Mac 已达到
+Supported 或 Certified。
 
 2026-07-28 的[可安装 OS 验收 #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852)
 已经在全新 32 GiB 虚拟磁盘上完整通过。受测 ISO 的 SHA-256 为
 `c04d8f6de780f978e261e1867283894abf2a7996b6105525660c52343ae45073`；
 运行证据、产物标识和逐项验收结果见
 [Developer Preview 安装指南](./docs/development/installable-preview.md#已验证构建)。
+
+2026-07-28 的 GCP 嵌套 KVM 日用版运行又在全新 32 GiB 虚拟磁盘上完成离线安装、
+Plasma Wayland 首启、revision 2 更新和 revision 1 回滚。受测 3.8 GiB ISO 的
+SHA-256 为
+`6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108`；
+消费能力、完整标记和证据边界见
+[Daily Driver Candidate E2E](./docs/development/daily-driver-e2e.md#已验证运行)。
 
 ## 第一性目标
 
@@ -101,7 +113,8 @@ curl http://127.0.0.1:7777/healthz
 ```
 
 构建 ISO、安装安全边界和完整生命周期验收见
-[Developer Preview 安装指南](./docs/development/installable-preview.md)。控制面开发步骤见
+[Developer Preview 安装指南](./docs/development/installable-preview.md)和
+[Daily Driver Candidate E2E](./docs/development/daily-driver-e2e.md)。控制面开发步骤见
 [开发者入门](./docs/development/getting-started.md)和
 [任务控制面说明](./docs/development/task-control-plane.md)。
 
@@ -122,7 +135,7 @@ curl http://127.0.0.1:7777/healthz
 
 | 类别 | 当前产品状态 |
 |---|---|
-| QEMU/KVM x86-64 + OVMF | 可安装 Developer Preview；CI 自动验收 |
+| QEMU/KVM x86-64 + OVMF | Daily Driver Candidate；安装/桌面/更新/回滚自动验收 |
 | 选定 x86-64 PC | 下一阶段 Developer Preview 候选 |
 | 未认证通用 PC | Community，探测不等于支持 |
 | 非 T2 Intel Mac | 逐机型 Pilot |
@@ -150,6 +163,7 @@ curl http://127.0.0.1:7777/healthz
 
 - [文档总览](./docs/README.md)
 - [Developer Preview 安装与验收](./docs/development/installable-preview.md)
+- [Daily Driver Candidate 与 GCP E2E](./docs/development/daily-driver-e2e.md)
 - [PC/macOS 操作系统全景](./docs/os-landscape-and-andromeda-architecture.md)
 - [开源组件采用矩阵](./docs/research/open-source-adoption-matrix.md)
 - [Windows 游戏、Office 与文件格式](./docs/research/windows-gaming-office-formats.md)
@@ -166,6 +180,6 @@ curl http://127.0.0.1:7777/healthz
 
 **English summary:** Andromeda is an early AI-native desktop OS project targeting broad
 PC hardware and selected Mac cohorts. The repository now builds an installable x86-64
-UEFI Developer Preview and verifies offline installation, first boot, task service health,
-bootc update, and rollback under QEMU/OVMF. It is not yet a daily-use consumer OS, and no
-physical PC or Mac model is certified.
+UEFI Daily Driver Candidate and verifies offline installation, a real Plasma Wayland
+session, common consumer workflows, bootc update, and rollback under QEMU/OVMF. It is not
+yet a certified consumer OS, and no physical PC or Mac model is certified.

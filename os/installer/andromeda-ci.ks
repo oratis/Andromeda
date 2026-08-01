@@ -7,6 +7,7 @@ network --bootproto=dhcp --device=link --activate
 rootpw --lock
 selinux --enforcing
 timezone UTC --utc
+user --name=andromeda --groups=wheel --lock --gecos="Andromeda E2E"
 
 zerombr
 clearpart --all --initlabel

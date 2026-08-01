@@ -30,15 +30,18 @@ if [[ -f "${STATE_FILE}" ]]; then
 fi
 
 on_error() {
-    local status="$?"
+    local status="$1"
+    local line="$2"
     trap - ERR
     set +e
-    emit "ANDROMEDA_E2E_FAILED state=${state} revision=${revision} status=${status}"
+    emit \
+        "ANDROMEDA_E2E_FAILED state=${state} revision=${revision} line=${line} status=${status}"
     exit "${status}"
 }
-trap on_error ERR
+trap 'on_error "$?" "${LINENO}"' ERR
 
 require_runtime_health
+/usr/libexec/andromeda-daily-driver-verify "${state}" "${revision}"
 
 case "${state}:${revision}" in
     first-boot:1)

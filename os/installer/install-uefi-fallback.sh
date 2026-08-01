@@ -74,6 +74,20 @@ ln -sfn /usr/lib/systemd/system/graphical.target \
 test "$(readlink "${SYSTEM_ROOT}/etc/systemd/system/default.target")" \
     = /usr/lib/systemd/system/graphical.target
 
+if [[ "${install_mode}" == ci ]]; then
+    test -f "${SYSTEM_ROOT}/usr/share/wayland-sessions/plasma.desktop"
+    install -d -m 0755 "${SYSTEM_ROOT}/etc/sddm.conf.d"
+    printf '%s\n' \
+        '[Autologin]' \
+        'User=andromeda' \
+        'Session=plasma.desktop' \
+        'Relogin=false' \
+        > "${SYSTEM_ROOT}/etc/sddm.conf.d/90-andromeda-ci-autologin.conf"
+fi
+
+install -d -m 0700 "${SYSTEM_ROOT}/var/lib/andromeda"
+touch "${SYSTEM_ROOT}/var/lib/andromeda/selinux-label-restore-required"
+
 boot_mount="$(findmnt --raw --noheadings --target "${TARGET_ROOT}/boot" \
     --output TARGET | xargs)"
 test -n "${boot_mount}"

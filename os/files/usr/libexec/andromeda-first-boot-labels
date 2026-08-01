@@ -1,0 +1,14 @@
+#!/usr/bin/bash
+set -Eeuo pipefail
+
+readonly marker=/var/lib/andromeda/selinux-label-restore-required
+
+test -e "${marker}"
+test "$(getenforce)" != Disabled
+
+restorecon -RF /etc /var
+rm -f "${marker}"
+
+printf '%s\n' 'ANDROMEDA_SELINUX_LABELS_OK' | tee /dev/ttyS0
+systemd-cat -t andromeda-first-boot-labels \
+    printf '%s\n' 'ANDROMEDA_SELINUX_LABELS_OK'
