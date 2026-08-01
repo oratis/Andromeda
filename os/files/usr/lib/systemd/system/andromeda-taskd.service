@@ -11,6 +11,15 @@ Environment=ANDROMEDA_STATE_DIR=/var/lib/andromeda-taskd/state
 ExecStart=/usr/bin/andromeda-taskd
 Restart=on-failure
 RestartSec=2s
+# Kernel-level loopback enforcement (cgroup/BPF on packets): taskd can only ever
+# serve loopback regardless of ANDROMEDA_LISTEN, so a misconfigured non-loopback
+# bind cannot expose the unauthenticated API to the network. This is orthogonal
+# to RestrictAddressFamilies below (which filters socket() families, not routes)
+# and does not conflict with it. See security-review.md finding #2.
+IPAddressAllow=localhost
+IPAddressDeny=any
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
 NoNewPrivileges=yes
 PrivateDevices=yes
 PrivateTmp=yes
@@ -21,11 +30,14 @@ ProtectHostname=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
+ProtectProc=invisible
 ProtectSystem=strict
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 RestrictNamespaces=yes
 RestrictRealtime=yes
+RestrictSUIDSGID=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
 UMask=0077
 
 [Install]
