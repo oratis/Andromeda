@@ -10,7 +10,9 @@ use andromeda_hardware::{
     HcmManifest, SupportTier, diagnose_report, evaluate_manifest, probe_host,
 };
 use andromeda_policy::PolicyEngine;
-use andromeda_runtime::{CreateTaskRequest, FileTaskStore, StateTransitionRequest, TaskService};
+use andromeda_runtime::{
+    CreateTaskRequest, EvaluationRequest, FileTaskStore, StateTransitionRequest, TaskService,
+};
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
 
@@ -57,11 +59,13 @@ enum TaskCommand {
     /// Evaluate policy without executing any action.
     Evaluate {
         task_id: String,
-        /// Isolation level to evaluate against. Defaults to `sandbox`
-        /// because the inspection plans this CLI creates carry sandboxed
-        /// risk; evaluating with `none` always denies them.
-        #[arg(long, value_enum, default_value = "sandbox")]
-        isolation: CliIsolation,
+        /// Isolation level to evaluate against. When omitted, each action is
+        /// evaluated at its own declared-risk minimum isolation (the same
+        /// per-action model used at task creation). When set, this overrides
+        /// the isolation for *every* action, which is mainly useful for
+        /// probing a whole plan under one level.
+        #[arg(long, value_enum)]
+        isolation: Option<CliIsolation>,
         #[arg(long)]
         confirm_external: bool,
     },
@@ -247,11 +251,13 @@ fn handle_task(
             isolation,
             confirm_external,
         } => {
-            print_json(&service.evaluate(
-                TaskId::from_str(&task_id)?,
-                isolation.into(),
-                confirm_external,
-            )?)?;
+            let request = EvaluationRequest {
+                isolation: isolation.map(Into::into),
+                overrides: BTreeMap::new(),
+                external_side_effect_confirmed: confirm_external,
+                subject: None,
+            };
+            print_json(&service.evaluate(TaskId::from_str(&task_id)?, &request)?)?;
         }
         TaskCommand::Transition {
             task_id,
