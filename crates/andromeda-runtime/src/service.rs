@@ -204,12 +204,12 @@ impl TaskService {
         let mut record = self.store.get(task_id)?;
         let now = Utc::now();
         let decisions: BTreeMap<ActionId, PolicyDecision> = {
-            let context = EvaluationContext {
+            let context = EvaluationContext::at(
                 now,
                 isolation,
-                capabilities: &record.capabilities,
+                &record.capabilities,
                 external_side_effect_confirmed,
-            };
+            );
             record
                 .plan
                 .actions
@@ -274,24 +274,24 @@ impl TaskService {
 
     /// Returns whether every action in the plan would be allowed by the
     /// deterministic policy engine under the most permissive execution
-    /// assumptions (`Brokered` isolation, external side effects confirmed).
+    /// assumptions: each action is checked with exactly the isolation its
+    /// declared risk requires, and external side effects are treated as
+    /// confirmed.
     ///
     /// This verifies that each action's required capabilities exist among
     /// the provided grants, are unexpired at creation time, actually cover
     /// the action target (file scope, network host, system setting, or
     /// external service), and that no deny rule matches. It deliberately
-    /// does not check executor isolation or final side-effect confirmation;
-    /// both are re-evaluated with real values at evaluation time.
+    /// does not check the real executor isolation or final side-effect
+    /// confirmation; both are re-evaluated with real values at evaluation
+    /// time.
     fn plan_fully_granted(&self, plan: &ActionPlan, capabilities: &[Capability]) -> bool {
-        let context = EvaluationContext {
-            now: Utc::now(),
-            isolation: IsolationLevel::Brokered,
-            capabilities,
-            external_side_effect_confirmed: true,
-        };
-        plan.actions
-            .iter()
-            .all(|action| self.policy.evaluate(action, &context).effect == DecisionEffect::Allow)
+        let now = Utc::now();
+        plan.actions.iter().all(|action| {
+            let context =
+                EvaluationContext::at(now, action.risk.minimum_isolation(), capabilities, true);
+            self.policy.evaluate(action, &context).effect == DecisionEffect::Allow
+        })
     }
 }
 

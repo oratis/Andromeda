@@ -47,7 +47,7 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 
 ### `Ready` 状态的语义
 
-创建时，任务进入 `Ready` 当且仅当计划中每个 action 在"最宽松执行假设"（Brokered 隔离、外部副作用视为已确认）下会被确定性策略引擎判为 Allow。这保证了：
+创建时，任务进入 `Ready` 当且仅当计划中每个 action 在"最宽松执行假设"（隔离恰好等于该 action 风险等级要求的最低隔离、外部副作用视为已确认）下会被确定性策略引擎判为 Allow。这保证了：
 
 - 每个 `required_capabilities` 中的 id 都存在于随请求提供的 capability 里；
 - 这些 capability 在创建时刻未过期（`expires_at`）；
