@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fmt;
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -21,6 +23,20 @@ impl ActionId {
 impl Default for ActionId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Display for ActionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ActionId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
     }
 }
 

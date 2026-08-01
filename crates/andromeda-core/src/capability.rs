@@ -1,4 +1,6 @@
+use std::fmt;
 use std::path::{Component, Path, PathBuf};
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,20 @@ impl CapabilityId {
 impl Default for CapabilityId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Display for CapabilityId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for CapabilityId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
     }
 }
 
