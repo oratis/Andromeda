@@ -31,13 +31,15 @@ QEMU/KVM x86-64 + OVMF 达到自动验收门槛，没有宣称任何消费级 PC
 Supported 或 Certified。
 
 2026-07-28 的[可安装 OS 验收 #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852)
-已经在全新 32 GiB 虚拟磁盘上完整通过。受测 ISO 的 SHA-256 为
+已经在全新 32 GiB 虚拟磁盘上完整通过（该记录使用 32 GiB 盘；现行
+`os/scripts/test-install.sh` 已改为 64 GiB，证据快照早于此调整）。受测 ISO 的 SHA-256 为
 `c04d8f6de780f978e261e1867283894abf2a7996b6105525660c52343ae45073`；
 运行证据、产物标识和逐项验收结果见
 [Developer Preview 安装指南](./docs/development/installable-preview.md#已验证构建)。
 
 2026-07-28 的 GCP 嵌套 KVM 日用版运行又在全新 32 GiB 虚拟磁盘上完成离线安装、
-Plasma Wayland 首启、revision 2 更新和 revision 1 回滚。受测 3.8 GiB ISO 的
+Plasma Wayland 首启、revision 2 更新和 revision 1 回滚（同样是 32 GiB 记录盘，
+现行 harness 已改为 64 GiB）。受测 3.8 GiB ISO 的
 SHA-256 为
 `6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108`。
 注意：该 PASS 记录早于证据提取器修复，修复只在原始串口日志上离线复验过；
@@ -181,7 +183,7 @@ curl http://127.0.0.1:7777/healthz
 
 ## 参与开发
 
-请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。关键系统设计通过 ADR 和小型、可验证的 PR 推进；任何进入特权边界的实现都必须同时提供威胁模型、故障路径和测试证据。
+请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。项目正在建立 ADR 实践：关键系统设计将通过 ADR（模板与流程见 [docs/adr/](./docs/adr/)）和小型、可验证的 PR 推进；任何进入特权边界的实现都必须同时提供威胁模型、故障路径和测试证据。
 
 项目使用 [Apache License 2.0](./LICENSE)。
 
