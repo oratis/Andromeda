@@ -86,6 +86,18 @@ certified`（`reference` 只有虚拟 L0–L2 证据，因此低于要求实体�
 andromeda hardware check examples/hcm/developer-x86_64-pc.json --require-tier community
 ```
 
+**`SupportTier` 的唯一权威定义在代码里**：`crates/andromeda-hardware/src/model.rs`
+的 `SupportTier` 枚举声明顺序即上面的阶梯，`schemas/hardware-compatibility-manifest.schema.json`
+的 `tier` enum 顺序与之保持一致，并由 `matcher.rs` 的
+`schema_tier_enum_matches_model_declaration_order` 测试在 CI 中锁定，防止再次漂移。
+其他文档一律引用本阶梯，不得各自复述出不同顺序。
+
+> 注意：战略/产品文档中出现的 “OEM Reference Design”（OEM 共控 BOM/固件的
+> 高端产品线）是一个**产品线标签**，与这里 `SupportTier::Reference` 这个枚举
+> 取值**无关**。`SupportTier::Reference` 表示“仅有虚拟 L0–L2 证据、位于阶梯次低
+> 位”的支持等级，绝不是最高级。HCM 的 `tier` 字段只能取本阶梯五个值，不能声明
+> 任何产品线标签。
+
 ## 下一步
 
 1. 对 HCM 使用离线根密钥和轮换签名；

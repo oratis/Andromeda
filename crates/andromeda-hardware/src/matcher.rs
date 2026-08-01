@@ -1,11 +1,48 @@
 use chrono::{DateTime, Utc};
 
+use crate::model::id_matches;
 use crate::{
-    CapabilityRequirement, CompatibilityEvaluation, DeviceInfo, EvidenceResult, HardwareReport,
-    HardwareSelector, HcmManifest, SupportTier,
+    ArtifactPin, CapabilityRequirement, CompatibilityEvaluation, DeviceInfo, EvidenceResult,
+    HardwareReport, HardwareSelector, HcmManifest, SupportTier,
 };
 
-/// Evaluates a manifest against a report using the current wall clock.
+/// Verdict for a single pinned artifact, produced by an [`ArtifactVerifier`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactVerdict {
+    /// The artifact resolved and hashed to the pinned `sha256`, and — when the
+    /// verifier enforces a trusted-key set — the pin named a trusted
+    /// `signing_key_id`.
+    Trusted,
+    /// The artifact resolved but failed verification (hash mismatch, or an
+    /// untrusted/absent signing key). Fail-closed: it drives `effective_tier`
+    /// to `Blocked`.
+    Rejected(String),
+    /// The artifact could not be resolved from the configured store. When a
+    /// verifier is supplied this is fail-closed: every declared pin must be
+    /// resolvable, so it drives `effective_tier` to `Blocked`.
+    Unresolved(String),
+}
+
+/// Resolves and verifies the real bytes behind an [`ArtifactPin`].
+///
+/// The matcher trusts declared `sha256` values only when **no** verifier is
+/// supplied — the historical, advisory behavior, kept so existing callers do
+/// not change. Supplying a verifier makes the trust boundary explicit and
+/// fail-closed: every pinned artifact must resolve, hash to its pin, and —
+/// when a trusted-key set is configured — name a trusted `signing_key_id`, or
+/// the manifest is driven to `Blocked`.
+///
+/// The actual signature cryptography is a documented TODO: today a verifier
+/// checks `signing_key_id` membership in its trusted-key set, not a real
+/// detached signature. See [`crate::DirectoryArtifactVerifier`].
+pub trait ArtifactVerifier {
+    /// Resolves `artifact` and reports whether its bytes and signing key match
+    /// the pin.
+    fn verify(&self, artifact: &ArtifactPin) -> ArtifactVerdict;
+}
+
+/// Evaluates a manifest against a report using the current wall clock and
+/// **no** artifact verification (declared hashes are trusted as-is).
 #[must_use]
 pub fn evaluate_manifest(
     report: &HardwareReport,
@@ -14,14 +51,42 @@ pub fn evaluate_manifest(
     evaluate_manifest_at(report, manifest, Utc::now())
 }
 
-/// Evaluates a manifest against a report at an explicit instant.
-///
-/// Injecting `now` keeps expiry logic deterministic and testable.
+/// Evaluates a manifest against a report at an explicit instant, with **no**
+/// artifact verification. Injecting `now` keeps expiry logic deterministic.
 #[must_use]
 pub fn evaluate_manifest_at(
     report: &HardwareReport,
     manifest: &HcmManifest,
     now: DateTime<Utc>,
+) -> CompatibilityEvaluation {
+    evaluate_manifest_at_with_verifier(report, manifest, now, None)
+}
+
+/// Evaluates a manifest using the current wall clock and an optional artifact
+/// verifier. See [`evaluate_manifest_at_with_verifier`].
+#[must_use]
+pub fn evaluate_manifest_with_verifier(
+    report: &HardwareReport,
+    manifest: &HcmManifest,
+    verifier: Option<&dyn ArtifactVerifier>,
+) -> CompatibilityEvaluation {
+    evaluate_manifest_at_with_verifier(report, manifest, Utc::now(), verifier)
+}
+
+/// Evaluates a manifest against a report at an explicit instant, optionally
+/// verifying pinned artifacts.
+///
+/// When `verifier` is `None` the declared artifact hashes are trusted (the
+/// historical behavior); the trust boundary is explicit because callers opt
+/// into verification by supplying an [`ArtifactVerifier`]. When a verifier is
+/// supplied, every pinned artifact must resolve and match, or `effective_tier`
+/// is driven to `Blocked`.
+#[must_use]
+pub fn evaluate_manifest_at_with_verifier(
+    report: &HardwareReport,
+    manifest: &HcmManifest,
+    now: DateTime<Utc>,
+    verifier: Option<&dyn ArtifactVerifier>,
 ) -> CompatibilityEvaluation {
     let selector_matched = !manifest.selectors.is_empty()
         && manifest
@@ -59,6 +124,7 @@ pub fn evaluate_manifest_at(
         evaluate_requirement(report, requirement, &mut evidence, &mut missing);
     }
     evaluate_manifest_evidence(manifest, now, &mut evidence, &mut missing);
+    evaluate_artifacts(manifest, verifier, &mut evidence, &mut missing);
 
     let requirements_met = missing.is_empty();
     CompatibilityEvaluation {
@@ -74,6 +140,45 @@ pub fn evaluate_manifest_at(
         boot_provider: manifest.boot_provider,
         evidence,
         missing,
+    }
+}
+
+/// Verifies pinned artifacts when a verifier is configured.
+///
+/// Without a verifier the declared hashes are accepted on trust; the trust
+/// boundary is explicit in the API because callers opt into verification. With
+/// a verifier, any rejected or unresolvable pin is fail-closed (recorded in
+/// `missing`, which drives `effective_tier` to `Blocked`).
+fn evaluate_artifacts(
+    manifest: &HcmManifest,
+    verifier: Option<&dyn ArtifactVerifier>,
+    evidence: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    let Some(verifier) = verifier else {
+        if !manifest.artifacts.is_empty() {
+            evidence.push(format!(
+                "{} pinned artifact hash(es) trusted as declared; no artifact verifier was configured",
+                manifest.artifacts.len()
+            ));
+        }
+        return;
+    };
+    for artifact in &manifest.artifacts {
+        match verifier.verify(artifact) {
+            ArtifactVerdict::Trusted => evidence.push(format!(
+                "artifact '{}' {} verified against its pinned sha256",
+                artifact.name, artifact.version
+            )),
+            ArtifactVerdict::Rejected(reason) => missing.push(format!(
+                "artifact '{}' {} failed verification: {reason}",
+                artifact.name, artifact.version
+            )),
+            ArtifactVerdict::Unresolved(reason) => missing.push(format!(
+                "artifact '{}' {} could not be resolved for verification: {reason}",
+                artifact.name, artifact.version
+            )),
+        }
     }
 }
 
@@ -187,12 +292,18 @@ fn evaluate_device(
     // the driver condition. An unbound twin earlier in the inventory (dual
     // NIC/GPU, or several USB functions of one device) must not mask a bound
     // one, so the driver condition is part of the search, not a post-check.
-    let mut any_id_match = false;
-    let satisfied = report
+    //
+    // Explicit two-step (collect id-matches, then check driver presence)
+    // rather than an `inspect`-driven side effect: it does not depend on the
+    // lazy short-circuit order of `any`, so a future iterator refactor cannot
+    // silently break the "matched but no bound driver" branch.
+    let id_matched: Vec<&DeviceInfo> = report
         .devices
         .iter()
         .filter(id_matches_requirement)
-        .inspect(|_| any_id_match = true)
+        .collect();
+    let satisfied = id_matched
+        .iter()
         .any(|device| !*driver_required || device.driver.is_some());
     if satisfied {
         evidence.push(format!(
@@ -201,7 +312,7 @@ fn evaluate_device(
             vendor_id.unwrap_or("*"),
             product_id.unwrap_or("*")
         ));
-    } else if any_id_match {
+    } else if !id_matched.is_empty() {
         missing.push(format!(
             "{bus} device matched but no bound driver was detected"
         ));
@@ -338,21 +449,6 @@ fn check_optional_bool(
         Some(actual) => missing.push(format!("{name} = {actual}, expected {expected}")),
         None => missing.push(format!("{name} state could not be verified")),
     }
-}
-
-/// Strips at most one leading `0x`/`0X` prefix (case-insensitive).
-///
-/// `trim_start_matches` would strip repeated prefixes, silently equating
-/// `0x0x10de` with `10de`.
-fn strip_hex_prefix(value: &str) -> &str {
-    value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value)
-}
-
-fn id_matches(actual: &str, expected: &str) -> bool {
-    strip_hex_prefix(actual).eq_ignore_ascii_case(strip_hex_prefix(expected))
 }
 
 fn contains_case_insensitive(value: &str, needle: &str) -> bool {
@@ -657,17 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn id_comparison_strips_one_hex_prefix_case_insensitively() {
-        assert!(id_matches("0X10DE", "10de"));
-        assert!(id_matches("0x10de", "0X10DE"));
-        assert!(id_matches("10DE", "10de"));
-        assert!(
-            !id_matches("0x0x10de", "10de"),
-            "repeated prefixes must not be stripped"
-        );
-    }
-
-    #[test]
     fn boot_provider_is_surfaced_in_the_evaluation() {
         let evaluation = evaluate_manifest(&report(), &manifest());
         assert_eq!(evaluation.boot_provider, crate::BootProvider::PcUefiShim);
@@ -811,5 +896,154 @@ mod tests {
         assert!(SupportTier::Community < SupportTier::Reference);
         assert!(SupportTier::Reference < SupportTier::Supported);
         assert!(SupportTier::Supported < SupportTier::Certified);
+    }
+
+    /// A verifier that returns the same verdict for every artifact, so the
+    /// matcher's fail-closed wiring can be exercised without touching disk.
+    struct FixedVerifier(ArtifactVerdict);
+
+    impl ArtifactVerifier for FixedVerifier {
+        fn verify(&self, _artifact: &ArtifactPin) -> ArtifactVerdict {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn default_evaluation_trusts_declared_artifact_hashes() {
+        // No verifier: even a bogus declared hash keeps the declared tier, and
+        // the trust boundary is surfaced explicitly in the evidence.
+        let mut manifest = manifest();
+        manifest.artifacts[0].sha256 = "deadbeef".repeat(8);
+        let evaluation = evaluate_manifest(&report(), &manifest);
+        assert_eq!(evaluation.effective_tier, SupportTier::Reference);
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|item| item.contains("trusted as declared"))
+        );
+    }
+
+    #[test]
+    fn verified_artifacts_retain_declared_tier() {
+        let verifier = FixedVerifier(ArtifactVerdict::Trusted);
+        let evaluation = evaluate_manifest_with_verifier(&report(), &manifest(), Some(&verifier));
+        assert_eq!(evaluation.effective_tier, SupportTier::Reference);
+        assert!(evaluation.requirements_met);
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|item| item.contains("verified against its pinned sha256"))
+        );
+    }
+
+    #[test]
+    fn mismatched_artifact_hash_blocks_support() {
+        let verifier = FixedVerifier(ArtifactVerdict::Rejected("sha256 mismatch".into()));
+        let evaluation = evaluate_manifest_with_verifier(&report(), &manifest(), Some(&verifier));
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("failed verification"))
+        );
+    }
+
+    #[test]
+    fn unresolvable_required_artifact_blocks_support() {
+        let verifier = FixedVerifier(ArtifactVerdict::Unresolved("kernel not found".into()));
+        let evaluation = evaluate_manifest_with_verifier(&report(), &manifest(), Some(&verifier));
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("could not be resolved"))
+        );
+    }
+
+    /// Locks the JSON schema `tier` enum to the `SupportTier` declaration
+    /// order in `model.rs`, so future reordering fails CI.
+    #[test]
+    fn schema_tier_enum_matches_model_declaration_order() {
+        let declared = [
+            SupportTier::Blocked,
+            SupportTier::Community,
+            SupportTier::Reference,
+            SupportTier::Supported,
+            SupportTier::Certified,
+        ];
+        // Exhaustive match: adding a `SupportTier` variant without listing it
+        // here fails to compile, so this guard can never silently miss a tier.
+        for tier in declared {
+            match tier {
+                SupportTier::Blocked
+                | SupportTier::Community
+                | SupportTier::Reference
+                | SupportTier::Supported
+                | SupportTier::Certified => {}
+            }
+        }
+        let declared_names: Vec<String> = declared
+            .iter()
+            .map(|tier| {
+                serde_json::to_value(tier)
+                    .expect("serialize tier")
+                    .as_str()
+                    .expect("tier serializes to a string")
+                    .to_owned()
+            })
+            .collect();
+
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/hardware-compatibility-manifest.schema.json"
+        ))
+        .expect("schema parses");
+        let schema_names: Vec<String> = schema["properties"]["tier"]["enum"]
+            .as_array()
+            .expect("schema tier enum is an array")
+            .iter()
+            .map(|value| value.as_str().expect("enum entry is a string").to_owned())
+            .collect();
+
+        assert_eq!(
+            schema_names, declared_names,
+            "schema tier enum order must equal the SupportTier declaration order in model.rs"
+        );
+    }
+
+    #[test]
+    fn unknown_fields_in_untrusted_manifest_structs_are_rejected() {
+        fn rejects_unknown(json: &str) -> bool {
+            serde_json::from_str::<HcmManifest>(json)
+                .err()
+                .is_some_and(|error| error.to_string().contains("unknown field"))
+        }
+        // Top-level manifest.
+        assert!(rejects_unknown(
+            r#"{"schema_version":2,"id":"x","name":"X","tier":"community","boot_provider":"pc_uefi_shim","selectors":[{"os_family":"linux"}],"typo":1}"#
+        ));
+        // Selector.
+        assert!(rejects_unknown(
+            r#"{"schema_version":2,"id":"x","name":"X","tier":"community","boot_provider":"pc_uefi_shim","selectors":[{"os_family":"linux","typo":1}]}"#
+        ));
+        // Internally tagged requirement variant.
+        assert!(rejects_unknown(
+            r#"{"schema_version":2,"id":"x","name":"X","tier":"community","boot_provider":"pc_uefi_shim","selectors":[{"os_family":"linux"}],"requirements":[{"type":"memory_bytes","minimum":1,"typo":2}]}"#
+        ));
+        // Artifact pin.
+        assert!(rejects_unknown(
+            r#"{"schema_version":2,"id":"x","name":"X","tier":"community","boot_provider":"pc_uefi_shim","selectors":[{"os_family":"linux"}],"artifacts":[{"kind":"kernel","name":"k","version":"1","sha256":"0000000000000000000000000000000000000000000000000000000000000000","source":"s","typo":1}]}"#
+        ));
+        // A valid document without extras still parses: the guard is precise,
+        // not rejecting everything.
+        assert!(
+            serde_json::from_str::<HcmManifest>(
+                r#"{"schema_version":2,"id":"x","name":"X","tier":"community","boot_provider":"pc_uefi_shim","selectors":[{"os_family":"linux"}]}"#
+            )
+            .is_ok()
+        );
     }
 }
