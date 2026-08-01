@@ -10,6 +10,16 @@ RUN cargo build --release --locked --bin andromeda --bin andromeda-taskd
 
 FROM quay.io/fedora/fedora-bootc:44 AS payload
 
+ARG PLATFORM_VARIANT=pc_x86_64
+ARG PLATFORM_ARCHITECTURE=x86_64
+ARG BOOT_PROVIDER=pc_uefi_shim
+ARG HEP_ID=pc-mainline
+
+LABEL io.andromeda.platform.variant="${PLATFORM_VARIANT}" \
+      io.andromeda.platform.architecture="${PLATFORM_ARCHITECTURE}" \
+      io.andromeda.platform.boot-provider="${BOOT_PROVIDER}" \
+      io.andromeda.platform.hep-id="${HEP_ID}"
+
 RUN dnf -y install \
         NetworkManager \
         curl \
@@ -47,6 +57,8 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        lcms2 \
+        libssh \
         kwin \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -272,6 +284,14 @@ ARG IMAGE_REVISION=1
 
 RUN mkdir -p /usr/lib/andromeda \
     && printf '%s\n' "${IMAGE_REVISION}" > /usr/lib/andromeda/image-revision \
+    && jq --null-input \
+        --arg variant "${PLATFORM_VARIANT}" \
+        --arg architecture "${PLATFORM_ARCHITECTURE}" \
+        --arg boot_provider "${BOOT_PROVIDER}" \
+        --arg hep_id "${HEP_ID}" \
+        --arg image_revision "${IMAGE_REVISION}" \
+        '{schema_version:1,variant:$variant,architecture:$architecture,boot_provider:$boot_provider,hep_id:$hep_id,image_revision:$image_revision}' \
+        > /usr/lib/andromeda/platform.json \
     && systemctl disable sshd.service \
     && systemctl enable \
         NetworkManager.service \
@@ -323,6 +343,7 @@ COPY os/installer/interactive-defaults.ks /usr/share/anaconda/interactive-defaul
 COPY os/installer/andromeda-ci.ks /usr/share/anaconda/andromeda-ci.ks
 COPY os/installer/install-uefi-fallback.sh /usr/libexec/andromeda-install-uefi-fallback
 COPY os/installer/installer-preflight.sh /usr/libexec/andromeda-installer-preflight
+COPY os/installer/check-platform-compatibility.sh /usr/libexec/andromeda-check-platform-compatibility
 COPY os/installer/collect-anaconda-diagnostics.sh /usr/libexec/andromeda-collect-anaconda-diagnostics
 
 RUN sed -i "s/^  default: 0$/  default: ${INSTALLER_DEFAULT}/" \

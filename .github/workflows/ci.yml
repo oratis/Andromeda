@@ -29,6 +29,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+      - run: os/scripts/test-installer-platform-guard.sh
 
   platform:
     name: Platform probe (${{ matrix.os }})

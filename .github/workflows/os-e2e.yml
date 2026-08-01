@@ -43,14 +43,22 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes binutils ovmf podman qemu-system-x86 qemu-utils shellcheck
+          sudo apt-get install --yes binutils ovmf podman qemu-system-x86 qemu-utils runc shellcheck
           sudo apt-get clean
+          runtime="$(command -v runc)"
+          printf 'PODMAN_RUNTIME=%s\nBUILDAH_RUNTIME=%s\n' \
+            "${runtime}" "${runtime}" >> "$GITHUB_ENV"
+          runc --version
 
       - name: Validate scripts
-        run: shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+        run: |
+          shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+          os/scripts/test-installer-platform-guard.sh
 
       - name: Build payloads and installer ISO
-        run: sudo os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
+        run: |
+          sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME \
+            os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
 
       - name: Install to a blank disk and verify lifecycle
         run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
@@ -84,6 +92,7 @@ jobs:
           path: |
             output/*.iso
             output/*.sha256
+            output/*.manifest.json
             output/andromeda-v1-history.json
           compression-level: 0
           retention-days: 3
