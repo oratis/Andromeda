@@ -28,7 +28,8 @@ cargo run --locked --bin andromeda -- hardware probe
 
 ## Architecture decisions
 
-Material decisions should include an ADR under `docs/adr/` with:
+Material decisions should include an ADR under [`docs/adr/`](docs/adr/) — copy
+[`docs/adr/0000-template.md`](docs/adr/0000-template.md) — with:
 
 1. context and user problem;
 2. options considered;
