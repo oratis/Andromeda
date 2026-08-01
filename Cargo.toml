@@ -2,6 +2,7 @@
 members = [
     "crates/andromeda-cli",
     "crates/andromeda-core",
+    "crates/andromeda-hardware",
     "crates/andromeda-policy",
     "crates/andromeda-runtime",
     "crates/andromeda-taskd",
@@ -17,6 +18,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 andromeda-core = { path = "crates/andromeda-core" }
+andromeda-hardware = { path = "crates/andromeda-hardware" }
 andromeda-policy = { path = "crates/andromeda-policy" }
 andromeda-runtime = { path = "crates/andromeda-runtime" }
 axum = "0.8.4"

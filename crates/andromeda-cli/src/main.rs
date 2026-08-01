@@ -6,6 +6,7 @@ use andromeda_core::{
     ActionId, ActionKind, ActionPlan, ActionSpec, Capability, CapabilityId, CapabilityResource,
     FileAccess, Intent, IsolationLevel, RecoverySemantics, RiskLevel, TaskId, TaskState,
 };
+use andromeda_hardware::{HcmManifest, evaluate_manifest, probe_host};
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{CreateTaskRequest, FileTaskStore, StateTransitionRequest, TaskService};
 use chrono::Utc;
@@ -31,6 +32,11 @@ enum Command {
     Task {
         #[command(subcommand)]
         command: TaskCommand,
+    },
+    /// Probe the current machine and evaluate Hardware Compatibility Manifests.
+    Hardware {
+        #[command(subcommand)]
+        command: HardwareCommand,
     },
 }
 
@@ -64,6 +70,14 @@ enum TaskCommand {
         #[arg(long, default_value = "local-user")]
         actor: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum HardwareCommand {
+    /// Print a privacy-conscious hardware report.
+    Probe,
+    /// Probe this host and evaluate one HCM JSON document.
+    Check { manifest: PathBuf },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -118,9 +132,25 @@ impl From<CliTaskState> for TaskState {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let service = TaskService::new(FileTaskStore::open(cli.state_dir)?, PolicyEngine::default());
     match cli.command {
-        Command::Task { command } => handle_task(&service, command)?,
+        Command::Task { command } => {
+            let service =
+                TaskService::new(FileTaskStore::open(cli.state_dir)?, PolicyEngine::default());
+            handle_task(&service, command)?;
+        }
+        Command::Hardware { command } => handle_hardware(command)?,
+    }
+    Ok(())
+}
+
+fn handle_hardware(command: HardwareCommand) -> Result<(), Box<dyn std::error::Error>> {
+    let report = probe_host()?;
+    match command {
+        HardwareCommand::Probe => print_json(&report)?,
+        HardwareCommand::Check { manifest } => {
+            let manifest: HcmManifest = serde_json::from_reader(std::fs::File::open(manifest)?)?;
+            print_json(&evaluate_manifest(&report, &manifest))?;
+        }
     }
     Ok(())
 }

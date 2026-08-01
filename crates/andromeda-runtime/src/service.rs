@@ -373,7 +373,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let service = service(&temp);
         let created = service
-            .create(inspection_request("/workspace"))
+            .create(inspection_request(workspace_path()))
             .expect("create");
         assert_eq!(created.state, TaskState::Ready);
 
@@ -396,7 +396,7 @@ mod tests {
         let temp = TempDir::new().expect("tempdir");
         let service = service(&temp);
         let created = service
-            .create(inspection_request("/workspace"))
+            .create(inspection_request(workspace_path()))
             .expect("create");
         let running = service
             .transition(
@@ -409,6 +409,17 @@ mod tests {
             )
             .expect("transition");
         assert_eq!(running.revision, 1);
+        let revision_files = std::fs::read_dir(temp.path())
+            .expect("state directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "json")
+            })
+            .count();
+        assert_eq!(revision_files, 2);
 
         let error = service
             .transition(
@@ -428,7 +439,7 @@ mod tests {
 
     #[test]
     fn rejects_dependency_cycles() {
-        let mut request = inspection_request("/workspace");
+        let mut request = inspection_request(workspace_path());
         let second = ActionId::new();
         request.plan.actions[0].depends_on = vec![second];
         request.plan.actions.push(ActionSpec {
@@ -446,5 +457,15 @@ mod tests {
             validate_plan(&request.plan, &request.capabilities),
             Err(ValidationError::DependencyCycle)
         );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn workspace_path() -> &'static str {
+        "/workspace"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn workspace_path() -> &'static str {
+        r"C:\workspace"
     }
 }

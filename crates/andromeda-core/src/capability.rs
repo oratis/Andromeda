@@ -152,23 +152,57 @@ mod tests {
 
     #[test]
     fn file_scope_rejects_sibling_prefixes() {
-        let capability = file_capability("/work/project", FileAccess::Read);
-        assert!(capability.permits_file(Path::new("/work/project/src/lib.rs"), FileAccess::Read));
-        assert!(!capability.permits_file(Path::new("/work/project-evil/key"), FileAccess::Read));
+        let (root, child, sibling, _, _) = test_paths();
+        let capability = file_capability(root, FileAccess::Read);
+        assert!(capability.permits_file(Path::new(child), FileAccess::Read));
+        assert!(!capability.permits_file(Path::new(sibling), FileAccess::Read));
     }
 
     #[test]
     fn file_scope_normalizes_parent_components() {
-        let capability = file_capability("/work/project", FileAccess::Read);
-        assert!(!capability.permits_file(
-            Path::new("/work/project/../secrets/token"),
-            FileAccess::Read
-        ));
+        let (root, _, _, traversal, _) = test_paths();
+        let capability = file_capability(root, FileAccess::Read);
+        assert!(!capability.permits_file(Path::new(traversal), FileAccess::Read));
     }
 
     #[test]
     fn write_grant_does_not_imply_read() {
-        let capability = file_capability("/work/project", FileAccess::Write);
-        assert!(!capability.permits_file(Path::new("/work/project/file"), FileAccess::Read));
+        let (root, _, _, _, file) = test_paths();
+        let capability = file_capability(root, FileAccess::Write);
+        assert!(!capability.permits_file(Path::new(file), FileAccess::Read));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn test_paths() -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
+        (
+            "/work/project",
+            "/work/project/src/lib.rs",
+            "/work/project-evil/key",
+            "/work/project/../secrets/token",
+            "/work/project/file",
+        )
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn test_paths() -> (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
+        (
+            r"C:\work\project",
+            r"C:\work\project\src\lib.rs",
+            r"C:\work\project-evil\key",
+            r"C:\work\project\..\secrets\token",
+            r"C:\work\project\file",
+        )
     }
 }
