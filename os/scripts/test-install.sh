@@ -82,6 +82,18 @@ cpu=max
 if [[ -c /dev/kvm ]]; then
     accel=kvm
     cpu=host
+elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
+    # Mirror test-gcp-nested.sh:41's `test -c /dev/kvm` precheck. Without KVM the
+    # TCG software fallback runs ~10x slower: the 45m install timeout plus the
+    # 2700s boot deadline can exceed the os-e2e job `timeout-minutes: 150`, so a
+    # missing /dev/kvm would surface as a confusing timeout instead of a clear
+    # failure. Fail fast; set ANDROMEDA_ALLOW_TCG=1 to force TCG for local debug.
+    printf 'test-install.sh: /dev/kvm is unavailable.\n' >&2
+    printf 'The TCG software fallback can exceed the os-e2e job timeout (150m) and surface as a confusing timeout rather than a clear failure.\n' >&2
+    printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
+    exit 1
+else
+    printf 'WARNING: /dev/kvm is unavailable; ANDROMEDA_ALLOW_TCG=1 is set, using slow TCG emulation. Expect a very slow run that may exceed CI budgets.\n' >&2
 fi
 
 common_qemu=(
@@ -161,8 +173,70 @@ blkid "${nbd_device}"* \
 sfdisk --dump "${nbd_device}" \
     >"${DIAGNOSTICS_DIR}/host/partition-table.sfdisk" 2>&1 || true
 
-# Diagnostics are collected above; report the primary failure cause before
-# any strict assertion can mask it with a confusing grep or mount error.
+# Harvest the disk-side evidence UNCONDITIONALLY, before any strict exit check.
+# On a bootc install failure the anaconda %onerror hook has already written its
+# diagnostics (program.log, the Payloads-module journal that carries bootc's own
+# stderr, etc.) to EFI/Andromeda/diagnostics on the ESP; collecting them here --
+# rather than after the exit-code gates below -- is what lets the failure path
+# upload the same disk-side evidence as the success path, turning an opaque
+# "bootc ... exited with status 1" into a root-causable file. Everything in this
+# block is best-effort: a missing/unmountable partition must not mask the real
+# failure cause reported by the exit-code checks that follow.
+esp_partition="$(
+    lsblk -prno NAME,PARTTYPE "${nbd_device}" \
+        | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {
+            print $1
+        }'
+)"
+root_partition="$(
+    lsblk -prno NAME,LABEL "${nbd_device}" \
+        | awk '$2 == "andromeda-root" { print $1 }'
+)"
+
+if [[ "$(wc -w <<<"${esp_partition}")" -eq 1 ]]; then
+    esp_mount="$(mktemp -d "${OUTPUT_DIR}/esp.XXXXXX")"
+    if mount -o ro "${esp_partition}" "${esp_mount}"; then
+        find "${esp_mount}" -maxdepth 4 -type f -printf '%P\n' \
+            | sort | tee "${OUTPUT_DIR}/esp-tree.txt" || true
+        if [[ -d "${esp_mount}/EFI/Andromeda/diagnostics" ]]; then
+            cp -a "${esp_mount}/EFI/Andromeda/diagnostics/." \
+                "${DIAGNOSTICS_DIR}/installer/" || true
+        fi
+    else
+        printf 'WARNING: could not mount ESP %s for diagnostics.\n' \
+            "${esp_partition}" >&2
+        rmdir "${esp_mount}" 2>/dev/null || true
+        esp_mount=""
+    fi
+fi
+
+if [[ "$(wc -w <<<"${root_partition}")" -eq 1 ]]; then
+    root_mount="$(mktemp -d "${OUTPUT_DIR}/root.XXXXXX")"
+    if mount -o ro,noload "${root_partition}" "${root_mount}"; then
+        find "${root_mount}" -type f \
+            \( -path '*/var/log/anaconda/*' \
+            -o -name anaconda-ks.cfg \
+            -o -name original-ks.cfg \
+            -o -name andromeda-uefi-fallback.log \) \
+            -print | sort >"${DIAGNOSTICS_DIR}/root/log-paths.txt" || true
+        : >"${DIAGNOSTICS_DIR}/root/log-excerpts.txt"
+        while IFS= read -r installed_log; do
+            printf '\n===== %s =====\n' \
+                "${installed_log#"${root_mount}"}" \
+                >>"${DIAGNOSTICS_DIR}/root/log-excerpts.txt"
+            tail -n 1000 "${installed_log}" \
+                >>"${DIAGNOSTICS_DIR}/root/log-excerpts.txt" 2>&1 || true
+        done <"${DIAGNOSTICS_DIR}/root/log-paths.txt"
+    else
+        printf 'WARNING: could not mount root %s for diagnostics.\n' \
+            "${root_partition}" >&2
+        rmdir "${root_mount}" 2>/dev/null || true
+        root_mount=""
+    fi
+fi
+
+# Disk-side evidence is now captured; report the primary failure cause. On any
+# exit here the EXIT trap unmounts the ESP/root harvested above.
 if [[ "${install_status}" -ne 0 ]]; then
     printf 'Installer exited with status %s.\n' "${install_status}" >&2
     tail -100 "${INSTALL_LOG}" >&2 || true
@@ -179,44 +253,11 @@ if [[ "${partition_probe_ok}" -ne 1 ]]; then
     exit 1
 fi
 
-esp_partition="$(
-    lsblk -prno NAME,PARTTYPE "${nbd_device}" \
-        | awk 'tolower($2) == "c12a7328-f81f-11d2-ba4b-00a0c93ec93b" {
-            print $1
-        }'
-)"
-root_partition="$(
-    lsblk -prno NAME,LABEL "${nbd_device}" \
-        | awk '$2 == "andromeda-root" { print $1 }'
-)"
-test "$(wc -w <<<"${esp_partition}")" -eq 1
-test "$(wc -w <<<"${root_partition}")" -eq 1
+# Success path: the partitions were found and must be mounted for the strict
+# assertions below (partition_probe_ok=1 guarantees both were present).
+test -n "${esp_mount}"
+test -n "${root_mount}"
 
-esp_mount="$(mktemp -d "${OUTPUT_DIR}/esp.XXXXXX")"
-root_mount="$(mktemp -d "${OUTPUT_DIR}/root.XXXXXX")"
-mount -o ro "${esp_partition}" "${esp_mount}"
-find "${esp_mount}" -maxdepth 4 -type f -printf '%P\n' \
-    | sort | tee "${OUTPUT_DIR}/esp-tree.txt"
-if [[ -d "${esp_mount}/EFI/Andromeda/diagnostics" ]]; then
-    cp -a "${esp_mount}/EFI/Andromeda/diagnostics/." \
-        "${DIAGNOSTICS_DIR}/installer/"
-fi
-
-mount -o ro,noload "${root_partition}" "${root_mount}"
-find "${root_mount}" -type f \
-    \( -path '*/var/log/anaconda/*' \
-    -o -name anaconda-ks.cfg \
-    -o -name original-ks.cfg \
-    -o -name andromeda-uefi-fallback.log \) \
-    -print | sort >"${DIAGNOSTICS_DIR}/root/log-paths.txt"
-: >"${DIAGNOSTICS_DIR}/root/log-excerpts.txt"
-while IFS= read -r installed_log; do
-    printf '\n===== %s =====\n' \
-        "${installed_log#"${root_mount}"}" \
-        >>"${DIAGNOSTICS_DIR}/root/log-excerpts.txt"
-    tail -n 1000 "${installed_log}" \
-        >>"${DIAGNOSTICS_DIR}/root/log-excerpts.txt" 2>&1 || true
-done <"${DIAGNOSTICS_DIR}/root/log-paths.txt"
 grep --text --extended-regexp \
     'ANDROMEDA_INSTALLER_(EFI_(START|OK)|KARGS_OK)' "${INSTALL_LOG}" \
     | tee "${OUTPUT_DIR}/install-post.log"
@@ -260,15 +301,23 @@ qemu_pid="$!"
 
 deadline="$((SECONDS + 2700))"
 while (( SECONDS < deadline )); do
-    if grep -qE 'ANDROMEDA_.*_FAILED' "${BOOT_LOG}" 2>/dev/null; then
+    # Strip serial cursor-control residue (NUL, CR, ANSI CSI escapes) before the
+    # trigger greps so a marker split mid-token by control chars can't cause a
+    # false 2700s timeout. This mirrors the Python sequence validator below and
+    # test-gcp-nested.sh:78-85's LC_ALL=C extraction on a normalized copy.
+    boot_log_stripped="$(
+        LC_ALL=C tr -d '\000\r' <"${BOOT_LOG}" 2>/dev/null \
+            | LC_ALL=C sed -E 's#\x1b\[[0-?]*[ -/]*[@-~]##g'
+    )" || boot_log_stripped=""
+    if LC_ALL=C grep -qE 'ANDROMEDA_.*_FAILED' <<<"${boot_log_stripped}"; then
         printf 'Installed system emitted a failure marker.\n' >&2
-        grep -E 'ANDROMEDA_.*_(FAILED|OK)' "${BOOT_LOG}" >&2
+        LC_ALL=C grep -aE 'ANDROMEDA_.*_(FAILED|OK)' <<<"${boot_log_stripped}" >&2
         exit 1
     fi
-    if grep -q ANDROMEDA_E2E_OK "${BOOT_LOG}" 2>/dev/null; then
-        grep -E \
+    if LC_ALL=C grep -q ANDROMEDA_E2E_OK <<<"${boot_log_stripped}"; then
+        LC_ALL=C grep -aE \
             'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
-            "${BOOT_LOG}"
+            <<<"${boot_log_stripped}"
         python3 - "${BOOT_LOG}" <<'PY'
 import pathlib
 import re

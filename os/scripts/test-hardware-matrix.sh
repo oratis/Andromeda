@@ -34,11 +34,21 @@ profile_timeout_seconds=600
 if [[ -c /dev/kvm ]]; then
     accel=kvm
     cpu=host
+elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
+    # Mirror test-gcp-nested.sh:41's `test -c /dev/kvm` precheck. Full-system TCG
+    # emulation is ~10x slower; the TCG per-profile budget (3600s x 3 profiles)
+    # can exceed the os-e2e job `timeout-minutes: 150`, turning a missing
+    # /dev/kvm into confusing timeouts rather than a clear failure. Fail fast;
+    # set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.
+    printf 'test-hardware-matrix.sh: /dev/kvm is unavailable.\n' >&2
+    printf 'Full-system TCG emulation is ~10x slower and its per-profile budget can exceed the os-e2e job timeout (150m).\n' >&2
+    printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
+    exit 1
 else
     # Full-system TCG emulation is roughly an order of magnitude slower than
     # KVM; the 600 s per-profile budget would always time out.
     profile_timeout_seconds=3600
-    printf 'WARNING: /dev/kvm is unavailable; falling back to TCG emulation with a %s s per-profile timeout. Expect a very slow run.\n' \
+    printf 'WARNING: /dev/kvm is unavailable; ANDROMEDA_ALLOW_TCG=1 is set, falling back to TCG emulation with a %s s per-profile timeout. Expect a very slow run.\n' \
         "${profile_timeout_seconds}" >&2
 fi
 readonly profile_timeout_seconds
