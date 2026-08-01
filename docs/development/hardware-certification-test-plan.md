@@ -217,14 +217,22 @@ HCM 只保存满足精确匹配所需的非唯一字段和证据 URI。
 
 ## 10. Tier 晋级与阻断
 
+正式支持 Tier 与代码中的 `SupportTier` 枚举一一对应，阶梯从低到高为
+`Blocked < Community < Reference < Supported < Certified`（`Reference`
+只有虚拟 L0–L2 证据，低于要求实体认证的 `Supported`）：
+
 | Tier | 最低要求 |
 | --- | --- |
 | Blocked | 错误平台、启动关键驱动缺失、证据失败/过期或 artifact 未固定 |
 | Community | 上游路径存在；公开缺口；不承诺实验室 SLO |
 | Reference | L0–L2 全绿；用于虚拟参考，不代表真机 |
-| Pilot | 一台精确 cohort 完成 L3 基础套件；有已知问题和恢复路径 |
 | Supported | 两轮连续 RC 全套通过；artifact pin、当前证据、责任人和期限完整 |
 | Certified | Supported 加长稳、外设/功耗目标、发布灰度和支持 SLO |
+
+本文其余章节出现的 Pilot、Experimental、Preview 与 Watch 是**实验室
+cohort 阶段标签**，不是 `SupportTier` 的取值，HCM 中不能声明它们。规划中
+的 Pilot 阶段（一台精确 cohort 完成 L3 基础套件、有已知问题和恢复路径）
+在成为正式 Tier 之前，对应机型在 HCM 中最多声明 `Community`。
 
 发布阻断规则：
 
