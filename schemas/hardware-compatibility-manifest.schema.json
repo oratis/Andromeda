@@ -10,13 +10,7 @@
     "name",
     "tier",
     "boot_provider",
-    "selectors",
-    "requirements",
-    "kernel_channels",
-    "artifacts",
-    "evidence",
-    "expires_at",
-    "notes"
+    "selectors"
   ],
   "properties": {
     "schema_version": {
@@ -109,12 +103,6 @@
     "selector": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "os_family",
-        "architectures",
-        "manufacturer_contains",
-        "model_prefix"
-      ],
       "properties": {
         "os_family": {
           "enum": [
@@ -136,15 +124,59 @@
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "minLength": 1
         },
         "model_prefix": {
           "type": [
             "string",
             "null"
-          ]
+          ],
+          "minLength": 1
         }
-      }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "os_family"
+          ],
+          "properties": {
+            "os_family": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "required": [
+            "architectures"
+          ],
+          "properties": {
+            "architectures": {
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "required": [
+            "manufacturer_contains"
+          ],
+          "properties": {
+            "manufacturer_contains": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "required": [
+            "model_prefix"
+          ],
+          "properties": {
+            "model_prefix": {
+              "type": "string"
+            }
+          }
+        }
+      ]
     },
     "memory": {
       "type": "object",
@@ -167,11 +199,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "type",
-        "uefi",
-        "secure_boot",
-        "tpm2",
-        "virtualization"
+        "type"
       ],
       "properties": {
         "type": {
@@ -209,11 +237,6 @@
       "required": [
         "type",
         "bus",
-        "vendor_id",
-        "product_id",
-        "subsystem_vendor_id",
-        "subsystem_product_id",
-        "revision",
         "driver_required"
       ],
       "properties": {
@@ -267,8 +290,7 @@
         "name",
         "version",
         "sha256",
-        "source",
-        "signing_key_id"
+        "source"
       ],
       "properties": {
         "kind": {

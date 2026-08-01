@@ -30,12 +30,17 @@ pub struct MemoryInfo {
     pub bytes: Option<u64>,
 }
 
+/// Boot-security capabilities of the probed host.
+///
+/// Every field is tri-state: `None` means "could not be verified" (for
+/// example a probe running without the privileges the platform needs), which
+/// is deliberately distinct from `Some(false)` ("verified absent").
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootInfo {
     pub uefi: Option<bool>,
     pub secure_boot: Option<bool>,
-    pub tpm2: bool,
-    pub virtualization: bool,
+    pub tpm2: Option<bool>,
+    pub virtualization: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,14 +81,22 @@ impl HardwareReport {
     pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 }
 
+/// Support tiers, declared in ascending order of assurance.
+///
+/// The derived `Ord` follows this ladder: `Blocked < Community < Reference <
+/// Supported < Certified`. `Reference` sits below `Supported` because it is
+/// backed by virtual (L0–L2) evidence only, while `Supported`/`Certified`
+/// require physical-machine certification. Keep the declaration order, the
+/// JSON schema enum, and the ladder documented in
+/// `docs/development/hardware-certification-test-plan.md` in sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SupportTier {
     Blocked,
     Community,
+    Reference,
     Supported,
     Certified,
-    Reference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,6 +212,10 @@ pub struct CompatibilityEvaluation {
     pub requirements_met: bool,
     pub declared_tier: SupportTier,
     pub effective_tier: SupportTier,
+    /// The boot provider declared by the manifest. The matcher surfaces it
+    /// for transparency; enforcement against the target platform happens in
+    /// the installer preflight, not here.
+    pub boot_provider: BootProvider,
     #[serde(default)]
     pub evidence: Vec<String>,
     #[serde(default)]

@@ -13,7 +13,7 @@ pub use diagnosis::{
     DeviceCategory, DeviceFinding, DeviceSupport, HardwareDiagnosis, HardwareReadiness,
     diagnose_report,
 };
-pub use matcher::evaluate_manifest;
+pub use matcher::{evaluate_manifest, evaluate_manifest_at};
 pub use model::{
     ArtifactKind, ArtifactPin, BootInfo, BootProvider, CapabilityEvidence, CapabilityRequirement,
     CompatibilityEvaluation, CpuInfo, DeviceInfo, EvidenceResult, HardwareIdentity, HardwareReport,
