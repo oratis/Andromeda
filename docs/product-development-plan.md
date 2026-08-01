@@ -473,6 +473,18 @@ M1/M2 游戏 Preview 的明确依赖是：
 
 ### 6.2 硬件 Tier
 
+> **两套阶梯，勿混淆：** 本节描述的是**产品线里程碑**（从虚拟 CI 平台到顶层
+> OEM 共控整机线），属于业务/工程规划概念。它与代码里机器可校验的
+> `SupportTier` 枚举是**两套不同的阶梯**。机器可校验的 `SupportTier`
+> （被 `andromeda hardware check --require-tier` 使用）由代码定义，权威来源为
+> `crates/andromeda-hardware/src/model.rs`，其阶梯为
+> `blocked < community < reference < supported < certified`；其中 `reference`
+> 表示"只有虚拟（L0–L2）证据、低于 supported"，语义上对应下文的 **CI-0 虚拟
+> 参考平台**，**不是**下文最高的"OEM Reference Design"产品线。阶梯的权威散文
+> 定义见 `docs/development/hardware-compatibility.md`（"Tier 阶梯从低到高为
+> `blocked < community < reference < supported < certified`"）。因此下文标题
+> **OEM Reference Design** 是产品线里程碑，不是 `SupportTier` 的取值。
+
 #### CI-0：虚拟参考平台
 
 - QEMU x86-64；
@@ -518,11 +530,16 @@ CI-0 用于持续集成，不代表真实整机支持等级。
 - 连续两个正式版本升级；
 - 关键 Windows 兼容负载。
 
-#### Tier 4：Reference
+#### OEM Reference Design（顶层硬件产品线）
 
 - Andromeda 与 OEM 共同控制 BOM、固件、恢复镜像和生命周期；
-- 除 Tier 3 全部要求外，提供固件 SLA、出厂 HCM 与长期更新承诺；
+- 除 Tier 3 Certified 全部要求外，提供固件 SLA、出厂 HCM 与长期更新承诺；
 - 这是达到 macOS 式软硬件一致性的最终硬件产品线。
+
+这是一个业务/产品线里程碑，**不是** `SupportTier` 枚举取值（其取值中并没有
+"顶层 reference"这一级；代码里的 `reference` 反而是次低级的虚拟证据档，见本节
+开头的说明）。此类整机仍通过机器可校验的 `SupportTier`（最高为 `certified`）
+表达其硬件支持判定。
 
 ### 6.3 Hardware Compatibility Manifest（HCM）
 

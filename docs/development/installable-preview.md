@@ -115,13 +115,20 @@ CI 分区使用 UEFI ESP、独立 `/boot` 和带 `andromeda-root` 标签的根�
 独立 `/boot` 遵循 bootc/bootupd 的推荐磁盘布局；验收脚本按 GPT 类型和文件系统
 标签发现分区，不依赖易漂移的 `p1`、`p2` 顺序。
 
-串口必须按顺序出现：
+串口必须按顺序出现以下 10 个成功标记（与
+[Daily Driver Candidate E2E](daily-driver-e2e.md) 保持一致；后加入的
+`ANDROMEDA_SELINUX_LABELS_OK` 与三个 `ANDROMEDA_DAILY_DRIVER_OK phase=...`
+也在此强制校验）：
 
 ```text
+ANDROMEDA_SELINUX_LABELS_OK
+ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1
 ANDROMEDA_FIRST_BOOT_OK revision=1
 ANDROMEDA_UPDATE_STAGED_OK revision=2
+ANDROMEDA_DAILY_DRIVER_OK phase=updating revision=2
 ANDROMEDA_UPDATE_BOOT_OK revision=2
 ANDROMEDA_ROLLBACK_STAGED_OK revision=1
+ANDROMEDA_DAILY_DRIVER_OK phase=rolling-back revision=1
 ANDROMEDA_ROLLBACK_BOOT_OK revision=1
 ANDROMEDA_E2E_OK
 ```
@@ -151,15 +158,22 @@ GitHub Actions 运行同一脚本，并保存 ISO、SHA-256、安装串口和首
 该运行提供了以下实际证据：
 
 - 在全新 32 GiB qcow2 上建立 600 MiB ESP、2 GiB `/boot` 和
-  29.4 GiB `andromeda-root`，安装器退出状态为 0；
+  29.4 GiB `andromeda-root`，安装器退出状态为 0（**注**：本次记录的运行使用
+  32 GiB 盘；此后 `os/scripts/test-install.sh` 已改为创建 64 GiB 盘，与上文
+  "自动化空盘验收"一致，本证据快照早于该调整）；
 - ESP 同时包含 Fedora shim/GRUB 和 `EFI/BOOT/BOOTX64.EFI` fallback，OVMF NVRAM
   包含 `Andromeda` 启动项；
 - 三次硬盘启动都保留同一 `root=UUID` 与 `boot=UUID`，使用
   `selinux=1 enforcing=1`，没有继承安装环境的 `selinux=0`；
 - 首次启动、revision 2 和回滚后的 revision 1 均通过 UEFI、SELinux enforcing、
   硬件报告、`andromeda-taskd /healthz` 与 SDDM 检查；
-- 串口依次出现本节上一段列出的六个成功标记，最终为 `ANDROMEDA_E2E_OK`，且没有
-  `ANDROMEDA_E2E_FAILED`；
+- 串口依次出现当时脚本的六个成功标记（`ANDROMEDA_FIRST_BOOT_OK` →
+  `ANDROMEDA_UPDATE_STAGED_OK` → `ANDROMEDA_UPDATE_BOOT_OK` →
+  `ANDROMEDA_ROLLBACK_STAGED_OK` → `ANDROMEDA_ROLLBACK_BOOT_OK` →
+  `ANDROMEDA_E2E_OK`），最终为 `ANDROMEDA_E2E_OK`，且没有 `ANDROMEDA_E2E_FAILED`
+  （**注**：本次运行早于上文"自动化空盘验收"新增的 `ANDROMEDA_SELINUX_LABELS_OK`
+  与三个 `ANDROMEDA_DAILY_DRIVER_OK phase=...` 标记，因此只记录了这六个；现行
+  10 标记序列以上文为准）；
 - `qemu-img check` 报告磁盘镜像无错误。
 
 这个证据只证明表格中定义的 QEMU/KVM x86-64 + OVMF 边界，不把任何真实 PC 或

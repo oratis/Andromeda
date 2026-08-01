@@ -16,7 +16,7 @@
 2. **Andromeda 应是 AI 原生系统产品，不是换皮 Linux 发行版。** 差异化应位于系统服务、权限、任务运行时、桌面 shell、应用意图接口和可审计执行层，而不是壁纸、启动器或聊天侧栏。
 3. **兼容性要采用多路径组合。** Linux 原生应用直接运行；Windows 应用优先 Wine/Proton 类 API 兼容层，必要时进入 KVM 虚拟机；Web/PWA 作为通用路径；macOS 应用仅在授权允许的 Apple 硬件上通过虚拟化探索，不能承诺跨任意 PC。
 4. **AI agent 必须是“受控主体”，而不是超级管理员。** 借鉴 Codex/Claude Code 的范式：上下文、工具、计划、执行、验证、恢复；但把权限从简单弹窗升级为 OS 原生 capability、作用域、预算、审计、回滚和来源证明。
-5. **“所有硬件”必须产品化为等级。** 采用与产品开发计划 §6.2 一致的等级体系：CI-0 虚拟参考平台、Tier 0 Blocked、Tier 1 Community、Tier 2 Supported、Tier 3 Certified、Tier 4 Reference，而非作无法验证的绝对承诺。
+5. **“所有硬件”必须产品化为等级。** 采用与产品开发计划 §6.2 一致的产品线里程碑：CI-0 虚拟参考平台、Tier 0 Blocked、Tier 1 Community、Tier 2 Supported、Tier 3 Certified，以及顶层的 OEM Reference Design 整机线，而非作无法验证的绝对承诺。这些产品线里程碑与机器可校验的 `SupportTier` 枚举（`blocked < community < reference < supported < certified`）是两套阶梯，详见 §3.2。
 6. **首个可交付产品应是可安装的 Linux-based OS。** 先证明 AI 原生交互和兼容编排，再评估是否将更多驱动、文件系统和网络服务移出内核，或长期采用更小的可信计算基。
 
 ### 推荐架构一句话
@@ -197,16 +197,23 @@ Fuchsia 把驱动、文件系统、网络栈等放在用户态组件中，Zircon
 
 ### 3.2 推荐支持等级
 
-支持等级与产品开发计划 §6.2 及硬件研究 §5 保持同一套定义：
+下表是**产品线里程碑**，与产品开发计划 §6.2 及硬件研究 §5 保持同一套定义。它与
+代码里机器可校验的 `SupportTier` 枚举是**两套不同的阶梯**：后者由
+`crates/andromeda-hardware/src/model.rs` 定义、被 `andromeda hardware check
+--require-tier` 使用，阶梯为 `blocked < community < reference < supported <
+certified`（散文定义见 `docs/development/hardware-compatibility.md`）。请特别注意
+`SupportTier` 里的 `reference` 是**次低级**、只有虚拟（L0–L2）证据，语义上对应下表
+的 **CI-0 虚拟参考平台**，而**不是**下表最高的 **OEM Reference Design** 产品线；后者
+是业务里程碑，不是 `SupportTier` 取值。
 
 | 等级 | 定义 | 承诺 |
 |---|---|---|
-| CI-0 | QEMU/KVM 虚拟参考平台 | CI 必须通过；开发者基准环境，不代表真实整机支持等级 |
+| CI-0 | QEMU/KVM 虚拟参考平台（对应代码 `SupportTier::reference` 的虚拟证据档） | CI 必须通过；开发者基准环境，不代表真实整机支持等级 |
 | Tier 0 Blocked | 缺少启动、安全、存储或关键恢复条件 | 默认阻止安装，并给出具体原因 |
 | Tier 1 Community | Live 环境可启动并完成硬件探测，有社区测试证据 | 不承诺休眠、功耗、摄像头、指纹或全部外设 |
 | Tier 2 Supported | 指定整机和固件组合通过正式测试 | 已知降级公开，系统更新有持续回归与修复承诺 |
 | Tier 3 Certified | 安装恢复、GPU、Wi‑Fi、音频、摄像头、蓝牙、睡眠、升级全部通过认证门 | 达到认证发布门并持续保持 |
-| Tier 4 Reference | Andromeda 与 OEM 共同控制 BOM、固件与生命周期 | 固件 SLA、出厂 HCM 与长期更新承诺 |
+| OEM Reference Design（产品线里程碑，非 `SupportTier` 取值） | Andromeda 与 OEM 共同控制 BOM、固件与生命周期 | 固件 SLA、出厂 HCM 与长期更新承诺 |
 
 每个机型生成机器可读的 `Hardware Compatibility Manifest`（HCM，术语见产品开发计划 §6.3）：
 

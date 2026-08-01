@@ -145,6 +145,7 @@ GCP 嵌套 KVM 可以证明：
 | 时间 | 2026-07-28 18:58:31–19:25:22 UTC |
 | GCP 主机 | `n2-standard-16`，16 vCPU、64 GiB RAM、Intel VT-x 嵌套 KVM，`us-central1-a` |
 | L2 虚拟机 | Q35/OVMF、4 vCPU、8 GiB RAM、32 GiB VirtIO 系统盘、VirtIO GPU、Intel HDA |
+| 磁盘尺寸说明 | 本次记录使用 32 GiB 系统盘；此后 `os/scripts/test-install.sh` 已改为创建 64 GiB 盘（见上文"自动验收场景"），本证据快照早于该调整 |
 | 源标识 | `daily-driver-final-b9150477f12f` |
 | ISO | `Andromeda-Developer-Preview-x86_64.iso`，约 3.8 GiB |
 | ISO SHA-256 | `6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108` |
