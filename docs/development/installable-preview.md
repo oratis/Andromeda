@@ -190,6 +190,44 @@ Mac 自动提升为 Supported/Certified。
   产品里程碑。
 - Secure Boot、TPM 测量启动、签名 HCM 和真实硬件 suspend/resume 尚未认证。
 
+## bootc 镜像签名 runbook（bootc image signing runbook，尚未启用 / NOT YET ENFORCED）
+
+交互式与 CI 安装都把 `--target-imgref` 指向可变、未签名的
+`ghcr.io/oratis/andromeda:edge`（`os/installer/interactive-defaults.ks`、
+`os/installer/andromeda-ci.ks`），对应 security-review.md 发现 #4。**当前没有启用
+bootc 签名策略**，原因是：尚不存在真实签名密钥，此刻打开 fail-closed 的严格策略会
+拒绝所有 registry 拉取，直接破坏 os-e2e 正在验证的 `:edge` 更新流程。因此本仓库只
+提供**模板 + runbook**，镜像内生效的 `/etc/containers/policy.json` 保持 Fedora 默认
+（`insecureAcceptAnything`），`:edge` 拉取照常工作。
+
+模板文件 `os/signing/policy.json.example` 以 `.example` 命名并置于 `os/signing/`，
+**不在** `COPY os/files/ /`（`os/Containerfile`）的镜像路径内，因此不会被安装为生效
+策略。它的语义是：`default: reject` 全局拒绝；仅对 `docker` 传输的
+`ghcr.io/oratis/andromeda` 要求 cosign 验签（`sigstoreSigned` + `keyPath`）；
+`containers-storage`/`oci`/`dir` 本地传输保持接受，以免破坏离线安装与 E2E 的本地
+OCI 导入路径。
+
+### 发布签名步骤（密钥就绪后 / cosign sign）
+
+1. 生成或取得 cosign 密钥对，私钥仅存放在受信任的发布/CI 机密中：
+   `cosign generate-key-pair`
+2. 每次发布对**按摘要固定**的镜像（而非可变 tag）签名：
+   `cosign sign --key cosign.key ghcr.io/oratis/andromeda@sha256:<digest>`
+3. 把 `cosign.pub` 作为可信公钥随发布分发。
+
+### 启用强制（activation，仅在密钥与签名镜像就绪后）
+
+1. 把 `cosign.pub` 放到 `os/files/etc/pki/andromeda/cosign.pub`（随
+   `COPY os/files/ /` 落到镜像内 `/etc/pki/andromeda/cosign.pub`，与模板里的
+   `keyPath` 对齐）。
+2. 把 `os/signing/policy.json.example` 复制为
+   `os/files/etc/containers/policy.json`——**此路径会被 `COPY os/files/ /` 安装为
+   生效策略**，从而开启强制；按需调整 `keyPath` 与 `signedIdentity`。
+3. 在 registry 上发布**已签名**镜像后重跑 os-e2e：确认已签名 `:edge` 的 `bootc`
+   更新在 fail-closed 策略下仍通过，且未签名镜像被拒。
+4. 仅当上述验证通过，才把启用改动合入 `main`。在此之前，本节记录的策略保持
+   **未启用**，不得把模板放进 `os/files/etc/containers/policy.json`。
+
 ## 上游合约
 
 - [image-builder generic bootc ISO](https://osbuild.org/docs/developer-guide/projects/image-builder/advanced/bootc/isos/)
