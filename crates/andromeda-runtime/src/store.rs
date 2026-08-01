@@ -4,7 +4,7 @@ use std::io::{self, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use andromeda_core::TaskId;
-use fs2::FileExt;
+use fs4::fs_std::FileExt;
 use thiserror::Error;
 use uuid::Uuid;
 
