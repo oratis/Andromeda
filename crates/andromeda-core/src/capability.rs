@@ -58,7 +58,7 @@ impl FileAccess {
 
 /// Resource scope. Secret values are intentionally never stored here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CapabilityResource {
     /// Grants file access under `root` (after lexical normalization).
     Files { root: PathBuf, access: FileAccess },
@@ -82,16 +82,19 @@ pub enum CapabilityResource {
 
 /// A scoped permission proposed by a plan and granted by host policy or a user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Capability {
     pub id: CapabilityId,
     pub resource: CapabilityResource,
     pub issued_to: String,
     pub issued_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
-    /// Reserved at the policy level: single-use consumption (invalidating the
-    /// capability after its first successful execution) is enforced by the
-    /// runtime layer, which owns execution state. The policy engine treats a
-    /// `single_use` capability like any other grant.
+    /// Reserved; not yet enforced (no executor exists). Single-use
+    /// consumption — invalidating the capability after its first successful
+    /// execution — will belong to the runtime execution layer once it exists;
+    /// there is no such layer today, so nothing consumes or invalidates this
+    /// flag. The policy engine treats a `single_use` capability like any other
+    /// grant.
     pub single_use: bool,
 }
 
@@ -318,6 +321,24 @@ mod tests {
         let encoded = serde_json::to_string(&capability).expect("serialize capability");
         let decoded: Capability = serde_json::from_str(&encoded).expect("deserialize capability");
         assert_eq!(decoded, capability);
+    }
+
+    #[test]
+    fn capability_rejects_unknown_fields() {
+        // A camelCase typo of `expires_at` must now be rejected outright
+        // instead of being silently dropped (which would leave `expires_at`
+        // as `None`, i.e. a never-expiring grant — a fail-open widening).
+        let capability = file_capability("/work/project", FileAccess::Read);
+        let mut value = serde_json::to_value(&capability).expect("serialize capability");
+        value.as_object_mut().expect("object").insert(
+            "expiresAt".into(),
+            serde_json::json!("2099-01-01T00:00:00Z"),
+        );
+        let decoded: Result<Capability, _> = serde_json::from_value(value);
+        assert!(
+            decoded.is_err(),
+            "unknown field expiresAt must be rejected, got {decoded:?}"
+        );
     }
 
     #[cfg(not(target_os = "windows"))]

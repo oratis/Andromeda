@@ -131,6 +131,7 @@ pub enum RecoverySemantics {
 
 /// One typed action proposed as part of a task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionSpec {
     pub id: ActionId,
     pub name: String,
@@ -159,6 +160,7 @@ impl ActionSpec {
 
 /// A versioned, serializable plan. Plans contain no credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionPlan {
     pub schema_version: u32,
     pub task_id: TaskId,

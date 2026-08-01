@@ -40,6 +40,7 @@ impl FromStr for TaskId {
 
 /// The immutable user intent captured before planning begins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Intent {
     pub summary: String,
     pub requested_by: String,
