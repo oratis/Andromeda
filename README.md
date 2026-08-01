@@ -185,6 +185,10 @@ curl http://127.0.0.1:7777/healthz
 
 请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。项目正在建立 ADR 实践：关键系统设计将通过 ADR（模板与流程见 [docs/adr/](./docs/adr/)）和小型、可验证的 PR 推进；任何进入特权边界的实现都必须同时提供威胁模型、故障路径和测试证据。
 
+使用 Codex 进行调研、开发、安装 E2E、故障诊断和发布时，可调用仓库内的
+[`$andromeda-os-engineering` skill](./skills/andromeda-os-engineering/SKILL.md)。它包含项目边界、
+测试与合并门槛、GCP 生命周期规则和已知故障防线，并提供只读仓库/PR 审计脚本。
+
 项目使用 [Apache License 2.0](./LICENSE)。
 
 ---
