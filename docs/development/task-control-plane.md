@@ -43,7 +43,9 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 
 ### Host 校验（DNS rebinding 防护）
 
-`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost`、`127.0.0.1`、`[::1]`（可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。注意：这不是鉴权；本地任意进程仍可访问 API。若把 `ANDROMEDA_LISTEN` 改为非 loopback 地址，所有请求都会因 Host 校验失败而被拒绝——这是有意的防裸奔行为。
+`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost`、`127.0.0.1`、`[::1]`（可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
+
+注意：Host 校验**只防御浏览器发起的 DNS rebinding**，不是鉴权，也**不能保护非 loopback 绑定**。它只检查请求携带的 `Host` 头取值，不检查实际入站接口。任何非浏览器客户端（curl／脚本／攻击者）都可以自带 `Host: localhost` 通过校验——因此若把 `ANDROMEDA_LISTEN` 改为非 loopback 地址，API 会向该网络**暴露且无鉴权**。**禁止把 `taskd` 绑定到 loopback 之外。** 此外，本地任意进程/用户经 loopback 亦可无鉴权访问 API。远程鉴权在下述能力实现前不存在（参见 `getting-started.md`、`README.md` 的一致说明）。
 
 ### `Ready` 状态的语义
 
