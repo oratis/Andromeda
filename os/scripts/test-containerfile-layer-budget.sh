@@ -21,13 +21,18 @@ readonly OUTPUT_DIR="${1:-${ANDROMEDA_OUTPUT_DIR:-${REPOSITORY_ROOT}/output}}"
 readonly LAYER_BUDGET_MODE="${ANDROMEDA_LAYER_BUDGET_MODE:-all}"
 
 # Upper bound for any single OCI layer bootc stages one-at-a-time into the
-# installer's small /var/tmp overlay. Default 3 GiB (3221225472) is a HEADROOM
-# value, not the measured ceiling: it is chosen so the first post-build CI run
-# PASSES on the known-good image while still catching gross over-consolidation.
-# Once os-e2e prints the ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES_OBSERVED line, tighten
-# this toward OBSERVED plus a small margin. Override per build via
-# ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES.
-readonly MAXIMUM_PAYLOAD_LAYER_BYTES="${ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES:-3221225472}"
+# installer's small /var/tmp overlay.
+#
+# Calibrated against a real green build: the first post-build run on this branch
+# reported ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES_OBSERVED=1289780224 (~1.20 GiB) for
+# the known-good 23-layer payload. The ceiling is set to 2 GiB (~1.66x observed):
+# enough headroom for legitimate package growth, but tight enough to trip long
+# before a consolidated payload transaction can overflow the installer overlay
+# (the failure mode that broke `bootc install to-filesystem` previously).
+#
+# Re-read the OBSERVED line after any large payload change and re-calibrate.
+# Override per build via ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES.
+readonly MAXIMUM_PAYLOAD_LAYER_BYTES="${ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES:-2147483648}"
 
 case "${LAYER_BUDGET_MODE}" in
     count | size | all) ;;
