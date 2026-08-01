@@ -1,0 +1,16 @@
+[package]
+name = "andromeda-policy"
+description = "Deterministic capability and isolation policy engine for Andromeda"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+andromeda-core.workspace = true
+chrono.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true
