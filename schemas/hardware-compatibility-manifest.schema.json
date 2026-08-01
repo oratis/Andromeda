@@ -29,9 +29,9 @@
       "enum": [
         "blocked",
         "community",
+        "reference",
         "supported",
-        "certified",
-        "reference"
+        "certified"
       ]
     },
     "boot_provider": {

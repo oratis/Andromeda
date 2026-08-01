@@ -219,7 +219,15 @@ HCM 只保存满足精确匹配所需的非唯一字段和证据 URI。
 
 正式支持 Tier 与代码中的 `SupportTier` 枚举一一对应，阶梯从低到高为
 `Blocked < Community < Reference < Supported < Certified`（`Reference`
-只有虚拟 L0–L2 证据，低于要求实体认证的 `Supported`）：
+只有虚拟 L0–L2 证据，低于要求实体认证的 `Supported`）。该阶梯的**唯一权威
+来源**是 `crates/andromeda-hardware/src/model.rs` 的 `SupportTier` 枚举声明
+顺序；JSON schema 的 `tier` enum 与之同序，并由 CI 测试
+（`matcher.rs::schema_tier_enum_matches_model_declaration_order`）锁定。
+
+> 战略/产品文档里的 “OEM Reference Design”（OEM 共控 BOM/固件的高端产品线）
+> 是**产品线标签**，与本表 `Reference` 这个 `SupportTier` 取值无关：代码语义为准，
+> `Reference` 是阶梯的**次低**位、只代表虚拟参考证据，不是最高级。HCM 的 `tier`
+> 字段只能取上述五个值之一。
 
 | Tier | 最低要求 |
 | --- | --- |
