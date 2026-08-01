@@ -1,0 +1,11 @@
+label: "ANDROMEDA_DP"
+grub2:
+  default: 0
+  timeout: 10
+  entries:
+    - name: "Install Andromeda Developer Preview"
+      linux: "/images/pxeboot/vmlinuz inst.stage2=hd:LABEL=ANDROMEDA_DP inst.ks=file:/interactive-defaults.ks console=tty0 inst.graphical selinux=0 rhgb quiet"
+      initrd: "/images/pxeboot/initrd.img"
+    - name: "Automated destructive install (CI only)"
+      linux: "/images/pxeboot/vmlinuz inst.stage2=hd:LABEL=ANDROMEDA_DP inst.ks=file:/andromeda-ci.ks console=tty0 console=ttyS0,115200n8 inst.cmdline selinux=0"
+      initrd: "/images/pxeboot/initrd.img"

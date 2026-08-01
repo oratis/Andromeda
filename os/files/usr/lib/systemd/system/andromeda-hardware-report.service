@@ -1,0 +1,18 @@
+[Unit]
+Description=Generate the privacy-conscious Andromeda hardware report
+After=local-fs.target
+Before=andromeda-ci-verify.service
+
+[Service]
+Type=oneshot
+StateDirectory=andromeda
+ExecStart=/usr/libexec/andromeda-hardware-report
+RemainAfterExit=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/andromeda
+
+[Install]
+WantedBy=multi-user.target

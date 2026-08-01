@@ -19,6 +19,7 @@ Andromeda 的目标是探索一个以 AI agent 为核心、覆盖尽可能广泛
 ## 开发
 
 - [开发者入门](./development/getting-started.md)
+- [Developer Preview 安装与验收](./development/installable-preview.md)
 - [任务控制面](./development/task-control-plane.md)
 - [Hardware Compatibility Manifest](./development/hardware-compatibility.md)
 

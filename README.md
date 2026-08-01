@@ -2,21 +2,32 @@
 
 [![CI](https://github.com/oratis/Andromeda/actions/workflows/ci.yml/badge.svg)](https://github.com/oratis/Andromeda/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
-[![Status](https://img.shields.io/badge/status-v0%20engineering%20prototype-orange.svg)](#当前状态)
+[![Status](https://img.shields.io/badge/status-installable%20developer%20preview-orange.svg)](#当前状态)
 
 Andromeda 是一个面向 PC 与 Mac 硬件的 AI 原生桌面操作系统项目。它希望保留 Windows 的游戏、Office 和文件兼容能力，吸收 macOS 的可靠性与软硬件体验，同时把 Codex/Claude Code 式的任务执行、权限、验证和恢复能力变成 OS 的基础设施。
 
 ## 当前状态
 
-项目已经从纯调研进入 **v0 工程原型**：
+项目已经进入首个**可安装 Developer Preview**：
 
+- 有基于 Fedora bootc 44 与 KDE Plasma 的 x86-64 UEFI 离线安装 ISO；
+- 有从 ISO 安装到空白磁盘、移除 ISO 后首次启动的 QEMU/OVMF 自动验收；
+- 有 bootc 更新到 revision 2、重启验证、回滚到 revision 1 的生命周期验收；
 - 有可编译、可测试的 Rust workspace；
 - 有模型不可绕过的任务、风险、能力、隔离和状态机契约；
 - 有持久化任务服务、HTTP API 与开发者 CLI；
 - 有 Linux、macOS、Windows 硬件探测和 Hardware Compatibility Manifest（HCM）匹配；
 - 有跨平台 CI、产品计划和专题研究。
 
-Andromeda **现在还不是可安装或可日常使用的完整操作系统**，也没有宣称任意 PC/Mac 已达到 Supported 或 Certified。当前代码是后续安装器、不可变系统镜像、Task Center、兼容环境和硬件认证的安全控制面基线。
+这个里程碑证明 Andromeda 能构建、安装、首次启动、运行 AI 任务控制面并完成更新与
+回滚；它**仍不是可日常使用的完整操作系统**。目前只有 QEMU/KVM x86-64 + OVMF
+达到自动验收门槛，没有宣称任何消费级 PC 或 Mac 已达到 Supported 或 Certified。
+
+2026-07-28 的[可安装 OS 验收 #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852)
+已经在全新 32 GiB 虚拟磁盘上完整通过。受测 ISO 的 SHA-256 为
+`c04d8f6de780f978e261e1867283894abf2a7996b6105525660c52343ae45073`；
+运行证据、产物标识和逐项验收结果见
+[Developer Preview 安装指南](./docs/development/installable-preview.md#已验证构建)。
 
 ## 第一性目标
 
@@ -49,7 +60,8 @@ flowchart TD
     H["Hardware probe + signed HCM"] --> E
 ```
 
-当前仓库只实现到控制面、策略评估和硬件预检；图中的真实 executor、凭据代理和 OS 事务后端仍是后续安全里程碑。任务 API 不会执行模型提出的动作。
+当前安装镜像运行控制面、策略评估和硬件预检；图中的真实 executor、凭据代理和
+完整 OS 事务后端仍是后续安全里程碑。任务 API 不会执行模型提出的动作。
 
 ## 快速开始
 
@@ -88,7 +100,10 @@ cargo run --bin andromeda-taskd
 curl http://127.0.0.1:7777/healthz
 ```
 
-更完整的步骤见[开发者入门](./docs/development/getting-started.md)和[任务控制面说明](./docs/development/task-control-plane.md)。
+构建 ISO、安装安全边界和完整生命周期验收见
+[Developer Preview 安装指南](./docs/development/installable-preview.md)。控制面开发步骤见
+[开发者入门](./docs/development/getting-started.md)和
+[任务控制面说明](./docs/development/task-control-plane.md)。
 
 ## 安全边界
 
@@ -107,7 +122,7 @@ curl http://127.0.0.1:7777/healthz
 
 | 类别 | 当前产品状态 |
 |---|---|
-| QEMU/KVM x86-64 | CI/架构基线 |
+| QEMU/KVM x86-64 + OVMF | 可安装 Developer Preview；CI 自动验收 |
 | 选定 x86-64 PC | 下一阶段 Developer Preview 候选 |
 | 未认证通用 PC | Community，探测不等于支持 |
 | 非 T2 Intel Mac | 逐机型 Pilot |
@@ -134,6 +149,7 @@ curl http://127.0.0.1:7777/healthz
 ## 文档
 
 - [文档总览](./docs/README.md)
+- [Developer Preview 安装与验收](./docs/development/installable-preview.md)
 - [PC/macOS 操作系统全景](./docs/os-landscape-and-andromeda-architecture.md)
 - [开源组件采用矩阵](./docs/research/open-source-adoption-matrix.md)
 - [Windows 游戏、Office 与文件格式](./docs/research/windows-gaming-office-formats.md)
@@ -148,4 +164,8 @@ curl http://127.0.0.1:7777/healthz
 
 ---
 
-**English summary:** Andromeda is an early AI-native desktop OS project targeting broad PC hardware and selected Mac cohorts. The repository currently contains a safe task-control-plane prototype, cross-platform hardware/HCM tooling, research, and a staged product plan—not a bootable consumer OS yet.
+**English summary:** Andromeda is an early AI-native desktop OS project targeting broad
+PC hardware and selected Mac cohorts. The repository now builds an installable x86-64
+UEFI Developer Preview and verifies offline installation, first boot, task service health,
+bootc update, and rollback under QEMU/OVMF. It is not yet a daily-use consumer OS, and no
+physical PC or Mac model is certified.

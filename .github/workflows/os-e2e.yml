@@ -1,0 +1,86 @@
+name: Installable OS
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/os-e2e.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "os/**"
+  pull_request:
+    paths:
+      - ".github/workflows/os-e2e.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "os/**"
+
+concurrency:
+  group: os-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  install-update-rollback:
+    name: UEFI install, first boot, update, and rollback
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+          docker-images: true
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes binutils ovmf podman qemu-system-x86 qemu-utils shellcheck
+          sudo apt-get clean
+
+      - name: Validate scripts
+        run: shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+
+      - name: Build payloads and installer ISO
+        run: sudo os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
+
+      - name: Install to a blank disk and verify lifecycle
+        run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
+
+      - name: Upload serial evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Andromeda-serial-evidence-${{ github.sha }}
+          path: |
+            output/install-serial.log
+            output/boot-serial.log
+            output/update-server.log
+            output/esp-tree.txt
+            output/install-post.log
+            output/ovmf-vars.txt
+            output/diagnostics/**
+          retention-days: 14
+          include-hidden-files: true
+          if-no-files-found: warn
+
+      - name: Upload installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Andromeda-Developer-Preview-x86_64-${{ github.sha }}
+          path: |
+            output/*.iso
+            output/*.sha256
+            output/andromeda-v1-history.json
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: warn
