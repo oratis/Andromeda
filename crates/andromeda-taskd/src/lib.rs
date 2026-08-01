@@ -3,9 +3,10 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use andromeda_core::{IsolationLevel, TaskId};
+use andromeda_core::TaskId;
 use andromeda_runtime::{
-    CreateTaskRequest, ServiceError, StateTransitionRequest, StoreError, TaskService,
+    CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, ServiceError,
+    StateTransitionRequest, StoreError, TaskService,
 };
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
@@ -13,7 +14,6 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 #[derive(Debug, Clone)]
@@ -21,18 +21,12 @@ struct AppState {
     service: Arc<TaskService>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvaluationRequest {
-    pub isolation: IsolationLevel,
-    #[serde(default)]
-    pub external_side_effect_confirmed: bool,
-}
-
 pub fn app(service: TaskService) -> Router {
     Router::new()
         .route("/healthz", get(health))
         .route("/v1/tasks", get(list_tasks).post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task))
+        .route("/v1/tasks/{task_id}/capabilities", post(grant_capabilities))
         .route("/v1/tasks/{task_id}/evaluate", post(evaluate_task))
         .route("/v1/tasks/{task_id}/transition", post(transition_task))
         .layer(middleware::from_fn(require_loopback_host))
@@ -145,20 +139,26 @@ async fn get_task(
     Ok(Json(serde_json::to_value(record)?))
 }
 
+async fn grant_capabilities(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<GrantCapabilitiesRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    let record = run_blocking(&state, move |service| {
+        service.grant_capabilities(task_id, request)
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(record)?))
+}
+
 async fn evaluate_task(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
     Json(request): Json<EvaluationRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
-    let report = run_blocking(&state, move |service| {
-        service.evaluate(
-            task_id,
-            request.isolation,
-            request.external_side_effect_confirmed,
-        )
-    })
-    .await?;
+    let report = run_blocking(&state, move |service| service.evaluate(task_id, &request)).await?;
     Ok(Json(serde_json::to_value(report)?))
 }
 
@@ -210,9 +210,9 @@ impl IntoResponse for ApiError {
             Self::Service(ServiceError::Store(StoreError::RevisionConflict { .. })) => {
                 (StatusCode::CONFLICT, "revision_conflict")
             }
-            Self::Service(ServiceError::Validation(_) | ServiceError::Transition(_)) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, "invalid_task")
-            }
+            Self::Service(
+                ServiceError::Validation(_) | ServiceError::Transition(_) | ServiceError::Guard(_),
+            ) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_task"),
             Self::Service(_) | Self::Json(_) | Self::Internal(_) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
             }
@@ -238,7 +238,7 @@ mod tests {
 
     use andromeda_core::{
         ActionId, ActionKind, ActionPlan, ActionSpec, Capability, CapabilityId, CapabilityResource,
-        FileAccess, Intent, RecoverySemantics, RiskLevel,
+        FileAccess, Intent, IsolationLevel, RecoverySemantics, RiskLevel, TaskState,
     };
     use andromeda_policy::PolicyEngine;
     use andromeda_runtime::FileTaskStore;
@@ -432,8 +432,8 @@ mod tests {
         send(&app, local_request("POST", "/v1/tasks", Some(&request))).await;
 
         let evaluation = EvaluationRequest {
-            isolation: IsolationLevel::Sandbox,
-            external_side_effect_confirmed: false,
+            isolation: Some(IsolationLevel::Sandbox),
+            ..EvaluationRequest::default()
         };
         let (status, report) = send(
             &app,
@@ -607,6 +607,93 @@ mod tests {
         ] {
             assert!(!is_loopback_host(rejected), "{rejected} must be rejected");
         }
+    }
+
+    #[tokio::test]
+    async fn grant_endpoint_unblocks_gated_ready_transition() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let mut request = inspection_request(workspace_path());
+        let needed = request.capabilities[0].clone();
+        request.capabilities.clear();
+        let task_id = request.plan.task_id;
+
+        let (status, created) =
+            send(&app, local_request("POST", "/v1/tasks", Some(&request))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["state"], "awaiting_approval");
+
+        // Ready is policy-gated: an ungranted plan cannot reach it.
+        let premature = StateTransitionRequest {
+            to: TaskState::Ready,
+            actor: "sneaky".into(),
+            expected_revision: 0,
+        };
+        let (status, error) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&premature),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error["error"], "invalid_task");
+
+        // Grant the missing capability, then Ready is allowed.
+        let grant = GrantCapabilitiesRequest {
+            capabilities: vec![needed],
+            actor: "approver".into(),
+            expected_revision: 0,
+        };
+        let (status, granted) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/capabilities"),
+                Some(&grant),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(granted["revision"], 1);
+
+        let promote = StateTransitionRequest {
+            to: TaskState::Ready,
+            actor: "approver".into(),
+            expected_revision: 1,
+        };
+        let (status, ready) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&promote),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(ready["state"], "ready");
+    }
+
+    #[tokio::test]
+    async fn create_rejects_unknown_capability_field() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let request = inspection_request(workspace_path());
+        let mut value = serde_json::to_value(&request).expect("serialize request");
+        // A camelCase typo of `expires_at` must be rejected, not dropped.
+        value["capabilities"][0]["expiresAt"] = json!("2099-01-01T00:00:00Z");
+        let http_request = Request::builder()
+            .method("POST")
+            .uri("/v1/tasks")
+            .header(header::HOST, LOCAL_HOST_HEADER)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&value).expect("body")))
+            .expect("request");
+        let response = app.clone().oneshot(http_request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[cfg(not(target_os = "windows"))]

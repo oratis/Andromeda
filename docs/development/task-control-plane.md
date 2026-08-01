@@ -36,8 +36,9 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 | POST | `/v1/tasks` | 校验并创建任务（重复 task_id 返回 409 `already_exists`） |
 | GET | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
 | GET | `/v1/tasks/{id}` | 读取任务 |
-| POST | `/v1/tasks/{id}/evaluate` | 评估、不执行；评估结果作为 `evaluated` 事件追加到任务事件史并使 revision +1 |
-| POST | `/v1/tasks/{id}/transition` | 带 revision 的状态转换 |
+| POST | `/v1/tasks/{id}/capabilities` | 给已存在的任务补授权：追加 capability，记 `granted` 事件并使 revision +1。每个新 capability 必须 `issued_to == plan.task_id` 且当前有效（未过期、已到 `issued_at`），否则返回 422；带 `expected_revision` 做乐观并发 |
+| POST | `/v1/tasks/{id}/evaluate` | 评估、不执行；**逐 action** 解析隔离等级，结果作为 `evaluated` 事件追加到任务事件史并使 revision +1 |
+| POST | `/v1/tasks/{id}/transition` | 带 revision 的状态转换；`Ready`/`Running` 两条边受策略门控（见下） |
 
 所有 `TaskService` 调用在 `tokio::task::spawn_blocking` 中执行，阻塞的文件锁和 fsync 不会占用 async worker，`/healthz` 在锁竞争时依旧可响应。
 
@@ -63,20 +64,48 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - 外部副作用已获得最终人工确认（L3 在 `evaluate` 时仍会返回 `ask`）；
 - capability 本身来自可信签发方——v0 控制面不校验签发链，创建者可以自铸 capability。因此 `Ready ≠ 已授权执行`，执行前仍必须经过 `evaluate` 与（未来的）broker 审批。
 
+### 逐 action 评估隔离
+
+`evaluate` 按 **action** 解析隔离等级，而非用单一 task 级标量，这样才能与创建时的 `plan_fully_granted`（也是逐 action 用 `risk.minimum_isolation()`）保持同一套隔离模型。每个 action 的隔离等级按以下顺序解析：
+
+1. 请求体顶层 `isolation`（`Option<IsolationLevel>`）若存在，覆盖**所有** action（仅为整盘测试方便）；
+2. 否则查 `overrides`（`{ActionId: IsolationLevel}` 映射）中该 action 的条目；
+3. 否则用该 action 声明风险对应的最低隔离。
+
+这修复了一个契约缺陷：`IsolationLevel::satisfies` 是非线性的（`MicroVm` 与 `Brokered` 互不满足），因此一个同时含 L2（microVM 解析）与 L3（broker 外发）动作的计划，在旧的单标量 evaluate 下**永远**至少有一个动作被 Deny。逐 action 解析后，这类混合计划可以整盘 Allow。请求体还可携带可选 `subject`：一旦提供，每个 action 所需 capability 的 `issued_to` 必须与之匹配，否则该 action 被 Deny。
+
+`evaluated` 事件记录每个 action 的 `effective_isolation`（实际使用的隔离等级）与完整决策集，供审计。
+
+### 策略门控的状态转换
+
+状态机边合法性之外，两条授权敏感的边额外做策略复检，避免仅凭断言就把任务推进到"可执行"语义：
+
+- **`AwaitingApproval → Ready`**：要求 `plan_fully_granted`（每个 action 的所需 capability 都齐备、有效、覆盖 target 且不命中 deny 规则），否则拒绝。这样因授权不足而挂起的任务，必须先经 `POST /v1/tasks/{id}/capabilities` 补齐授权，才能进入 `Ready`。
+- **`Ready → Running`**：对每个 action 以其逐 action 最低隔离重跑策略引擎，任一 action 为 `Deny` 或 `Ask` 即拒绝转换，并在错误中列出各 action 的原因。这使 `Running` 成为一个强制的重新授权点（例如 capability 在 `Ready` 之后过期，会在此被挡下），而非依赖未来 executor 自觉先调用 `evaluate`。
+
+被门控拒绝的转换返回 422 `invalid_task`。
+
 ## 持久化
 
-- 每个 task revision 一个不可覆盖的格式化 JSON 文件，读取时选择最高 revision；
+- 每个 task revision 一个格式化 JSON 文件；每次写入后做 **compaction**，只保留最新 revision 文件（详见下）；
+- 每个 task 一个 `{task_id}.latest` 指针文件，原子写入，记录当前最新 revision 号；读取时先读指针（O(1)），指针缺失/不可解析/指向的文件已不存在时回退到目录扫描（兼容旧 store 与崩溃窗口）；
 - 独占跨进程 lock（fs4）；
 - 临时文件写入、flush、`sync_all` 后原子 rename 到新的 revision 文件；
 - 目录同步（仅 Unix；Windows 上 `File::open` 无法打开目录）；
 - revision 乐观并发；
-- 每次受支持的状态变化和每次策略评估都追加 event；
+- 每次受支持的状态变化、每次授权补授（`granted`）和每次策略评估都追加 event；
 - store 打开时在独占锁内清理崩溃残留的 `.{uuid}.tmp` 孤儿文件；
-- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，依赖环检测为迭代 DFS，不受栈深限制。
+- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套。
 
-TODO：revision 文件目前只增不减，长寿命任务会累积大量历史 revision 文件，需要一个保留最近 N 个 revision（或按时间）的 compaction 策略。
+### Compaction 策略
 
-revision 文件不会被正常服务覆盖，但这仍不是防物理管理员篡改的 append-only ledger。正式 audit ledger 需要签名、哈希链、密钥轮换、隐私删除策略和独立导出。
+写入顺序为：先原子写 revision 文件（durable），再原子推进 `latest` 指针，最后在同一独占锁内删除该 task 其余 revision 文件（`compact(keep=当前 revision)`）。因此稳态下每个 task 只留一个 revision 文件与一个指针文件，消除了"revision 只增不减"的 O(R²) 膨胀与随文件总数线性增长的全目录扫描。
+
+写序保证崩溃安全：revision 文件先于指针落盘，compaction 只在指针指向幸存者之后运行——崩溃至多留下一个多余 revision 文件（下次成功写入时被 compaction 或原子 rename 覆盖回收），绝不会出现指针悬空指向缺失文件。
+
+无锁读（`get`/`list`）容忍 compaction 竞态：若选中的 revision 文件在解析前被并发 compaction 删除（读到 `NotFound`），`get` 会重新解析最新 revision 并重试（`GET_MAX_ATTEMPTS`），`list` 则静默跳过已被更高 revision 取代的失效路径。`get` 与 `list` 都走同一套"指针优先、扫描兜底"的解析，二者不会给出不一致的最新 revision。
+
+注意：compaction 会主动删除被取代的 revision 快照，因此磁盘上的 revision 文件**不是** append-only 历史（完整审计线索保存在最新记录内嵌的 `events` 里，而非历史 revision 文件里）。这本就不是防物理管理员篡改的 append-only ledger；正式 audit ledger 需要签名、哈希链、密钥轮换、隐私删除策略和独立导出。
 
 ## 明确未实现
 

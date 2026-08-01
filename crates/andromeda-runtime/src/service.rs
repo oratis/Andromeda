@@ -1,7 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use andromeda_core::{
-    ActionId, ActionPlan, Capability, CapabilityId, IsolationLevel, TaskId, TaskState,
+    ActionId, ActionPlan, Capability, CapabilityId, IsolationLevel, PlanValidationError, TaskId,
+    TaskState,
 };
 use andromeda_policy::{DecisionEffect, EvaluationContext, PolicyDecision, PolicyEngine};
 use chrono::{DateTime, Utc};
@@ -24,6 +25,7 @@ pub const MAX_PLAN_ACTIONS: usize = 10_000;
 const EVALUATION_ACTOR: &str = "policy-engine";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateTaskRequest {
     pub plan: ActionPlan,
     #[serde(default)]
@@ -32,10 +34,48 @@ pub struct CreateTaskRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StateTransitionRequest {
     pub to: TaskState,
     pub actor: String,
     pub expected_revision: u64,
+}
+
+/// Additional capabilities granted to an existing task (see
+/// [`TaskService::grant_capabilities`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantCapabilitiesRequest {
+    pub capabilities: Vec<Capability>,
+    pub actor: String,
+    /// The revision the caller believes is current; the grant is rejected
+    /// with a [`StoreError::RevisionConflict`] on a mismatch.
+    pub expected_revision: u64,
+}
+
+/// A policy evaluation request. Isolation is resolved *per action* so that a
+/// mixed plan (for example an L2 microVM parse feeding an L3 brokered network
+/// call) can be fully allowed — no single task-level isolation could satisfy
+/// the non-linear [`IsolationLevel::satisfies`] matrix for both at once.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationRequest {
+    /// Convenience override applied to *every* action. When present it wins
+    /// over `overrides` and the per-action minimums; intended for testing a
+    /// whole plan under one isolation level.
+    #[serde(default)]
+    pub isolation: Option<IsolationLevel>,
+    /// Per-action isolation overrides. Any action absent from the map is
+    /// evaluated at its declared risk's minimum isolation, matching the
+    /// per-action model used when a task is created.
+    #[serde(default)]
+    pub overrides: BTreeMap<ActionId, IsolationLevel>,
+    #[serde(default)]
+    pub external_side_effect_confirmed: bool,
+    /// Optional requesting subject. When set, each capability required by an
+    /// action must have been issued to this subject or the action is denied.
+    #[serde(default)]
+    pub subject: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,10 +94,20 @@ pub enum TaskEventKind {
         from: TaskState,
         to: TaskState,
     },
+    /// Capabilities were granted to the task after creation. `capabilities`
+    /// lists the newly added grants and `plan_fully_granted` records whether,
+    /// as a result, an `AwaitingApproval` task now satisfies every action's
+    /// requirements (the caller may then transition it to `Ready`).
+    Granted {
+        capabilities: Vec<CapabilityId>,
+        plan_fully_granted: bool,
+    },
     /// A policy evaluation was performed; the full decision set is recorded
-    /// so the audit trail preserves every authorization outcome.
+    /// so the audit trail preserves every authorization outcome. Isolation is
+    /// resolved per action, so `effective_isolation` records the level each
+    /// action was evaluated under.
     Evaluated {
-        isolation: IsolationLevel,
+        effective_isolation: BTreeMap<ActionId, IsolationLevel>,
         external_side_effect_confirmed: bool,
         decisions: BTreeMap<ActionId, PolicyDecision>,
     },
@@ -101,6 +151,34 @@ pub enum ValidationError {
     InvalidRisk(ActionId),
     #[error("capability {0} is issued to a different task")]
     WrongCapabilitySubject(CapabilityId),
+    #[error("capability {0} is not active (expired or not yet issued)")]
+    InactiveCapability(CapabilityId),
+}
+
+impl From<PlanValidationError> for ValidationError {
+    fn from(error: PlanValidationError) -> Self {
+        match error {
+            PlanValidationError::DuplicateActionId(id) => Self::DuplicateAction(id),
+            PlanValidationError::UnknownDependency { action, dependency } => {
+                Self::MissingDependency { action, dependency }
+            }
+            PlanValidationError::DependencyCycle(_) => Self::DependencyCycle,
+        }
+    }
+}
+
+/// A state transition was structurally valid but rejected by a policy gate.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum TransitionGuardError {
+    #[error(
+        "transition to Ready requires a fully granted plan (missing or insufficient capabilities)"
+    )]
+    PlanNotFullyGranted,
+    #[error("transition to Running blocked: {blocked} action(s) not allowed by policy: {}", .reasons.join(" | "))]
+    PolicyBlocked {
+        blocked: usize,
+        reasons: Vec<String>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -111,6 +189,8 @@ pub enum ServiceError {
     Validation(#[from] ValidationError),
     #[error(transparent)]
     Transition(#[from] andromeda_core::TaskTransitionError),
+    #[error(transparent)]
+    Guard(#[from] TransitionGuardError),
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +267,13 @@ impl TaskService {
     /// Evaluates every action without executing it and appends the outcome
     /// to the task's durable event history.
     ///
+    /// Each action is evaluated under its *own* isolation level, resolved as:
+    /// the request's whole-plan `isolation` override if set, else the
+    /// per-action `overrides` entry, else the action's declared-risk minimum
+    /// isolation. This mirrors the per-action model used at creation time and
+    /// lets a mixed plan (L2 microVM + L3 brokered) be fully allowed, which a
+    /// single task-level isolation level can never achieve.
+    ///
     /// The persisted [`TaskEventKind::Evaluated`] event bumps the record
     /// revision, so callers should use the revision from the returned report
     /// for subsequent optimistic-concurrency operations.
@@ -198,25 +285,30 @@ impl TaskService {
     pub fn evaluate(
         &self,
         task_id: TaskId,
-        isolation: IsolationLevel,
-        external_side_effect_confirmed: bool,
+        request: &EvaluationRequest,
     ) -> Result<EvaluationReport, ServiceError> {
         let mut record = self.store.get(task_id)?;
         let now = Utc::now();
-        let decisions: BTreeMap<ActionId, PolicyDecision> = {
-            let context = EvaluationContext::at(
+        let mut effective_isolation = BTreeMap::new();
+        let mut decisions = BTreeMap::new();
+        for action in &record.plan.actions {
+            let isolation = request
+                .isolation
+                .or_else(|| request.overrides.get(&action.id).copied())
+                .unwrap_or_else(|| action.risk.minimum_isolation());
+            let mut context = EvaluationContext::at(
                 now,
                 isolation,
                 &record.capabilities,
-                external_side_effect_confirmed,
+                request.external_side_effect_confirmed,
             );
-            record
-                .plan
-                .actions
-                .iter()
-                .map(|action| (action.id, self.policy.evaluate(action, &context)))
-                .collect()
-        };
+            if let Some(subject) = request.subject.as_deref() {
+                context = context.with_subject(subject);
+            }
+            let decision = self.policy.evaluate(action, &context);
+            effective_isolation.insert(action.id, isolation);
+            decisions.insert(action.id, decision);
+        }
         let expected = record.revision;
         record.revision += 1;
         record.events.push(TaskEvent {
@@ -224,8 +316,8 @@ impl TaskService {
             occurred_at: now,
             actor: EVALUATION_ACTOR.into(),
             kind: TaskEventKind::Evaluated {
-                isolation,
-                external_side_effect_confirmed,
+                effective_isolation,
+                external_side_effect_confirmed: request.external_side_effect_confirmed,
                 decisions: decisions.clone(),
             },
         });
@@ -237,11 +329,79 @@ impl TaskService {
         })
     }
 
-    /// Applies one checked, optimistic-concurrency state transition.
+    /// Grants additional capabilities to an existing task under optimistic
+    /// concurrency.
+    ///
+    /// Each new capability must be issued to this task and active now; the
+    /// grant is appended to the record, a [`TaskEventKind::Granted`] event is
+    /// recorded (noting whether the plan is now fully granted), and the
+    /// revision is bumped. This deliberately does **not** transition the task:
+    /// a caller that observes `plan_fully_granted` on the returned record may
+    /// drive the (policy-gated) `AwaitingApproval -> Ready` transition itself.
     ///
     /// # Errors
     ///
-    /// Returns an invalid transition, revision conflict, or persistence error.
+    /// Returns a validation error when a capability is issued to a different
+    /// task or is not active, a revision conflict on a stale
+    /// `expected_revision`, or a store error on persistence failure.
+    pub fn grant_capabilities(
+        &self,
+        task_id: TaskId,
+        request: GrantCapabilitiesRequest,
+    ) -> Result<TaskRecord, ServiceError> {
+        let mut record = self.store.get(task_id)?;
+        if record.revision != request.expected_revision {
+            return Err(StoreError::RevisionConflict {
+                task_id,
+                expected: request.expected_revision,
+                actual: record.revision,
+            }
+            .into());
+        }
+        let now = Utc::now();
+        let expected_subject = record.plan.task_id.to_string();
+        for capability in &request.capabilities {
+            if capability.issued_to != expected_subject {
+                return Err(ValidationError::WrongCapabilitySubject(capability.id).into());
+            }
+            if !capability.is_active_at(now) {
+                return Err(ValidationError::InactiveCapability(capability.id).into());
+            }
+        }
+        let granted_ids: Vec<CapabilityId> =
+            request.capabilities.iter().map(|cap| cap.id).collect();
+        record.capabilities.extend(request.capabilities);
+        let plan_fully_granted = record.state == TaskState::AwaitingApproval
+            && self.plan_fully_granted(&record.plan, &record.capabilities);
+        let expected = record.revision;
+        record.revision += 1;
+        record.events.push(TaskEvent {
+            id: Uuid::new_v4(),
+            occurred_at: now,
+            actor: request.actor,
+            kind: TaskEventKind::Granted {
+                capabilities: granted_ids,
+                plan_fully_granted,
+            },
+        });
+        self.store.save(&record, expected)?;
+        Ok(record)
+    }
+
+    /// Applies one checked, optimistic-concurrency state transition.
+    ///
+    /// Two edges are additionally policy-gated so that `Ready`/`Running` are
+    /// not reachable merely by asserting them:
+    ///
+    /// - `AwaitingApproval -> Ready` requires the plan to be fully granted.
+    /// - `Ready -> Running` re-runs policy for every action at its per-action
+    ///   minimum isolation and is rejected if any action is `Deny` or `Ask`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid transition, a policy-gate rejection
+    /// ([`TransitionGuardError`]), a revision conflict, or a persistence
+    /// error.
     pub fn transition(
         &self,
         task_id: TaskId,
@@ -257,7 +417,9 @@ impl TaskService {
             .into());
         }
         let from = record.state;
-        record.state = from.transition(request.to)?;
+        let to = from.transition(request.to)?;
+        self.guard_transition(from, to, &record)?;
+        record.state = to;
         record.revision += 1;
         record.events.push(TaskEvent {
             id: Uuid::new_v4(),
@@ -270,6 +432,57 @@ impl TaskService {
         });
         self.store.save(&record, request.expected_revision)?;
         Ok(record)
+    }
+
+    /// Policy gate for authorization-sensitive transitions. Structural edge
+    /// validity is already checked by [`TaskState::transition`]; this adds the
+    /// authorization checks that make `Ready`/`Running` meaningful.
+    fn guard_transition(
+        &self,
+        from: TaskState,
+        to: TaskState,
+        record: &TaskRecord,
+    ) -> Result<(), TransitionGuardError> {
+        match (from, to) {
+            (TaskState::AwaitingApproval, TaskState::Ready) => {
+                if !self.plan_fully_granted(&record.plan, &record.capabilities) {
+                    return Err(TransitionGuardError::PlanNotFullyGranted);
+                }
+            }
+            (TaskState::Ready, TaskState::Running) => {
+                let now = Utc::now();
+                let reasons: Vec<String> = record
+                    .plan
+                    .actions
+                    .iter()
+                    .filter_map(|action| {
+                        let context = EvaluationContext::at(
+                            now,
+                            action.risk.minimum_isolation(),
+                            &record.capabilities,
+                            true,
+                        );
+                        let decision = self.policy.evaluate(action, &context);
+                        (decision.effect != DecisionEffect::Allow).then(|| {
+                            format!(
+                                "action {} -> {:?}: {}",
+                                action.id,
+                                decision.effect,
+                                decision.reasons.join("; ")
+                            )
+                        })
+                    })
+                    .collect();
+                if !reasons.is_empty() {
+                    return Err(TransitionGuardError::PolicyBlocked {
+                        blocked: reasons.len(),
+                        reasons,
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Returns whether every action in the plan would be allowed by the
@@ -307,38 +520,15 @@ fn validate_plan(plan: &ActionPlan, capabilities: &[Capability]) -> Result<(), V
         });
     }
 
-    let ids = plan
-        .actions
-        .iter()
-        .map(|action| action.id)
-        .collect::<BTreeSet<_>>();
-    if ids.len() != plan.actions.len() {
-        let mut seen = BTreeSet::new();
-        let duplicate = plan
-            .actions
-            .iter()
-            .map(|action| action.id)
-            .find(|id| !seen.insert(*id))
-            .expect("duplicate exists");
-        return Err(ValidationError::DuplicateAction(duplicate));
-    }
+    // Structural checks (duplicate ids, dangling dependencies, cycles) are
+    // owned by the core contract's single implementation (iterative Kahn
+    // topological sort), so runtime and core cannot drift apart.
+    plan.validate().map_err(ValidationError::from)?;
 
     for action in &plan.actions {
         if !action.has_valid_risk() {
             return Err(ValidationError::InvalidRisk(action.id));
         }
-        for dependency in &action.depends_on {
-            if !ids.contains(dependency) {
-                return Err(ValidationError::MissingDependency {
-                    action: action.id,
-                    dependency: *dependency,
-                });
-            }
-        }
-    }
-
-    if has_cycle(plan) {
-        return Err(ValidationError::DependencyCycle);
     }
 
     let expected_subject = plan.task_id.to_string();
@@ -350,50 +540,6 @@ fn validate_plan(plan: &ActionPlan, capabilities: &[Capability]) -> Result<(), V
     }
 
     Ok(())
-}
-
-/// Detects dependency cycles with an iterative three-color depth-first
-/// search. An explicit stack keeps arbitrarily long dependency chains from
-/// overflowing the thread stack, which the previous recursive version could
-/// do for plans near [`MAX_PLAN_ACTIONS`].
-fn has_cycle(plan: &ActionPlan) -> bool {
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Mark {
-        Visiting,
-        Done,
-    }
-
-    let dependencies = plan
-        .actions
-        .iter()
-        .map(|action| (action.id, action.depends_on.as_slice()))
-        .collect::<BTreeMap<_, _>>();
-    let mut marks = BTreeMap::<ActionId, Mark>::new();
-    for action in &plan.actions {
-        if marks.contains_key(&action.id) {
-            continue;
-        }
-        marks.insert(action.id, Mark::Visiting);
-        let mut stack = vec![(action.id, 0_usize)];
-        while let Some((id, cursor)) = stack.last().copied() {
-            let edges = dependencies.get(&id).copied().unwrap_or_default();
-            if let Some(&dependency) = edges.get(cursor) {
-                stack.last_mut().expect("stack is non-empty").1 += 1;
-                match marks.get(&dependency) {
-                    Some(Mark::Visiting) => return true,
-                    Some(Mark::Done) => {}
-                    None => {
-                        marks.insert(dependency, Mark::Visiting);
-                        stack.push((dependency, 0));
-                    }
-                }
-            } else {
-                marks.insert(id, Mark::Done);
-                stack.pop();
-            }
-        }
-    }
-    false
 }
 
 #[cfg(test)]
@@ -466,7 +612,13 @@ mod tests {
         assert_eq!(reloaded, created);
 
         let report = service
-            .evaluate(created.plan.task_id, IsolationLevel::Sandbox, false)
+            .evaluate(
+                created.plan.task_id,
+                &EvaluationRequest {
+                    isolation: Some(IsolationLevel::Sandbox),
+                    ..EvaluationRequest::default()
+                },
+            )
             .expect("evaluate");
         assert!(
             report
@@ -504,7 +656,8 @@ mod tests {
                     .is_some_and(|value| value == "json")
             })
             .count();
-        assert_eq!(revision_files, 2);
+        // Compaction reclaims the superseded revision, leaving only the latest.
+        assert_eq!(revision_files, 1);
 
         let error = service
             .transition(
@@ -561,7 +714,13 @@ mod tests {
             .expect("create");
 
         let report = service
-            .evaluate(created.plan.task_id, IsolationLevel::Sandbox, false)
+            .evaluate(
+                created.plan.task_id,
+                &EvaluationRequest {
+                    isolation: Some(IsolationLevel::Sandbox),
+                    ..EvaluationRequest::default()
+                },
+            )
             .expect("evaluate");
         assert_eq!(report.revision, 1);
 
@@ -570,11 +729,16 @@ mod tests {
         let event = reloaded.events.last().expect("evaluation event");
         match &event.kind {
             TaskEventKind::Evaluated {
-                isolation,
+                effective_isolation,
                 external_side_effect_confirmed,
                 decisions,
             } => {
-                assert_eq!(*isolation, IsolationLevel::Sandbox);
+                assert!(!effective_isolation.is_empty());
+                assert!(
+                    effective_isolation
+                        .values()
+                        .all(|isolation| *isolation == IsolationLevel::Sandbox)
+                );
                 assert!(!external_side_effect_confirmed);
                 assert_eq!(decisions, &report.decisions);
             }
@@ -644,6 +808,220 @@ mod tests {
             validate_plan(&request.plan, &request.capabilities),
             Err(ValidationError::DependencyCycle)
         );
+    }
+
+    fn mixed_isolation_request() -> CreateTaskRequest {
+        let task_id = TaskId::new();
+        let read_cap = Capability {
+            id: CapabilityId::new(),
+            resource: CapabilityResource::Files {
+                root: PathBuf::from(workspace_path()),
+                access: FileAccess::Read,
+            },
+            issued_to: task_id.to_string(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            single_use: false,
+        };
+        let network_cap = Capability {
+            id: CapabilityId::new(),
+            resource: CapabilityResource::Network {
+                host: "api.example.com".into(),
+                port: None,
+            },
+            issued_to: task_id.to_string(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            single_use: false,
+        };
+        let parse = ActionSpec {
+            id: ActionId::new(),
+            name: "parse untrusted download".into(),
+            kind: ActionKind::ParseUntrustedContent,
+            target: download_file().into(),
+            arguments: BTreeMap::new(),
+            depends_on: Vec::new(),
+            required_capabilities: vec![read_cap.id],
+            risk: RiskLevel::L2StrongIsolation,
+            recovery: RecoverySemantics::None,
+        };
+        let network = ActionSpec {
+            id: ActionId::new(),
+            name: "send result through broker".into(),
+            kind: ActionKind::NetworkRequest,
+            target: "api.example.com".into(),
+            arguments: BTreeMap::new(),
+            depends_on: vec![parse.id],
+            required_capabilities: vec![network_cap.id],
+            risk: RiskLevel::L3ExternalSideEffect,
+            recovery: RecoverySemantics::None,
+        };
+        let plan = ActionPlan {
+            schema_version: ActionPlan::CURRENT_SCHEMA_VERSION,
+            task_id,
+            intent: Intent::new("Parse then send", "test"),
+            actions: vec![parse, network],
+        };
+        CreateTaskRequest {
+            plan,
+            capabilities: vec![read_cap, network_cap],
+            actor: "test".into(),
+        }
+    }
+
+    #[test]
+    fn mixed_isolation_plan_is_fully_allowed_per_action() {
+        // A plan mixing an L2 microVM parse (satisfied only by MicroVm) and an
+        // L3 brokered network call (satisfied only by Brokered) can never be
+        // all-Allow under a single task-level isolation, because no isolation
+        // level satisfies both. Per-action isolation fixes this.
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let created = service.create(mixed_isolation_request()).expect("create");
+        assert_eq!(created.state, TaskState::Ready);
+
+        let report = service
+            .evaluate(
+                created.plan.task_id,
+                &EvaluationRequest {
+                    external_side_effect_confirmed: true,
+                    ..EvaluationRequest::default()
+                },
+            )
+            .expect("evaluate");
+        assert_eq!(report.decisions.len(), 2);
+        assert!(
+            report
+                .decisions
+                .values()
+                .all(|decision| decision.effect == DecisionEffect::Allow),
+            "expected every action Allow under per-action isolation, got {:?}",
+            report.decisions
+        );
+    }
+
+    #[test]
+    fn granting_capabilities_unblocks_awaiting_approval() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        let needed = request.capabilities[0].clone();
+        request.capabilities.clear();
+        let created = service.create(request).expect("create");
+        assert_eq!(created.state, TaskState::AwaitingApproval);
+
+        let granted = service
+            .grant_capabilities(
+                created.plan.task_id,
+                GrantCapabilitiesRequest {
+                    capabilities: vec![needed],
+                    actor: "approver".into(),
+                    expected_revision: 0,
+                },
+            )
+            .expect("grant");
+        assert_eq!(granted.revision, 1);
+        match &granted.events.last().expect("granted event").kind {
+            TaskEventKind::Granted {
+                plan_fully_granted, ..
+            } => assert!(plan_fully_granted),
+            other => panic!("expected granted event, found {other:?}"),
+        }
+
+        let ready = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Ready,
+                    actor: "approver".into(),
+                    expected_revision: 1,
+                },
+            )
+            .expect("ready");
+        assert_eq!(ready.state, TaskState::Ready);
+    }
+
+    #[test]
+    fn ungranted_awaiting_approval_cannot_reach_ready() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        request.capabilities.clear();
+        let created = service.create(request).expect("create");
+        assert_eq!(created.state, TaskState::AwaitingApproval);
+
+        let error = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Ready,
+                    actor: "sneaky".into(),
+                    expected_revision: 0,
+                },
+            )
+            .expect_err("ungranted approval must not reach Ready");
+        assert!(matches!(
+            error,
+            ServiceError::Guard(TransitionGuardError::PlanNotFullyGranted)
+        ));
+    }
+
+    #[test]
+    fn ready_to_running_is_rejected_when_an_action_is_denied() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        // Seed a record already in Ready whose action has no covering grant,
+        // so the Ready -> Running policy re-check must block it.
+        let task_id = TaskId::new();
+        let plan = ActionPlan {
+            schema_version: ActionPlan::CURRENT_SCHEMA_VERSION,
+            task_id,
+            intent: Intent::new("ungranted ready", "test"),
+            actions: vec![ActionSpec {
+                id: ActionId::new(),
+                name: "read".into(),
+                kind: ActionKind::ReadFile,
+                target: workspace_path().into(),
+                arguments: BTreeMap::new(),
+                depends_on: Vec::new(),
+                required_capabilities: vec![CapabilityId::new()],
+                risk: RiskLevel::L1Sandboxed,
+                recovery: RecoverySemantics::None,
+            }],
+        };
+        let record = TaskRecord {
+            plan,
+            state: TaskState::Ready,
+            revision: 0,
+            capabilities: Vec::new(),
+            events: Vec::new(),
+        };
+        service.store.create(&record).expect("seed ready record");
+
+        let error = service
+            .transition(
+                task_id,
+                StateTransitionRequest {
+                    to: TaskState::Running,
+                    actor: "runner".into(),
+                    expected_revision: 0,
+                },
+            )
+            .expect_err("denied action must block Running");
+        assert!(matches!(
+            error,
+            ServiceError::Guard(TransitionGuardError::PolicyBlocked { .. })
+        ));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn download_file() -> &'static str {
+        "/workspace/unknown.zip"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn download_file() -> &'static str {
+        r"C:\workspace\unknown.zip"
     }
 
     #[cfg(not(target_os = "windows"))]

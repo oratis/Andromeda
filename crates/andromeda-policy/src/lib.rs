@@ -45,6 +45,7 @@ impl PolicyDecision {
 
 /// Host-enforced policy that the model cannot modify.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicySet {
     #[serde(default)]
     pub denied_network_hosts: Vec<String>,
@@ -397,15 +398,20 @@ fn host_is_or_is_subdomain_of(host: &str, ancestor: &str) -> bool {
 
 /// Component-wise prefix check used for denied-root matching.
 ///
-/// On Windows the comparison is ASCII case-insensitive, matching the default
-/// case-insensitive filesystem semantics so `C:\WINDOWS` cannot dodge a
-/// `C:\Windows` deny root.
-#[cfg(not(windows))]
+/// On Windows and macOS the comparison is ASCII case-insensitive, matching
+/// those platforms' default case-insensitive filesystem semantics so
+/// `C:\WINDOWS` cannot dodge a `C:\Windows` deny root and `/system/Library`
+/// cannot dodge a `/System` deny root on case-insensitive APFS. On other
+/// Unix targets the comparison is case-sensitive.
+///
+/// The comparison remains purely lexical; executors must still re-validate
+/// with `realpath`/`openat` semantics before touching the filesystem.
+#[cfg(not(any(windows, target_os = "macos")))]
 fn path_starts_with(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(root)
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn path_starts_with(candidate: &Path, root: &Path) -> bool {
     let mut candidate_components = candidate.components();
     root.components().all(|root_component| {
@@ -567,6 +573,25 @@ mod tests {
         let action = action(
             ActionKind::WriteFile,
             traversal_into_denied_root(),
+            RiskLevel::L1Sandboxed,
+            &capability,
+        );
+        let capabilities = [capability];
+        let decision = engine().evaluate(&action, &sandbox_context(&capabilities));
+        assert_eq!(decision.effect, DecisionEffect::Deny);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_deny_root_is_case_insensitive() {
+        // APFS is case-insensitive by default, so a differently-cased
+        // `/system/Library/...` still resolves to the real `/System`. The
+        // deny check must fold case on macOS the way it already does on
+        // Windows, or the deny root is trivially evaded.
+        let capability = file_capability(system_root(), FileAccess::ReadWrite);
+        let action = action(
+            ActionKind::WriteFile,
+            "/system/Library/LaunchDaemons/evil.plist",
             RiskLevel::L1Sandboxed,
             &capability,
         );
