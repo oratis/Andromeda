@@ -97,6 +97,16 @@
       "items": {
         "type": "string"
       }
+    },
+    "signature": {
+      "anyOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "#/$defs/signature"
+        }
+      ]
     }
   },
   "$defs": {
@@ -322,6 +332,24 @@
             "string",
             "null"
           ]
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key_id",
+        "sig"
+      ],
+      "properties": {
+        "key_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sig": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{128}$"
         }
       }
     },
