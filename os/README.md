@@ -5,9 +5,13 @@ Developer Preview based on Fedora bootc 44 and KDE Plasma.
 
 ## Safety boundary
 
-The normal ISO boot entry starts the graphical Anaconda installer. The second
+The default ISO boot entry starts the graphical Anaconda installer. The second
 entry is destructive automation for CI and must never be selected on a machine
 with data: it wipes the first installation disk.
+
+Builds with `INSTALLER_DEFAULT=1` invert that GRUB default so unattended VMs
+auto-install; those ISOs are named `*-ci.iso` and must never be distributed
+as a developer preview image.
 
 The image is a developer preview, not a claim of universal PC or Mac hardware
 support. Hardware support remains gated by signed Hardware Compatibility
@@ -23,15 +27,23 @@ sudo os/scripts/build-iso.sh
 
 The result is `output/Andromeda-Developer-Preview-x86_64.iso` plus a SHA-256
 checksum. The build uses the current unified `image-builder` generic ISO
-contract and embeds the v1 payload for offline installation.
+contract and embeds the v1 payload for offline installation. Setting
+`INSTALLER_DEFAULT=1` (CI only) makes the destructive automated entry the
+GRUB default and renames the output to
+`Andromeda-Developer-Preview-x86_64-ci.iso`.
 
 ## End-to-end test
 
 Install QEMU and OVMF, then run:
 
 ```bash
+sudo env INSTALLER_DEFAULT=1 os/scripts/build-iso.sh
 sudo os/scripts/test-install.sh
 ```
+
+The test needs the `*-ci.iso` variant, root privileges, and — on hosts that
+are not Debian/Ubuntu — `OVMF_CODE`/`OVMF_VARS_TEMPLATE` overrides for the
+firmware paths.
 
 The test boots the ISO with UEFI, automatically installs onto a new 64 GiB
 VirtIO disk, removes the ISO, and starts the installed disk. The installed OS
@@ -75,9 +87,10 @@ sudo env ANDROMEDA_SOURCE_REVISION="$(git rev-parse HEAD)" \
   os/scripts/test-gcp-nested.sh "$PWD" "$PWD/output"
 ```
 
-The GCP provisioning, evidence retrieval, and exact resource cleanup are
-handled separately by the `gcp-os-e2e` Codex skill. See
-[the daily-driver E2E guide](../docs/development/daily-driver-e2e.md).
+GCP provisioning, evidence retrieval, and guaranteed instance deletion are
+handled by the in-repo wrapper `os/scripts/gcp-run-e2e.sh`, which creates a
+single labeled instance with `--max-run-duration` and deletes it from an EXIT
+trap. See [the daily-driver E2E guide](../docs/development/daily-driver-e2e.md).
 
 ## Upstream contracts
 

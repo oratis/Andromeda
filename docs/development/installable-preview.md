@@ -59,7 +59,16 @@ sudo os/scripts/build-iso.sh
 - `output/Andromeda-Developer-Preview-x86_64.iso`
 - `output/Andromeda-Developer-Preview-x86_64.iso.sha256`
 - `output/Andromeda-Developer-Preview-x86_64.manifest.json`
+- `output/andromeda-v1-history.json`（v1 payload 的镜像层历史，CI 也会上传）
 - `output/andromeda-v2.tar`（仅用于生命周期测试）
+
+`INSTALLER_DEFAULT` 环境变量控制 ISO 的 GRUB 默认启动项，默认为 `0`
+（交互式图形安装器，面向人类，安全）。只有 CI 和自动化验收才应设置
+`INSTALLER_DEFAULT=1`：该值把 10 秒后自动清盘的 CI 安装项设为默认，产物
+会改名为 `Andromeda-Developer-Preview-x86_64-ci.iso`（含对应的 `.sha256`
+与 `.manifest.json`，manifest 中也记录 `installer_default`），绝不能把它
+当作面向开发者的预览镜像分发。构建过程会校验 `INSTALLER_DEFAULT` 只能是
+0 或 1，并断言 GRUB default 替换确实生效。
 
 ISO 使用 `image-builder` 的 `bootc-generic-iso` 类型，把
 `localhost/andromeda:v1` payload 嵌入安装环境，因此系统安装本身不依赖网络。
@@ -71,7 +80,21 @@ ISO 使用 `image-builder` 的 `bootc-generic-iso` 类型，把
 在安装 QEMU、OVMF 和 KVM 的 Linux 主机运行：
 
 ```bash
+sudo env INSTALLER_DEFAULT=1 os/scripts/build-iso.sh
 sudo os/scripts/test-install.sh
+```
+
+脚本必须以 root 运行（`modprobe`、`qemu-nbd`、`mount`），并要求存在
+`Andromeda-Developer-Preview-x86_64-ci.iso`——无人值守生命周期需要 CI 自动
+安装项作为 GRUB 默认项。OVMF 固件默认路径是 Debian/Ubuntu 布局
+（`/usr/share/OVMF/OVMF_CODE_4M.fd` 与 `OVMF_VARS_4M.fd`）；Fedora 等其他
+发行版请用环境变量覆盖，例如：
+
+```bash
+sudo env \
+  OVMF_CODE=/usr/share/edk2/ovmf/OVMF_CODE.fd \
+  OVMF_VARS_TEMPLATE=/usr/share/edk2/ovmf/OVMF_VARS.fd \
+  os/scripts/test-install.sh
 ```
 
 脚本执行以下真实状态转换：
@@ -83,7 +106,8 @@ sudo os/scripts/test-install.sh
    标准 fallback 路径；
 5. 关机、移除 ISO，仅从安装后的磁盘启动；
 6. 验证 UEFI、SELinux enforcing、SDDM、硬件报告和 `taskd /healthz`；
-7. 导入 revision 2，执行 `bootc switch` 并重启；
+7. 下载 revision 2 归档，按宿主经 fw_cfg 注入的期望 SHA-256 校验通过后才
+   导入，执行 `bootc switch` 并重启；
 8. 确认 revision 2 已启动，执行 `bootc rollback` 并重启；
 9. 确认 revision 1 恢复，输出 `ANDROMEDA_E2E_OK`。
 

@@ -4,7 +4,12 @@ set -euo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPOSITORY_ROOT
 readonly OUTPUT_DIR="${1:-${REPOSITORY_ROOT}/output}"
-readonly ISO_PATH="${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso"
+readonly ISO_PATH="${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.iso"
+
+if [[ "${EUID}" -ne 0 ]]; then
+    printf 'test-install.sh needs root for modprobe, qemu-nbd, and mount; run it with sudo.\n' >&2
+    exit 1
+fi
 readonly DISK_PATH="${OUTPUT_DIR}/andromeda-test.qcow2"
 readonly INSTALL_LOG="${OUTPUT_DIR}/install-serial.log"
 readonly BOOT_LOG="${OUTPUT_DIR}/boot-serial.log"
@@ -51,10 +56,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test -f "${ISO_PATH}"
+if [[ ! -f "${ISO_PATH}" ]]; then
+    printf 'Missing CI installer ISO: %s\n' "${ISO_PATH}" >&2
+    printf 'Build it with INSTALLER_DEFAULT=1 os/scripts/build-iso.sh; this lifecycle test needs the destructive CI entry as the GRUB default.\n' >&2
+    exit 1
+fi
 test -f "${OUTPUT_DIR}/andromeda-v2.tar"
 test -f "${OVMF_CODE}"
 test -f "${OVMF_VARS_TEMPLATE}"
+update_sha256="$(sha256sum "${OUTPUT_DIR}/andromeda-v2.tar" | cut -d' ' -f1)"
+readonly update_sha256
 
 rm -rf "${DIAGNOSTICS_DIR}"
 mkdir -p \
@@ -128,6 +139,7 @@ partprobe "${nbd_device}"
 udevadm trigger --settle "${nbd_device}"
 udevadm settle
 
+partition_probe_ok=0
 partition_probe_deadline="$((SECONDS + 30))"
 while (( SECONDS < partition_probe_deadline )); do
     blkid "${nbd_device}"* >/dev/null 2>&1 || true
@@ -135,6 +147,7 @@ while (( SECONDS < partition_probe_deadline )); do
         | grep -qi 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' \
         && lsblk -prno LABEL "${nbd_device}" \
         | grep -qx 'andromeda-root'; then
+        partition_probe_ok=1
         break
     fi
     sleep 1
@@ -147,6 +160,24 @@ blkid "${nbd_device}"* \
     >"${DIAGNOSTICS_DIR}/host/blkid.txt" 2>&1 || true
 sfdisk --dump "${nbd_device}" \
     >"${DIAGNOSTICS_DIR}/host/partition-table.sfdisk" 2>&1 || true
+
+# Diagnostics are collected above; report the primary failure cause before
+# any strict assertion can mask it with a confusing grep or mount error.
+if [[ "${install_status}" -ne 0 ]]; then
+    printf 'Installer exited with status %s.\n' "${install_status}" >&2
+    tail -100 "${INSTALL_LOG}" >&2 || true
+    exit "${install_status}"
+fi
+if [[ "${image_check_status}" -ne 0 ]]; then
+    printf 'Installed disk image failed qemu-img check with status %s.\n' \
+        "${image_check_status}" >&2
+    exit "${image_check_status}"
+fi
+if [[ "${partition_probe_ok}" -ne 1 ]]; then
+    printf 'Timed out waiting for the ESP GUID and andromeda-root label on %s.\n' \
+        "${nbd_device}" >&2
+    exit 1
+fi
 
 esp_partition="$(
     lsblk -prno NAME,PARTTYPE "${nbd_device}" \
@@ -212,24 +243,17 @@ grep -F '\EFI\fedora\shimx64.efi' \
     "${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt" \
     | tee -a "${OUTPUT_DIR}/ovmf-vars.txt"
 
-if [[ "${install_status}" -ne 0 ]]; then
-    printf 'Installer exited with status %s.\n' "${install_status}" >&2
-    exit "${install_status}"
-fi
-if [[ "${image_check_status}" -ne 0 ]]; then
-    printf 'Installed disk image failed qemu-img check with status %s.\n' \
-        "${image_check_status}" >&2
-    exit "${image_check_status}"
-fi
-
+# The guest reaches the host over slirp via 10.0.2.2, which forwards to the
+# host loopback; never expose the output directory on real interfaces.
 python3 -m http.server 8080 \
-    --bind 0.0.0.0 \
+    --bind 127.0.0.1 \
     --directory "${OUTPUT_DIR}" \
     >"${OUTPUT_DIR}/update-server.log" 2>&1 &
 http_pid="$!"
 
 qemu-system-x86_64 \
     "${common_qemu[@]}" \
+    -fw_cfg "name=opt/andromeda/update-sha256,string=${update_sha256}" \
     -boot order=c \
     -serial "file:${BOOT_LOG}" &
 qemu_pid="$!"
