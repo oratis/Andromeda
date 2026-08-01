@@ -43,22 +43,26 @@ pub struct BootInfo {
     pub virtualization: Option<bool>,
 }
 
+/// A probed device.
+///
+/// Every optional field relies on serde's built-in behavior for missing
+/// `Option` fields (absent input deserializes to `None`); no field carries a
+/// redundant `#[serde(default)]`. `DeviceInfo` deliberately does *not* use
+/// `deny_unknown_fields`: reports come from the local probe and must stay
+/// forward-compatible when a newer probe adds fields, unlike the untrusted
+/// manifest structs below.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub bus: String,
     pub address: Option<String>,
     pub vendor_id: Option<String>,
     pub product_id: Option<String>,
-    #[serde(default)]
     pub subsystem_vendor_id: Option<String>,
-    #[serde(default)]
     pub subsystem_product_id: Option<String>,
-    #[serde(default)]
     pub revision: Option<String>,
     pub class: Option<String>,
     pub driver: Option<String>,
     pub name: Option<String>,
-    #[serde(default)]
     pub modalias: Option<String>,
 }
 
@@ -100,6 +104,7 @@ pub enum SupportTier {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HardwareSelector {
     pub os_family: Option<OsFamily>,
     #[serde(default)]
@@ -108,8 +113,12 @@ pub struct HardwareSelector {
     pub model_prefix: Option<String>,
 }
 
+// `deny_unknown_fields` on the internally tagged `CapabilityRequirement`
+// applies to each variant's own fields; the `type` tag is consumed by the
+// enum deserializer, so a mistyped requirement field is rejected rather than
+// silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CapabilityRequirement {
     MemoryBytes {
         minimum: u64,
@@ -154,6 +163,7 @@ pub enum ArtifactKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ArtifactPin {
     pub kind: ArtifactKind,
     pub name: String,
@@ -171,6 +181,7 @@ pub enum EvidenceResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CapabilityEvidence {
     pub capability: String,
     pub result: EvidenceResult,
@@ -180,6 +191,7 @@ pub struct CapabilityEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HcmManifest {
     pub schema_version: u32,
     pub id: String,
@@ -220,4 +232,49 @@ pub struct CompatibilityEvaluation {
     pub evidence: Vec<String>,
     #[serde(default)]
     pub missing: Vec<String>,
+}
+
+/// Strips at most one leading `0x`/`0X` prefix (case-insensitive).
+///
+/// `trim_start_matches` would strip repeated prefixes, silently equating
+/// `0x0x10de` with `10de`. This is the single source of truth shared by the
+/// matcher and the diagnosis classifier.
+#[must_use]
+pub(crate) fn strip_hex_prefix(value: &str) -> &str {
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value)
+}
+
+/// Case-insensitive hardware-ID comparison that ignores a single `0x`/`0X`
+/// prefix on either side. Repeated prefixes (`0x0x10de`) are *not* collapsed.
+#[must_use]
+pub(crate) fn id_matches(actual: &str, expected: &str) -> bool {
+    strip_hex_prefix(actual).eq_ignore_ascii_case(strip_hex_prefix(expected))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{id_matches, strip_hex_prefix};
+
+    #[test]
+    fn strips_at_most_one_hex_prefix_case_insensitively() {
+        assert_eq!(strip_hex_prefix("0x10de"), "10de");
+        assert_eq!(strip_hex_prefix("0X10DE"), "10DE");
+        assert_eq!(strip_hex_prefix("10de"), "10de");
+        // Only the first prefix is removed; the inner `0x` survives.
+        assert_eq!(strip_hex_prefix("0x0x10de"), "0x10de");
+    }
+
+    #[test]
+    fn id_matches_ignores_one_prefix_and_case_but_not_repeats() {
+        assert!(id_matches("0X10DE", "10de"));
+        assert!(id_matches("0x10de", "0X10DE"));
+        assert!(id_matches("10DE", "10de"));
+        assert!(
+            !id_matches("0x0x10de", "10de"),
+            "repeated prefixes must not be stripped"
+        );
+    }
 }

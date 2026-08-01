@@ -1,3 +1,4 @@
+use crate::model::{id_matches, strip_hex_prefix};
 use crate::{DeviceInfo, HardwareReport, OsFamily};
 use serde::{Deserialize, Serialize};
 
@@ -203,21 +204,13 @@ fn classify_usb(class: &str) -> Option<DeviceCategory> {
     }
 }
 
+/// Parses a hex class value, stripping at most one leading `0x`/`0X` prefix.
+///
+/// Uses the shared [`strip_hex_prefix`] so a value such as `0x0x010802` is
+/// treated identically to the matcher (the inner `0x` makes it invalid rather
+/// than being silently collapsed by `trim_start_matches`).
 fn parse_hex(value: &str) -> Option<u32> {
-    u32::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok()
-}
-
-/// Strips at most one leading `0x`/`0X` prefix (case-insensitive), matching
-/// the matcher's ID comparison semantics.
-fn strip_hex_prefix(value: &str) -> &str {
-    value
-        .strip_prefix("0x")
-        .or_else(|| value.strip_prefix("0X"))
-        .unwrap_or(value)
-}
-
-fn id_matches(actual: &str, expected: &str) -> bool {
-    strip_hex_prefix(actual).eq_ignore_ascii_case(strip_hex_prefix(expected))
+    u32::from_str_radix(strip_hex_prefix(value.trim()), 16).ok()
 }
 
 fn recommendations(report: &HardwareReport, findings: &[DeviceFinding]) -> Vec<String> {
