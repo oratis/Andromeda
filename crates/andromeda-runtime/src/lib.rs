@@ -8,7 +8,7 @@ mod service;
 mod store;
 
 pub use service::{
-    CreateTaskRequest, EvaluationReport, ServiceError, StateTransitionRequest, TaskEvent,
-    TaskEventKind, TaskRecord, TaskService, ValidationError,
+    CreateTaskRequest, EvaluationReport, MAX_PLAN_ACTIONS, ServiceError, StateTransitionRequest,
+    TaskEvent, TaskEventKind, TaskRecord, TaskService, ValidationError,
 };
-pub use store::{FileTaskStore, StoreError};
+pub use store::{FileTaskStore, ListWarning, StoreError, TaskListing};

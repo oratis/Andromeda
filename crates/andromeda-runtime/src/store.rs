@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use andromeda_core::TaskId;
 use fs4::fs_std::FileExt;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -34,6 +35,23 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
 }
 
+/// A non-fatal problem encountered while listing task records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListWarning {
+    /// Path of the record file that could not be loaded.
+    pub path: PathBuf,
+    /// Human-readable reason the record was skipped.
+    pub reason: String,
+}
+
+/// The result of listing the store: healthy records plus per-file warnings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskListing {
+    pub records: Vec<TaskRecord>,
+    /// Records that were skipped because they could not be read or parsed.
+    pub warnings: Vec<ListWarning>,
+}
+
 /// A cross-process-safe JSON task store with atomic replacement.
 #[derive(Debug, Clone)]
 pub struct FileTaskStore {
@@ -41,15 +59,19 @@ pub struct FileTaskStore {
 }
 
 impl FileTaskStore {
-    /// Opens or creates a task store.
+    /// Opens or creates a task store and removes orphaned temporary files
+    /// left behind by writers that crashed before their atomic rename.
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when the state directory cannot be created.
+    /// Returns an I/O error when the state directory cannot be created,
+    /// locked, or scanned for orphaned temporary files.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, StoreError> {
         let root = root.into();
         fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        let store = Self { root };
+        store.remove_orphan_temp_files()?;
+        Ok(store)
     }
 
     /// Creates a record at revision zero.
@@ -91,24 +113,38 @@ impl FileTaskStore {
 
     /// Lists all tasks in deterministic identifier order.
     ///
+    /// A record file that cannot be read or parsed does not fail the whole
+    /// listing; it is skipped and reported in [`TaskListing::warnings`].
+    ///
     /// # Errors
     ///
-    /// Returns an I/O or parsing error if the state directory is unreadable or
-    /// contains a malformed task record.
-    pub fn list(&self) -> Result<Vec<TaskRecord>, StoreError> {
+    /// Returns an I/O error only when the state directory itself is
+    /// unreadable.
+    pub fn list(&self) -> Result<TaskListing, StoreError> {
         let mut latest = BTreeMap::<TaskId, TaskRecord>::new();
+        let mut warnings = Vec::new();
         for path in self.record_paths()? {
-            let record = Self::read_record(&path)?;
-            latest
-                .entry(record.plan.task_id)
-                .and_modify(|current| {
-                    if record.revision > current.revision {
-                        current.clone_from(&record);
-                    }
-                })
-                .or_insert(record);
+            match Self::read_record(&path) {
+                Ok(record) => {
+                    latest
+                        .entry(record.plan.task_id)
+                        .and_modify(|current| {
+                            if record.revision > current.revision {
+                                current.clone_from(&record);
+                            }
+                        })
+                        .or_insert(record);
+                }
+                Err(error) => warnings.push(ListWarning {
+                    path,
+                    reason: error.to_string(),
+                }),
+            }
         }
-        Ok(latest.into_values().collect())
+        Ok(TaskListing {
+            records: latest.into_values().collect(),
+            warnings,
+        })
     }
 
     /// Replaces a task only when its current revision matches `expected`.
@@ -161,14 +197,42 @@ impl FileTaskStore {
     }
 
     fn record_paths(&self) -> Result<Vec<PathBuf>, StoreError> {
-        Ok(fs::read_dir(&self.root)?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect())
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(&self.root)? {
+            let path = entry?.path();
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "json")
+            {
+                paths.push(path);
+            }
+        }
+        Ok(paths)
+    }
+
+    /// Deletes stale `.{uuid}.tmp` files under the exclusive store lock.
+    ///
+    /// Writers only produce temporary files while holding the same lock, so
+    /// any temporary file observed here belongs to a crashed writer.
+    fn remove_orphan_temp_files(&self) -> Result<(), StoreError> {
+        let lock = self.lock_exclusive()?;
+        for entry in fs::read_dir(&self.root)? {
+            let path = entry?.path();
+            let is_orphan_temp = path.extension().is_some_and(|extension| extension == "tmp")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with('.'));
+            if is_orphan_temp {
+                match fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        FileExt::unlock(&lock)?;
+        Ok(())
     }
 
     fn lock_exclusive(&self) -> Result<File, StoreError> {
@@ -209,4 +273,65 @@ impl FileTaskStore {
 #[cfg(unix)]
 fn sync_directory(path: &Path) -> io::Result<()> {
     File::open(path)?.sync_all()
+}
+
+#[cfg(test)]
+mod tests {
+    use andromeda_core::{ActionPlan, Intent, TaskState};
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn record() -> TaskRecord {
+        TaskRecord {
+            plan: ActionPlan::new(Intent::new("store test", "test"), Vec::new()),
+            state: TaskState::Draft,
+            revision: 0,
+            capabilities: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn open_removes_orphan_temp_files() {
+        let temp = TempDir::new().expect("tempdir");
+        let orphan = temp.path().join(format!(".{}.tmp", Uuid::new_v4()));
+        fs::write(&orphan, b"partial write").expect("orphan");
+
+        let store = FileTaskStore::open(temp.path()).expect("store");
+        assert!(fs::metadata(&orphan).is_err(), "orphan must be removed");
+
+        let created = record();
+        store.create(&created).expect("create");
+        assert_eq!(store.get(created.plan.task_id).expect("get"), created);
+    }
+
+    #[test]
+    fn list_skips_corrupt_records_with_warnings() {
+        let temp = TempDir::new().expect("tempdir");
+        let store = FileTaskStore::open(temp.path()).expect("store");
+        let created = record();
+        store.create(&created).expect("create");
+        let corrupt = temp
+            .path()
+            .join(format!("{}.{:020}.json", TaskId::new(), 0));
+        fs::write(&corrupt, b"{ not json").expect("corrupt record");
+
+        let listing = store.list().expect("list");
+        assert_eq!(listing.records, vec![created]);
+        assert_eq!(listing.warnings.len(), 1);
+        assert_eq!(listing.warnings[0].path, corrupt);
+    }
+
+    #[test]
+    fn duplicate_create_reports_already_exists() {
+        let temp = TempDir::new().expect("tempdir");
+        let store = FileTaskStore::open(temp.path()).expect("store");
+        let created = record();
+        store.create(&created).expect("create");
+        assert!(matches!(
+            store.create(&created),
+            Err(StoreError::AlreadyExists(id)) if id == created.plan.task_id
+        ));
+    }
 }
