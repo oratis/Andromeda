@@ -115,7 +115,9 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        alsa-firmware \
         alsa-sof-firmware \
+        alsa-tools-firmware \
         alsa-ucm \
         alsa-utils \
         bluez \
@@ -128,7 +130,9 @@ RUN dnf -y install \
         fwupd \
         libcamera-gstreamer \
         libcamera-tools \
+        pipewire-gstreamer \
         pipewire-plugin-libcamera \
+        pipewire-v4l2 \
         plasma-print-manager \
         plasma-thunderbolt \
         powerdevil \
@@ -186,17 +190,22 @@ RUN dnf -y install \
 
 RUN dnf -y install \
         amd-gpu-firmware \
+        amd-ucode-firmware \
         atheros-firmware \
+        b43-fwcutter \
+        b43-openfwwf \
         brcmfmac-firmware \
         cirrus-audio-firmware \
         intel-audio-firmware \
         intel-gpu-firmware \
         intel-vsc-firmware \
+        iwlegacy-firmware \
         iwlwifi-dvm-firmware \
         iwlwifi-mvm-firmware \
         mt7xxx-firmware \
         nvidia-gpu-firmware \
         nxpwireless-firmware \
+        qcom-wwan-firmware \
         realtek-firmware \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -244,11 +253,13 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        alsa-lib.i686 \
         gamemode \
         gamescope \
         mangohud \
         mesa-dri-drivers.i686 \
         mesa-vulkan-drivers.i686 \
+        pipewire-libs.i686 \
         steam-devices \
         vulkan-loader.i686 \
     && dnf clean all \
