@@ -15,6 +15,11 @@ reqpart --add-boot
 part / --fstype=ext4 --size=8192 --grow --label=andromeda-root
 
 bootloader --timeout=1 --append="console=tty0 console=ttyS0,115200n8 andromeda.ci=1"
+# SECURITY: --target-imgref is a mutable, unsigned tag. Before trusting remote
+# `bootc switch`/upgrade from this ref, a bootc signing policy
+# (sigstore/containers-policy.json pinning a trusted signing key) is a REQUIRED
+# follow-up; without it a compromised registry or retagged image is booted on
+# the next update. See security-review.md finding #4.
 bootc --source-imgref=containers-storage:localhost/andromeda:v1 --target-imgref=ghcr.io/oratis/andromeda:edge --stateroot=andromeda
 shutdown
 

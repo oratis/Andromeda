@@ -1,14 +1,20 @@
 # syntax=docker/dockerfile:1.7
 
+# Supply-chain: base images are pinned by @sha256 digest so a retagged or
+# compromised upstream tag cannot silently change the build inputs. The digest
+# is authoritative; the human-readable tag is kept for context and must be
+# updated together with the digest (resolve via `skopeo inspect` /
+# `podman manifest inspect`). See security-review.md finding #4.
 ARG RUST_VERSION=1.85
-FROM docker.io/library/rust:${RUST_VERSION}-bookworm AS rust-builder
+FROM docker.io/library/rust:${RUST_VERSION}-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 AS rust-builder
 
 WORKDIR /src
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 RUN cargo build --release --locked --bin andromeda --bin andromeda-taskd
 
-FROM quay.io/fedora/fedora-bootc:44 AS payload
+# Pinned by digest; tag :44 kept for context (see rust-builder note above).
+FROM quay.io/fedora/fedora-bootc:44@sha256:69944835958dda565f8d613587535a3d90e3256cf0a0f0e29bca5ca3d2360d06 AS payload
 
 ARG PLATFORM_VARIANT=pc_x86_64
 ARG PLATFORM_ARCHITECTURE=x86_64
