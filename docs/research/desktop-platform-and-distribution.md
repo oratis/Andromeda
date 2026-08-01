@@ -17,6 +17,7 @@
    Mutter/GNOME Shell 的可靠性、无障碍和远程桌面能力很强；GNOME 50 已默认改进 VRR、分数缩放、NVIDIA 路径、HDR 屏幕共享和硬件加速远程桌面（[GNOME 50](https://release.gnome.org/50/)）。问题是 Andromeda 若要改变 Shell 的核心工作流，容易走向 GNOME Shell 扩展兼容追逐或长期 fork。
 3. **COSMIC/Smithay 是最值得长期 Pilot 的 Rust 路线，但不应替代 v1 主桌面。**
    COSMIC Epoch 1 于 2025-12-11 发布，证明 Rust + Smithay + iced/libcosmic 可以组成完整桌面（[System76 更新](https://blog.system76.com/blog/post/cosmic-epoch-1-updates)）。但它只有一个大版本的生产历史，`libcosmic` 的无障碍特性仍明确标为 experimental，桌面和门户仍在快速补齐。它适合做并行实验和上游合作，不适合让 v1 同时承担新 OS、新 AI 权限模型和新 compositor 三重风险。
+   *以上 Plasma 6.3/6.4、GNOME 50 与 COSMIC Epoch 1 的版本与能力描述均为调研日（2026-07-26）上游状态快照；进入 Adopt/Pilot 前须按当日上游状态复核。*
 4. **AI Task Center 必须“深度集成，但进程和接口解耦”。**
    深度集成不等于把模型塞进 KWin，也不等于让 agent 读取 `/dev/input`、直接调用任意 D-Bus 或长期持有管理员权限。推荐由独立 `andromeda-taskd`、确定性的 capability broker、系统事务服务和 Task Center UI 组成；Plasma/KWin 只提供表面入口、窗口语境与呈现。窗口自动化优先语义工具，其次 AT-SPI，再次是经 RemoteDesktop portal 授权的 libei 输入，不使用全局隐形键鼠注入。
 5. **系统发行采用 bootc/OCI + OSTree 后端能力，镜像构建采用统一 `image-builder`/osbuild。**

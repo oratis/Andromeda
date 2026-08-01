@@ -10,6 +10,16 @@ RUN cargo build --release --locked --bin andromeda --bin andromeda-taskd
 
 FROM quay.io/fedora/fedora-bootc:44 AS payload
 
+ARG PLATFORM_VARIANT=pc_x86_64
+ARG PLATFORM_ARCHITECTURE=x86_64
+ARG BOOT_PROVIDER=pc_uefi_shim
+ARG HEP_ID=pc-mainline
+
+LABEL io.andromeda.platform.variant="${PLATFORM_VARIANT}" \
+      io.andromeda.platform.architecture="${PLATFORM_ARCHITECTURE}" \
+      io.andromeda.platform.boot-provider="${BOOT_PROVIDER}" \
+      io.andromeda.platform.hep-id="${HEP_ID}"
+
 RUN dnf -y install \
         NetworkManager \
         curl \
@@ -25,9 +35,14 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        kernel-modules-extra \
+        libva-intel-media-driver \
+        libva-utils \
         mesa-dri-drivers \
         mesa-vulkan-drivers \
+        switcheroo-control \
         vulkan-loader \
+        vulkan-tools \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -42,6 +57,8 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        lcms2 \
+        libssh \
         kwin \
     && dnf clean all \
     && rm -rf /var/cache/dnf
@@ -98,7 +115,11 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        alsa-firmware \
         alsa-sof-firmware \
+        alsa-tools-firmware \
+        alsa-ucm \
+        alsa-utils \
         bluez \
         bluez-obexd \
         bluedevil \
@@ -107,12 +128,97 @@ RUN dnf -y install \
         cups-filters \
         fprintd \
         fwupd \
+        libcamera-gstreamer \
         libcamera-tools \
+        pipewire-gstreamer \
+        pipewire-plugin-libcamera \
+        pipewire-v4l2 \
+        plasma-print-manager \
+        plasma-thunderbolt \
         powerdevil \
         sane-backends \
+        sane-backends-drivers-scanners \
         system-config-printer \
         thermald \
         upower \
+        v4l-utils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        ModemManager \
+        NetworkManager-bluetooth \
+        NetworkManager-config-connectivity-fedora \
+        NetworkManager-ppp \
+        NetworkManager-wifi \
+        NetworkManager-wwan \
+        iw \
+        mobile-broadband-provider-info \
+        usb_modeswitch \
+        wireless-regdb \
+        wpa_supplicant \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        btrfs-progs \
+        dosfstools \
+        e2fsprogs \
+        exfatprogs \
+        f2fs-tools \
+        kde-partitionmanager \
+        lvm2 \
+        mdadm \
+        ntfs-3g \
+        nvme-cli \
+        smartmontools \
+        udisks2 \
+        udisks2-lvm2 \
+        xfsprogs \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        iio-sensor-proxy \
+        libinput-utils \
+        libwacom \
+        pciutils \
+        tpm2-tools \
+        usbutils \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        amd-gpu-firmware \
+        amd-ucode-firmware \
+        atheros-firmware \
+        b43-fwcutter \
+        b43-openfwwf \
+        brcmfmac-firmware \
+        cirrus-audio-firmware \
+        intel-audio-firmware \
+        intel-gpu-firmware \
+        intel-vsc-firmware \
+        iwlegacy-firmware \
+        iwlwifi-dvm-firmware \
+        iwlwifi-mvm-firmware \
+        mt7xxx-firmware \
+        nvidia-gpu-firmware \
+        nxpwireless-firmware \
+        qcom-wwan-firmware \
+        realtek-firmware \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
+
+RUN dnf -y install \
+        avahi \
+        cups-browsed \
+        cups-pk-helper \
+        ipp-usb \
+        nss-mdns \
+        sane-airscan \
+        simple-scan \
+        system-config-printer-udev \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
@@ -147,11 +253,13 @@ RUN dnf -y install \
     && rm -rf /var/cache/dnf
 
 RUN dnf -y install \
+        alsa-lib.i686 \
         gamemode \
         gamescope \
         mangohud \
         mesa-dri-drivers.i686 \
         mesa-vulkan-drivers.i686 \
+        pipewire-libs.i686 \
         steam-devices \
         vulkan-loader.i686 \
     && dnf clean all \
@@ -187,7 +295,15 @@ ARG IMAGE_REVISION=1
 
 RUN mkdir -p /usr/lib/andromeda \
     && printf '%s\n' "${IMAGE_REVISION}" > /usr/lib/andromeda/image-revision \
-    && systemctl disable sshd.service \
+    && jq --null-input \
+        --arg variant "${PLATFORM_VARIANT}" \
+        --arg architecture "${PLATFORM_ARCHITECTURE}" \
+        --arg boot_provider "${BOOT_PROVIDER}" \
+        --arg hep_id "${HEP_ID}" \
+        --arg image_revision "${IMAGE_REVISION}" \
+        '{schema_version:1,variant:$variant,architecture:$architecture,boot_provider:$boot_provider,hep_id:$hep_id,image_revision:$image_revision}' \
+        > /usr/lib/andromeda/platform.json \
+    && systemctl disable sshd.service sshd.socket \
     && systemctl enable \
         NetworkManager.service \
         andromeda-first-boot-labels.service \
@@ -196,8 +312,11 @@ RUN mkdir -p /usr/lib/andromeda \
         andromeda-ci-verify.service \
         bluetooth.service \
         cups.service \
+        avahi-daemon.service \
+        avahi-daemon.socket \
         firewalld.service \
         fstrim.timer \
+        fwupd-refresh.timer \
         qemu-guest-agent.service \
         sddm.service \
         systemd-oomd.service \
@@ -235,9 +354,17 @@ COPY os/installer/interactive-defaults.ks /usr/share/anaconda/interactive-defaul
 COPY os/installer/andromeda-ci.ks /usr/share/anaconda/andromeda-ci.ks
 COPY os/installer/install-uefi-fallback.sh /usr/libexec/andromeda-install-uefi-fallback
 COPY os/installer/installer-preflight.sh /usr/libexec/andromeda-installer-preflight
+COPY os/installer/check-platform-compatibility.sh /usr/libexec/andromeda-check-platform-compatibility
 COPY os/installer/collect-anaconda-diagnostics.sh /usr/libexec/andromeda-collect-anaconda-diagnostics
 
-RUN sed -i "s/^  default: 0$/  default: ${INSTALLER_DEFAULT}/" \
+RUN case "${INSTALLER_DEFAULT}" in \
+        0|1) ;; \
+        *) printf 'INSTALLER_DEFAULT must be 0 or 1, got: %s\n' \
+            "${INSTALLER_DEFAULT}" >&2; exit 1 ;; \
+    esac \
+    && sed -i "s/^  default: 0$/  default: ${INSTALLER_DEFAULT}/" \
+        /usr/lib/image-builder/bootc/iso.yaml \
+    && grep -q "^  default: ${INSTALLER_DEFAULT}$" \
         /usr/lib/image-builder/bootc/iso.yaml \
     && anaconda_version="$(rpm -q --qf '%{VERSION}\n' anaconda-core)" \
     && test "${anaconda_version%%.*}" -ge 44 \

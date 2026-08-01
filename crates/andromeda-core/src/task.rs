@@ -84,6 +84,12 @@ pub struct TaskTransitionError {
 impl TaskState {
     /// Moves a task to a valid next state.
     ///
+    /// `Failed` is a terminal state (see [`TaskState::is_terminal`]), but it
+    /// keeps one explicit outgoing edge: `Failed -> Compensating` "reopens"
+    /// the terminal failure when the plan's recovery semantics call for
+    /// compensation. Tasks without recovery semantics simply rest in
+    /// `Failed`.
+    ///
     /// # Errors
     ///
     /// Returns [`TaskTransitionError`] when the requested edge is not part of
@@ -100,7 +106,10 @@ impl TaskState {
                     Self::Running,
                     Self::Verifying | Self::Failed | Self::Cancelling
                 )
-                | (Self::Verifying, Self::Succeeded | Self::Failed)
+                | (
+                    Self::Verifying,
+                    Self::Succeeded | Self::Failed | Self::Cancelling
+                )
                 | (Self::Failed, Self::Compensating)
                 | (Self::Cancelling, Self::Cancelled | Self::Compensating)
                 | (Self::Compensating, Self::Compensated | Self::Failed)
@@ -113,9 +122,19 @@ impl TaskState {
         }
     }
 
+    /// Whether the state holds no scheduled work.
+    ///
+    /// `Failed` counts as terminal so that tasks with
+    /// `RecoverySemantics::None` are retained/cleaned up like any other
+    /// finished task instead of leaking as forever-pending work. It is the
+    /// only terminal state with an outgoing edge: `Failed -> Compensating`
+    /// deliberately reopens it when recovery runs.
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Succeeded | Self::Cancelled | Self::Compensated)
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Compensated
+        )
     }
 }
 
@@ -142,6 +161,34 @@ mod tests {
                 from: TaskState::Running,
                 to: TaskState::Succeeded,
             })
+        );
+    }
+
+    #[test]
+    fn verification_can_be_cancelled() {
+        let state = TaskState::Verifying
+            .transition(TaskState::Cancelling)
+            .and_then(|state| state.transition(TaskState::Cancelled))
+            .expect("cancellation from verification");
+        assert!(state.is_terminal());
+    }
+
+    #[test]
+    fn failed_is_terminal_for_tasks_without_recovery() {
+        assert!(TaskState::Failed.is_terminal());
+    }
+
+    #[test]
+    fn failed_can_still_be_reopened_by_compensation() {
+        let state = TaskState::Failed
+            .transition(TaskState::Compensating)
+            .expect("compensation edge");
+        assert!(!state.is_terminal());
+        assert!(
+            state
+                .transition(TaskState::Compensated)
+                .expect("compensated")
+                .is_terminal()
         );
     }
 }

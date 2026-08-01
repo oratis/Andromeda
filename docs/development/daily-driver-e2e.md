@@ -26,7 +26,7 @@ Workspace、Microsoft Office 原版或某款游戏已经通过产品认证。
 
 ## 自动验收场景
 
-`os/scripts/test-install.sh` 在新的 32 GiB VirtIO 磁盘上执行真实 UEFI 生命周期：
+`os/scripts/test-install.sh` 在新的 64 GiB VirtIO 磁盘上执行真实 UEFI 生命周期：
 
 1. 从 ISO 离线安装，移除 ISO 后仅从硬盘启动；
 2. CI 专用账户自动进入 Plasma Wayland 会话；
@@ -63,9 +63,14 @@ ANDROMEDA_E2E_OK
 在 x86-64 Linux KVM 主机安装 Podman、QEMU 和 OVMF 后运行：
 
 ```bash
-sudo os/scripts/build-iso.sh "$PWD/output"
+sudo env INSTALLER_DEFAULT=1 os/scripts/build-iso.sh "$PWD/output"
 sudo os/scripts/test-install.sh "$PWD/output"
 ```
+
+`INSTALLER_DEFAULT=1` 构建 `*-ci.iso` 变体：其 GRUB 默认项是自动清盘安装，
+仅供无人值守验收；不带该变量构建的 ISO 默认进入交互式图形安装器。非
+Debian/Ubuntu 主机需用 `OVMF_CODE` 与 `OVMF_VARS_TEMPLATE` 环境变量指定
+固件路径。
 
 构建和测试会生成 ISO、校验和、安装串口、启动串口、ESP/NVRAM 信息、更新服务
 日志与失败诊断。不要在真实电脑上选择 ISO 的 CI 自动安装项；它会清空第一块磁盘。
@@ -86,8 +91,20 @@ sudo env ANDROMEDA_SOURCE_REVISION="$(git rev-parse HEAD)" \
 - 输出盘至少有 100 GiB 可用空间。
 
 测试结束时，`output/gcp-evidence/` 保存主机环境、构建日志、测试日志、ISO
-SHA-256、生命周期标记和诊断。云资源的创建、标签校验、最大运行时、证据下载与
-精确清理由本地 `gcp-os-e2e` Codex skill 管理；仓库脚本本身不会创建或删除云资源。
+SHA-256、生命周期标记和诊断。
+
+云实例生命周期由仓库内的 `os/scripts/gcp-run-e2e.sh` 包装脚本管理，使云资源
+的创建与清理可在仓库内审计：
+
+```bash
+ANDROMEDA_GCP_PROJECT=<project-id> os/scripts/gcp-run-e2e.sh
+```
+
+它只创建一台带 `purpose=andromeda-e2e` 等标签的一次性实例，创建时即指定
+`--max-run-duration`（默认 6 小时）加 `--instance-termination-action=DELETE`
+作为平台侧兜底，EXIT trap 无论成败都会删除实例；删除失败会打印可直接执行的
+手工清理命令。历史运行曾由仓库外的 `gcp-os-e2e` Codex skill 执行同等步骤；
+以后应以仓库内脚本为准。`test-gcp-nested.sh` 自身不会创建或删除云资源。
 
 ## 证据边界
 
@@ -114,6 +131,13 @@ GCP 嵌套 KVM 可以证明：
 ## 已验证运行
 
 本节只记录完整通过且证据已保存的运行。进行中的运行或局部成功不会列入。
+
+> **证据边界声明：** 下表的 PASS 记录产生于证据提取器修复**之前**的一次运行：
+> 当时 OS 与磁盘生命周期全部成功，但外层收集器因串口 CRLF/ANSI 假阴性以
+> 状态 1 退出；提取器修复后仅对同一份原始串口日志做了离线复验（状态 0）。
+> 使用最终版脚本从头到尾一次性跑绿的完整 GCP 端到端复跑**尚未完成**，仍在
+> 待办中。在那次复跑完成前，本记录只应被视为"生命周期在旧代码下通过 +
+> 提取器修复经离线验证"，而不是最终代码的一次性绿跑。
 
 | 项目 | 值 |
 |---|---|

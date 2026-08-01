@@ -3,8 +3,32 @@ set -euo pipefail
 
 install -d -m 0700 /var/lib/andromeda
 temporary_report="$(mktemp /var/lib/andromeda/hardware.json.XXXXXX)"
-trap 'rm -f "${temporary_report}"' EXIT
+temporary_diagnosis="$(mktemp /var/lib/andromeda/hardware-diagnosis.json.XXXXXX)"
+trap 'rm -f "${temporary_report}" "${temporary_diagnosis}"' EXIT
 /usr/bin/andromeda hardware probe > "${temporary_report}"
-chmod 0600 "${temporary_report}"
+/usr/bin/andromeda hardware diagnose > "${temporary_diagnosis}"
+chmod 0600 "${temporary_report}" "${temporary_diagnosis}"
 mv -f "${temporary_report}" /var/lib/andromeda/hardware.json
+mv -f "${temporary_diagnosis}" /var/lib/andromeda/hardware-diagnosis.json
 trap - EXIT
+
+readiness="$(jq -r '.readiness' /var/lib/andromeda/hardware-diagnosis.json)"
+boot_critical_missing="$(
+    jq -r '.boot_critical_missing' /var/lib/andromeda/hardware-diagnosis.json
+)"
+marker="ANDROMEDA_HARDWARE_REPORT_OK readiness=${readiness} boot_critical_missing=${boot_critical_missing}"
+scenario_path=/sys/firmware/qemu_fw_cfg/by_name/opt/andromeda/scenario/raw
+if [[ -r "${scenario_path}" ]]; then
+    scenario="$(tr -cd 'a-zA-Z0-9._-' < "${scenario_path}")"
+    if [[ -n "${scenario}" ]]; then
+        marker="${marker} scenario=${scenario}"
+    fi
+fi
+# This runs on every boot of every installed machine; the serial console is
+# CI evidence plumbing and must never fail the unit on real hardware.
+if [[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]; then
+    printf '%s\n' "${marker}" | tee /dev/ttyS0
+else
+    printf '%s\n' "${marker}"
+fi
+systemd-cat -t andromeda-hardware printf '%s\n' "${marker}"

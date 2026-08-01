@@ -7,7 +7,7 @@ network --bootproto=dhcp --device=link --activate
 rootpw --lock
 selinux --enforcing
 timezone UTC --utc
-user --name=andromeda --groups=wheel --lock --gecos="Andromeda E2E"
+user --name=andromeda --lock --gecos="Andromeda E2E"
 
 zerombr
 clearpart --all --initlabel
@@ -19,7 +19,7 @@ bootc --source-imgref=containers-storage:localhost/andromeda:v1 --target-imgref=
 shutdown
 
 %pre --erroronfail --log=/tmp/andromeda-installer-preflight.log
-/usr/libexec/andromeda-installer-preflight
+/usr/libexec/andromeda-installer-preflight ci
 %end
 
 %onerror --log=/tmp/andromeda-installer-onerror.log

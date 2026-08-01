@@ -1,8 +1,8 @@
 # Andromeda OS 产品开发计划
 
-> 状态：Draft 0.2
+> 状态：Draft 0.3
 >
-> 日期：2026-07-28
+> 日期：2026-07-30
 >
 > 本计划建立在 `docs/research/` 专题研究与 [操作系统全景调研](./os-landscape-and-andromeda-architecture.md) 之上。
 
@@ -18,6 +18,19 @@ PipeWire、Flatpak、Discover、LibreOffice DOCX/XLSX/PPTX/PDF、Firefox、
 该检查点提前验证了 Stage 2 的发行与可靠性骨架，不代表 Stage 2 或消费版已经
 整体完成。真实 GPU、Wi‑Fi、蓝牙、摄像头、待机/休眠、固件、Steam/Proton、
 Windows Workspace、Microsoft Office 原版和 PC/Mac 机型认证仍按本计划推进。
+
+## 2026-07-30 硬件普适性检查点
+
+Hardware Enablement Phase 1 已实现：通用 x86-64 镜像加入长尾内核模块、显式
+GPU/无线/音频固件、Wi‑Fi/WWAN、摄像头、触控、存储文件系统、打印扫描和硬件
+诊断工具。`andromeda hardware diagnose` 会阻止关键设备无驱动的机器进入支持
+等级；HCM v2 要求 Supported 及以上固定 artifact、提供未过期测试证据和声明
+到期时间。
+
+虚拟硬件验收从单一 VirtIO profile 扩为 NVMe/SATA/IDE、e1000e/e1000、
+XHCI/UHCI、HDA/AC97 与不同 CPU topology 的 pairwise 矩阵。它只证明模拟设备
+驱动路径，实体 PC、Intel Mac、T2 Mac 与 Apple Silicon 仍必须进入独立实机队列。
+详细边界见[硬件普适性工程](./development/hardware-enablement.md)。
 
 ## 1. 产品定义
 
@@ -375,7 +388,7 @@ ActionRecord
 
 ### 5.7 迁移与无缝切换
 
-“无缝切换”拆为四层：
+“无缝切换”拆为五层：
 
 #### Layer 1：数据
 
@@ -597,6 +610,23 @@ CI-0 用于持续集成，不代表真实整机支持等级。
 
 缺少内核、图形、虚拟化或安全经验时，不应把问题交给模型自动生成关键特权代码后直接发布。
 
+### 7.3 资源假设与降级顺序
+
+本计划的里程碑与 12 周执行清单（§12）按以下资源假设制定：
+
+- 核心工程团队约 15–25 名全职工程师，能并行覆盖 §7.2 的全部能力方向，另配产品设计、QA 自动化和法务/许可证支持；
+- 硬件实验室预算覆盖 §6.4 最小设备池与自动化测试设施；
+- 各工作流（§7.1）可并行推进，而不是串行排队。
+
+若实际团队规模小于约 12 名工程师，必须按以下顺序显式降级范围，而不是压缩质量基线：
+
+1. 推迟 Apple silicon 与 T2 Mac 通道（保留 Watch 状态）；
+2. 推迟 seamless window、P2V、Android 运行时等 Pilot 项；
+3. 缩减 Top N 游戏/应用/格式清单与目标认证机型数量；
+4. 顺延 Stage 时间线并公开修订里程碑。
+
+不允许的降级：跳过威胁模型、削减高影响动作提交点、放宽 agent 权限模型或取消更新/回滚故障注入测试。
+
 ## 8. 分阶段交付
 
 ### Stage 0：研究与架构候选冻结（当前—第 6 周）
@@ -609,7 +639,7 @@ CI-0 用于持续集成，不代表真实整机支持等级。
 - 产品需求文档；
 - 10–20 台目标设备清单；
 - Top 100 游戏、Top 30 办公/创作应用、Top 100 文件格式清单；
-- 20 个北极星任务；
+- 10 个北极星任务（§3.3 的正式清单）；
 - 关键 ADR。
 
 退出门：
@@ -655,7 +685,7 @@ Stage 0 只冻结候选，不提前宣称架构完成。第 12 周设置正式 `
 交付：
 
 - 安装器与恢复环境；
-- Andromeda shell alpha；
+- Andromeda shell alpha：指基于 Plasma/KWin 的 Andromeda 定制层（Task Center、统一设置、工作域）达到 alpha，不是自研 compositor 或独立 shell 进程（见 §5.2）；
 - 统一设置；
 - 应用/格式兼容数据库；
 - Wine recipe 签名与回滚；
@@ -914,13 +944,14 @@ VTSR 必须绑定版本化任务集、环境、成功断言和人工裁决规则
 7. `windows-workspace-spec.md`
 8. `format-safety-spec.md`
 9. `telemetry-and-privacy-policy.md`
-10. `hardware-certification-test-plan.md`
+10. [`hardware-certification-test-plan.md`](./development/hardware-certification-test-plan.md)
 11. `backup-restore-and-disaster-recovery-spec.md`
 12. `identity-and-session-spec.md`
 13. `storage-encryption-and-key-recovery-spec.md`
 14. `credential-broker-and-secret-store-spec.md`
 15. `installer-coexistence-and-uninstall-spec.md`
 16. `boot-platform-provider-spec.md`
+17. `windows-pain-points.md`（承接[全景调研](./os-landscape-and-andromeda-architecture.md) §7/§14：Windows 痛点逐项根因与验收指标）
 
 ## 14. 当前建议
 

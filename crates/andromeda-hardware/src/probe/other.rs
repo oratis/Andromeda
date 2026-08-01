@@ -22,10 +22,12 @@ pub(super) fn probe() -> Result<HardwareReport, ProbeError> {
         },
         memory: MemoryInfo { bytes: None },
         boot: BootInfo {
+            // Nothing can be verified on an unknown platform; report
+            // unknown rather than false.
             uefi: None,
             secure_boot: None,
-            tpm2: false,
-            virtualization: false,
+            tpm2: None,
+            virtualization: None,
         },
         devices: Vec::new(),
         warnings: vec!["This operating system does not yet have a detailed probe backend.".into()],

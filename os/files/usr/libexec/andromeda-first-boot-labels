@@ -3,12 +3,29 @@ set -Eeuo pipefail
 
 readonly marker=/var/lib/andromeda/selinux-label-restore-required
 
+emit() {
+    local message="$1"
+    if [[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]; then
+        printf '%s\n' "${message}" | tee /dev/ttyS0
+    else
+        printf '%s\n' "${message}"
+    fi
+    systemd-cat -t andromeda-first-boot-labels \
+        printf '%s\n' "${message}"
+}
+
 test -e "${marker}"
-test "$(getenforce)" != Disabled
+
+# With SELinux disabled there are no labels to restore. Consume the marker
+# and succeed instead of leaving a permanently failed unit on every boot.
+if [[ "$(getenforce)" == Disabled ]]; then
+    rm -f "${marker}"
+    systemd-cat -t andromeda-first-boot-labels \
+        printf '%s\n' 'SELinux is disabled; skipping label restore.'
+    exit 0
+fi
 
 restorecon -RF /etc /var
 rm -f "${marker}"
 
-printf '%s\n' 'ANDROMEDA_SELINUX_LABELS_OK' | tee /dev/ttyS0
-systemd-cat -t andromeda-first-boot-labels \
-    printf '%s\n' 'ANDROMEDA_SELINUX_LABELS_OK'
+emit 'ANDROMEDA_SELINUX_LABELS_OK'

@@ -3,13 +3,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use andromeda_core::{
     ActionId, ActionPlan, Capability, CapabilityId, IsolationLevel, TaskId, TaskState,
 };
-use andromeda_policy::{EvaluationContext, PolicyDecision, PolicyEngine};
+use andromeda_policy::{DecisionEffect, EvaluationContext, PolicyDecision, PolicyEngine};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::store::TaskListing;
 use crate::{FileTaskStore, StoreError};
+
+/// Upper bound on the number of actions accepted in a single plan.
+///
+/// The limit caps validation and policy-evaluation work per request and
+/// bounds the size of persisted task records. Plans above the limit are
+/// rejected with [`ValidationError::TooManyActions`]. 10 000 actions is far
+/// beyond any realistic plan while keeping worst-case validation cheap.
+pub const MAX_PLAN_ACTIONS: usize = 10_000;
+
+/// Actor recorded on events that the policy engine itself appends.
+const EVALUATION_ACTOR: &str = "policy-engine";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateTaskRequest {
@@ -38,7 +50,17 @@ pub struct TaskEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskEventKind {
     Created,
-    StateChanged { from: TaskState, to: TaskState },
+    StateChanged {
+        from: TaskState,
+        to: TaskState,
+    },
+    /// A policy evaluation was performed; the full decision set is recorded
+    /// so the audit trail preserves every authorization outcome.
+    Evaluated {
+        isolation: IsolationLevel,
+        external_side_effect_confirmed: bool,
+        decisions: BTreeMap<ActionId, PolicyDecision>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +77,7 @@ pub struct TaskRecord {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvaluationReport {
     pub task_id: TaskId,
+    /// Revision of the task record after the evaluation event was appended.
     pub revision: u64,
     pub decisions: BTreeMap<ActionId, PolicyDecision>,
 }
@@ -72,6 +95,8 @@ pub enum ValidationError {
     },
     #[error("action dependency graph contains a cycle")]
     DependencyCycle,
+    #[error("plan contains {actions} actions, which exceeds the limit of {limit}")]
+    TooManyActions { actions: usize, limit: usize },
     #[error("action {0} declares risk below its operation floor")]
     InvalidRisk(ActionId),
     #[error("capability {0} is issued to a different task")]
@@ -108,18 +133,7 @@ impl TaskService {
     /// for persistence failures.
     pub fn create(&self, request: CreateTaskRequest) -> Result<TaskRecord, ServiceError> {
         validate_plan(&request.plan, &request.capabilities)?;
-        let granted = request
-            .plan
-            .actions
-            .iter()
-            .flat_map(|action| &action.required_capabilities)
-            .all(|required| {
-                request
-                    .capabilities
-                    .iter()
-                    .any(|capability| capability.id == *required)
-            });
-        let state = if granted {
+        let state = if self.plan_fully_granted(&request.plan, &request.capabilities) {
             TaskState::Ready
         } else {
             TaskState::AwaitingApproval
@@ -149,38 +163,73 @@ impl TaskService {
         self.store.get(task_id).map_err(ServiceError::from)
     }
 
-    /// Lists persisted tasks.
+    /// Lists persisted tasks, silently skipping unreadable records.
+    ///
+    /// Use [`TaskService::list_detailed`] to also observe which record files
+    /// were skipped and why.
     ///
     /// # Errors
     ///
-    /// Returns a store error for unreadable or malformed state.
+    /// Returns a store error when the state directory itself is unreadable.
     pub fn list(&self) -> Result<Vec<TaskRecord>, ServiceError> {
+        Ok(self.store.list()?.records)
+    }
+
+    /// Lists persisted tasks together with warnings for skipped records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error when the state directory itself is unreadable.
+    pub fn list_detailed(&self) -> Result<TaskListing, ServiceError> {
         self.store.list().map_err(ServiceError::from)
     }
 
-    /// Evaluates every action without executing it.
+    /// Evaluates every action without executing it and appends the outcome
+    /// to the task's durable event history.
+    ///
+    /// The persisted [`TaskEventKind::Evaluated`] event bumps the record
+    /// revision, so callers should use the revision from the returned report
+    /// for subsequent optimistic-concurrency operations.
     ///
     /// # Errors
     ///
-    /// Returns a store error when the task is absent or unreadable.
+    /// Returns a store error when the task is absent, unreadable, or when a
+    /// concurrent write prevents persisting the evaluation event.
     pub fn evaluate(
         &self,
         task_id: TaskId,
         isolation: IsolationLevel,
         external_side_effect_confirmed: bool,
     ) -> Result<EvaluationReport, ServiceError> {
-        let record = self.store.get(task_id)?;
-        let context = EvaluationContext::current(
-            isolation,
-            &record.capabilities,
-            external_side_effect_confirmed,
-        );
-        let decisions = record
-            .plan
-            .actions
-            .iter()
-            .map(|action| (action.id, self.policy.evaluate(action, &context)))
-            .collect();
+        let mut record = self.store.get(task_id)?;
+        let now = Utc::now();
+        let decisions: BTreeMap<ActionId, PolicyDecision> = {
+            let context = EvaluationContext::at(
+                now,
+                isolation,
+                &record.capabilities,
+                external_side_effect_confirmed,
+            );
+            record
+                .plan
+                .actions
+                .iter()
+                .map(|action| (action.id, self.policy.evaluate(action, &context)))
+                .collect()
+        };
+        let expected = record.revision;
+        record.revision += 1;
+        record.events.push(TaskEvent {
+            id: Uuid::new_v4(),
+            occurred_at: now,
+            actor: EVALUATION_ACTOR.into(),
+            kind: TaskEventKind::Evaluated {
+                isolation,
+                external_side_effect_confirmed,
+                decisions: decisions.clone(),
+            },
+        });
+        self.store.save(&record, expected)?;
         Ok(EvaluationReport {
             task_id,
             revision: record.revision,
@@ -222,11 +271,40 @@ impl TaskService {
         self.store.save(&record, request.expected_revision)?;
         Ok(record)
     }
+
+    /// Returns whether every action in the plan would be allowed by the
+    /// deterministic policy engine under the most permissive execution
+    /// assumptions: each action is checked with exactly the isolation its
+    /// declared risk requires, and external side effects are treated as
+    /// confirmed.
+    ///
+    /// This verifies that each action's required capabilities exist among
+    /// the provided grants, are unexpired at creation time, actually cover
+    /// the action target (file scope, network host, system setting, or
+    /// external service), and that no deny rule matches. It deliberately
+    /// does not check the real executor isolation or final side-effect
+    /// confirmation; both are re-evaluated with real values at evaluation
+    /// time.
+    fn plan_fully_granted(&self, plan: &ActionPlan, capabilities: &[Capability]) -> bool {
+        let now = Utc::now();
+        plan.actions.iter().all(|action| {
+            let context =
+                EvaluationContext::at(now, action.risk.minimum_isolation(), capabilities, true);
+            self.policy.evaluate(action, &context).effect == DecisionEffect::Allow
+        })
+    }
 }
 
 fn validate_plan(plan: &ActionPlan, capabilities: &[Capability]) -> Result<(), ValidationError> {
     if plan.schema_version != ActionPlan::CURRENT_SCHEMA_VERSION {
         return Err(ValidationError::SchemaVersion(plan.schema_version));
+    }
+
+    if plan.actions.len() > MAX_PLAN_ACTIONS {
+        return Err(ValidationError::TooManyActions {
+            actions: plan.actions.len(),
+            limit: MAX_PLAN_ACTIONS,
+        });
     }
 
     let ids = plan
@@ -274,29 +352,15 @@ fn validate_plan(plan: &ActionPlan, capabilities: &[Capability]) -> Result<(), V
     Ok(())
 }
 
+/// Detects dependency cycles with an iterative three-color depth-first
+/// search. An explicit stack keeps arbitrarily long dependency chains from
+/// overflowing the thread stack, which the previous recursive version could
+/// do for plans near [`MAX_PLAN_ACTIONS`].
 fn has_cycle(plan: &ActionPlan) -> bool {
-    fn visit(
-        id: ActionId,
-        dependencies: &BTreeMap<ActionId, &[ActionId]>,
-        visiting: &mut BTreeSet<ActionId>,
-        visited: &mut BTreeSet<ActionId>,
-    ) -> bool {
-        if visited.contains(&id) {
-            return false;
-        }
-        if !visiting.insert(id) {
-            return true;
-        }
-        if dependencies.get(&id).is_some_and(|items| {
-            items
-                .iter()
-                .any(|item| visit(*item, dependencies, visiting, visited))
-        }) {
-            return true;
-        }
-        visiting.remove(&id);
-        visited.insert(id);
-        false
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        Visiting,
+        Done,
     }
 
     let dependencies = plan
@@ -304,11 +368,32 @@ fn has_cycle(plan: &ActionPlan) -> bool {
         .iter()
         .map(|action| (action.id, action.depends_on.as_slice()))
         .collect::<BTreeMap<_, _>>();
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    plan.actions
-        .iter()
-        .any(|action| visit(action.id, &dependencies, &mut visiting, &mut visited))
+    let mut marks = BTreeMap::<ActionId, Mark>::new();
+    for action in &plan.actions {
+        if marks.contains_key(&action.id) {
+            continue;
+        }
+        marks.insert(action.id, Mark::Visiting);
+        let mut stack = vec![(action.id, 0_usize)];
+        while let Some((id, cursor)) = stack.last().copied() {
+            let edges = dependencies.get(&id).copied().unwrap_or_default();
+            if let Some(&dependency) = edges.get(cursor) {
+                stack.last_mut().expect("stack is non-empty").1 += 1;
+                match marks.get(&dependency) {
+                    Some(Mark::Visiting) => return true,
+                    Some(Mark::Done) => {}
+                    None => {
+                        marks.insert(dependency, Mark::Visiting);
+                        stack.push((dependency, 0));
+                    }
+                }
+            } else {
+                marks.insert(id, Mark::Done);
+                stack.pop();
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -438,6 +523,108 @@ mod tests {
     }
 
     #[test]
+    fn create_without_grants_awaits_approval() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        request.capabilities.clear();
+        let created = service.create(request).expect("create");
+        assert_eq!(created.state, TaskState::AwaitingApproval);
+    }
+
+    #[test]
+    fn create_with_expired_capability_awaits_approval() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        request.capabilities[0].expires_at = Some(Utc::now() - chrono::TimeDelta::minutes(5));
+        let created = service.create(request).expect("create");
+        assert_eq!(created.state, TaskState::AwaitingApproval);
+    }
+
+    #[test]
+    fn create_with_out_of_scope_capability_awaits_approval() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        request.plan.actions[0].target = outside_path().into();
+        let created = service.create(request).expect("create");
+        assert_eq!(created.state, TaskState::AwaitingApproval);
+    }
+
+    #[test]
+    fn evaluate_appends_audit_event() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let created = service
+            .create(inspection_request(workspace_path()))
+            .expect("create");
+
+        let report = service
+            .evaluate(created.plan.task_id, IsolationLevel::Sandbox, false)
+            .expect("evaluate");
+        assert_eq!(report.revision, 1);
+
+        let reloaded = service.get(created.plan.task_id).expect("reload");
+        assert_eq!(reloaded.revision, 1);
+        let event = reloaded.events.last().expect("evaluation event");
+        match &event.kind {
+            TaskEventKind::Evaluated {
+                isolation,
+                external_side_effect_confirmed,
+                decisions,
+            } => {
+                assert_eq!(*isolation, IsolationLevel::Sandbox);
+                assert!(!external_side_effect_confirmed);
+                assert_eq!(decisions, &report.decisions);
+            }
+            other => panic!("expected evaluation event, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_plan_is_rejected() {
+        let mut request = inspection_request(workspace_path());
+        request.plan.actions = (0..=MAX_PLAN_ACTIONS).map(|_| reason_action()).collect();
+        assert_eq!(
+            validate_plan(&request.plan, &[]),
+            Err(ValidationError::TooManyActions {
+                actions: MAX_PLAN_ACTIONS + 1,
+                limit: MAX_PLAN_ACTIONS,
+            })
+        );
+    }
+
+    #[test]
+    fn maximum_length_dependency_chain_does_not_overflow_the_stack() {
+        let mut request = inspection_request(workspace_path());
+        let mut actions: Vec<ActionSpec> = Vec::with_capacity(MAX_PLAN_ACTIONS);
+        for index in 0..MAX_PLAN_ACTIONS {
+            let mut action = reason_action();
+            if index > 0 {
+                action.depends_on = vec![actions[index - 1].id];
+            }
+            actions.push(action);
+        }
+        request.plan.actions = actions;
+        assert_eq!(validate_plan(&request.plan, &[]), Ok(()));
+    }
+
+    fn reason_action() -> ActionSpec {
+        ActionSpec {
+            id: ActionId::new(),
+            name: "reason".into(),
+            kind: ActionKind::Reason,
+            target: String::new(),
+            arguments: BTreeMap::new(),
+            depends_on: Vec::new(),
+            required_capabilities: Vec::new(),
+            risk: RiskLevel::L0Reasoning,
+            recovery: RecoverySemantics::None,
+        }
+    }
+
+    #[test]
     fn rejects_dependency_cycles() {
         let mut request = inspection_request(workspace_path());
         let second = ActionId::new();
@@ -467,5 +654,15 @@ mod tests {
     #[cfg(target_os = "windows")]
     const fn workspace_path() -> &'static str {
         r"C:\workspace"
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    const fn outside_path() -> &'static str {
+        "/elsewhere/report.txt"
+    }
+
+    #[cfg(target_os = "windows")]
+    const fn outside_path() -> &'static str {
+        r"C:\elsewhere\report.txt"
     }
 }

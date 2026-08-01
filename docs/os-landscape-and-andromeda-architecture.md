@@ -5,6 +5,8 @@
 > 检索日期：2026-07-26
 >
 > 目标：为“可运行在尽可能广泛硬件上的 AI 原生 Andromeda OS”建立技术、产品和许可决策基线。
+>
+> 说明：本文是最早的全景研究基线；与[产品开发计划](./product-development-plan.md)不一致之处以后者为准。本文的硬件 Tier 与桌面 compositor 相关章节已按产品开发计划 §6.2、§5.2 修订。
 
 ## 0. 执行摘要
 
@@ -14,12 +16,12 @@
 2. **Andromeda 应是 AI 原生系统产品，不是换皮 Linux 发行版。** 差异化应位于系统服务、权限、任务运行时、桌面 shell、应用意图接口和可审计执行层，而不是壁纸、启动器或聊天侧栏。
 3. **兼容性要采用多路径组合。** Linux 原生应用直接运行；Windows 应用优先 Wine/Proton 类 API 兼容层，必要时进入 KVM 虚拟机；Web/PWA 作为通用路径；macOS 应用仅在授权允许的 Apple 硬件上通过虚拟化探索，不能承诺跨任意 PC。
 4. **AI agent 必须是“受控主体”，而不是超级管理员。** 借鉴 Codex/Claude Code 的范式：上下文、工具、计划、执行、验证、恢复；但把权限从简单弹窗升级为 OS 原生 capability、作用域、预算、审计、回滚和来源证明。
-5. **“所有硬件”必须产品化为等级。** 建议定义 Tier 0 虚拟机、Tier 1 认证机器、Tier 2 社区验证、Tier 3 尽力启动、Tier X 不支持，而非作无法验证的绝对承诺。
+5. **“所有硬件”必须产品化为等级。** 采用与产品开发计划 §6.2 一致的等级体系：CI-0 虚拟参考平台、Tier 0 Blocked、Tier 1 Community、Tier 2 Supported、Tier 3 Certified、Tier 4 Reference，而非作无法验证的绝对承诺。
 6. **首个可交付产品应是可安装的 Linux-based OS。** 先证明 AI 原生交互和兼容编排，再评估是否将更多驱动、文件系统和网络服务移出内核，或长期采用更小的可信计算基。
 
 ### 推荐架构一句话
 
-**Linux LTS 内核 + systemd/最小用户态 + Wayland/自研 Shell + Flatpak/OCI + KVM/QEMU + Wine + AI capability broker + 可审计 agent runtime。**
+**Linux LTS 内核 + systemd/最小用户态 + Wayland + KDE Plasma 6/KWin（不自研 compositor）+ Flatpak/OCI + KVM/QEMU + Wine + AI capability broker + 可审计 agent runtime。**
 
 这是一条现实的起点，不是不可改变的终局。Andromeda 的稳定 API 应在内核之上，从而保留未来更换底层的可能。
 
@@ -95,7 +97,7 @@ Windows 的价值不是单一 UI，而是 Win32/COM/.NET/DirectX、Office/Adobe/
 **推论：** Windows 兼容需要三级策略：
 
 1. Wine/Proton 风格的 API 翻译；
-2. 隔离的 Windows VM + seamless window/文件门户；
+2. 隔离的 Windows VM，以完整 RDP 桌面为可靠基线；seamless window/文件门户仅作为需通过许可证与技术门的 Pilot（见产品开发计划 §5.4）；
 3. 对不能可靠运行的软件明确标注“不支持”，而不是制造模糊承诺。
 
 ### 2.2 macOS：垂直整合标杆，但不是可自由移植的兼容层
@@ -195,15 +197,18 @@ Fuchsia 把驱动、文件系统、网络栈等放在用户态组件中，Zircon
 
 ### 3.2 推荐支持等级
 
+支持等级与产品开发计划 §6.2 及硬件研究 §5 保持同一套定义：
+
 | 等级 | 定义 | 承诺 |
 |---|---|---|
-| Tier 0 | QEMU/KVM 标准虚拟硬件 | CI 必须通过；开发者基准环境 |
-| Tier 1 | Andromeda 认证 x86-64/arm64 机型 | 安装、GPU、Wi‑Fi、音频、摄像头、蓝牙、睡眠、升级全部通过 |
-| Tier 2 | 社区验证机型 | 核心功能通过，部分高级设备可能降级 |
-| Tier 3 | 通用 UEFI/ACPI 尽力支持 | 可启动/安装，不承诺全部外设与休眠 |
-| Tier X | 缺少必要 CPU、安全能力或合法固件 | 明确不支持 |
+| CI-0 | QEMU/KVM 虚拟参考平台 | CI 必须通过；开发者基准环境，不代表真实整机支持等级 |
+| Tier 0 Blocked | 缺少启动、安全、存储或关键恢复条件 | 默认阻止安装，并给出具体原因 |
+| Tier 1 Community | Live 环境可启动并完成硬件探测，有社区测试证据 | 不承诺休眠、功耗、摄像头、指纹或全部外设 |
+| Tier 2 Supported | 指定整机和固件组合通过正式测试 | 已知降级公开，系统更新有持续回归与修复承诺 |
+| Tier 3 Certified | 安装恢复、GPU、Wi‑Fi、音频、摄像头、蓝牙、睡眠、升级全部通过认证门 | 达到认证发布门并持续保持 |
+| Tier 4 Reference | Andromeda 与 OEM 共同控制 BOM、固件与生命周期 | 固件 SLA、出厂 HCM 与长期更新承诺 |
 
-每个机型生成机器可读的 `Hardware Capability Manifest`：
+每个机型生成机器可读的 `Hardware Compatibility Manifest`（HCM，术语见产品开发计划 §6.3）：
 
 ```yaml
 machine_id: vendor-model-revision
@@ -219,7 +224,7 @@ npu:
 power:
   suspend_s2idle: pass
   suspend_s3: unavailable
-compatibility_tier: 2
+overall_tier: supported
 ```
 
 AI 助手读取该清单后，只能承诺本机真实具备的能力。
@@ -432,13 +437,13 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 | 内核/驱动 | Linux LTS，尽量接近上游 | 安全配置、补丁最小化、硬件 CI |
 | 基础系统 | 不可变 root、声明式镜像、A/B 或快照更新 | 原子更新、回滚、设备策略 |
 | 服务管理 | systemd + D-Bus/自研强类型 IPC 边界 | capability broker、任务与审计服务 |
-| 显示/媒体 | Wayland、Mesa/Vulkan、PipeWire | 自研 compositor/shell、跨运行时门户 |
+| 显示/媒体 | Wayland、Mesa/Vulkan、PipeWire、KDE Plasma 6/KWin | Task Center 等 Plasma 定制层、跨运行时门户（不自研 compositor） |
 | 存储 | 初期 Btrfs（桌面快照便利）或经验证的其他方案 | 用户数据版本、任务事务、备份 |
 | 应用 | Flatpak + OCI + 原生系统组件 | 商店、签名、权限 manifest、兼容 recipe |
-| 虚拟化 | KVM/QEMU、virtio、必要时 VFIO | seamless apps、凭据/文件/通知 portal |
+| 虚拟化 | KVM/QEMU、virtio、必要时 VFIO | seamless apps（Pilot，须过许可证/技术门）、凭据/文件/通知 portal |
 | Windows 兼容 | Wine、DXVK/VKD3D 路线 | 应用画像、自动测试、可回滚前缀 |
 | AI | 多模型 runtime + MCP/工具协议 | agent runtime、意图 API、验证、权限 UX |
-| 桌面 | 自研 shell，不直接 fork 一个完整 DE 后换主题 | 任务中心、空间/数据域、统一设置 |
+| 桌面 | KDE Plasma 6/KWin，不自研 compositor，也不 fork 完整 DE 后换主题 | 任务中心、空间/数据域、统一设置（作为 Plasma 定制层） |
 
 ### 6.2 为什么不是直接 fork Ubuntu/Fedora 后换 UI
 
@@ -478,7 +483,7 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 ## 7. 需要避免复制的 Windows 类问题
 
-用户后续会提供具体列表；在此先建立归类框架，以便每个问题进入架构决策而非零散修补。
+具体问题清单将在后续规格 `windows-pain-points.md`（见产品开发计划 §13）中逐项整理；本节先建立归类框架，使每个问题进入架构决策而非零散修补。
 
 | 问题域 | 常见表现 | Andromeda 设计约束 |
 |---|---|---|
@@ -563,14 +568,14 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 ### Phase 0：问题验证与技术样机（0–3 个月）
 
-- 确定 3–5 台 x86-64 参考机和 QEMU Tier 0；
+- 确定 3–5 台 x86-64 参考机和 QEMU CI-0 虚拟参考平台；
 - 制作可启动不可变 Linux 镜像；
-- 实现最小 Wayland shell；
+- 集成 Wayland + Plasma/KWin 最小桌面会话；
 - 实现 agent 任务中心原型；
 - capability broker v0：目录、命令、网络域、时间；
 - 集成一种 Linux 应用格式、Wine 和 KVM；
 - 定义硬件/应用兼容 manifest；
-- 用 20 个真实任务做端到端评测。
+- 用 10 个北极星任务（见产品开发计划 §3.3）做端到端评测。
 
 退出条件：
 
@@ -581,17 +586,17 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 ### Phase 1：开发者预览（3–9 个月）
 
-- 自研 shell 达到日用基础；
+- 基于 Plasma/KWin 的 Andromeda 定制层（Task Center、统一设置）达到日用基础；
 - 文件、终端、设置、软件中心提供语义 action API；
 - Windows 应用兼容数据库与自动回归；
-- 容器/VM seamless window、文件和剪贴板 portal；
+- 容器/VM 文件和剪贴板 portal（seamless window 仅作为须过许可证/技术门的 Pilot）；
 - 本地小模型 + 云模型路由；
 - Secure Boot、TPM 密钥、恢复介质；
 - 公布 SDK、权限模型和威胁模型。
 
 ### Phase 2：Alpha 硬件计划（9–18 个月）
 
-- Tier 1 认证机；
+- Tier 3 Certified 候选机型；
 - GPU/多屏/休眠/蓝牙/摄像头自动化实验室；
 - A/B 或快照式 OTA；
 - 企业策略与多用户；
@@ -615,8 +620,8 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 ### 硬件
 
-- Tier 1 冷启动、安装成功率；
-- suspend/resume 1000 次循环成功率；
+- Supported/Certified 机型冷启动、安装成功率；
+- suspend/resume 循环成功率（发布门与产品开发计划 §10.2 一致：Supported 100 次、Certified 500 次无阻断错误；1000 次连续循环仅作为实验室 stretch 目标，不是发布门）；
 - GPU/显示/音频/网络回归通过率；
 - 每瓦性能与待机耗电；
 - 驱动崩溃是否可隔离恢复。
@@ -652,7 +657,7 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 | 风险 | 严重度 | 应对 |
 |---|---:|---|
-| 目标过宽，长期没有可用产品 | 极高 | 固定 Tier 1 硬件和 Top N 工作流，按阶段交付 |
+| 目标过宽，长期没有可用产品 | 极高 | 固定 Supported/Certified 目标硬件和 Top N 工作流，按阶段交付 |
 | AI agent 越权或受提示注入 | 极高 | capability、任务沙箱、数据/指令分离、提交点确认、红队 |
 | Windows 兼容低于预期 | 高 | Wine + VM 双路径、公开评级、聚焦目标应用 |
 | macOS 兼容承诺违法或不可行 | 极高 | 不承诺非 Apple 硬件 macOS；以移植/Web 为主 |
@@ -671,7 +676,7 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 1. Andromeda v1 基于 Linux LTS；
 2. x86-64 为首发，arm64 为第二架构；
-3. Wayland + 自研 shell；
+3. Wayland + KDE Plasma 6/KWin，不自研 compositor（详见产品开发计划 §5.2）；
 4. 不可变基础系统与原子更新；
 5. Flatpak/OCI 为主要应用隔离，KVM 为强隔离；
 6. Wine + Windows VM 双兼容路径；
@@ -689,7 +694,7 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 - Flatpak 是否为唯一 GUI 包格式；
 - Android 运行时优先级；
 - 微 VM 的默认粒度；
-- shell 使用 Rust/C++/其他组合；
+- Plasma 定制层（Task Center 等）使用 Rust/C++/QML 的具体组合；
 - capability IPC 的具体协议；
 - 商店与系统核心的开源边界。
 
@@ -752,7 +757,7 @@ Agent 不应靠截图和模拟点击完成所有事情。每个系统应用提�
 
 本文是架构基线，不是最终规格。下一轮应拆为四份可执行文档：
 
-1. `windows-pain-points.md`：接收用户清单，逐项追根因并形成验收指标；
+1. `windows-pain-points.md`：整理 Windows 痛点清单，逐项追根因并形成验收指标（已列入产品开发计划 §13 后续规格）；
 2. `andromeda-threat-model.md`：资产、主体、信任边界、提示注入、插件供应链；
 3. `hardware-support-matrix.md`：参考机、驱动、固件、功耗和自动化测试；
 4. `agent-runtime-spec.md`：intent、tool schema、capability、audit、transaction API。

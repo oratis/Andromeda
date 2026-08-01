@@ -21,6 +21,8 @@ Andromeda 是一个面向 PC 与 Mac 硬件的 AI 原生桌面操作系统项目
 - 有模型不可绕过的任务、风险、能力、隔离和状态机契约；
 - 有持久化任务服务、HTTP API 与开发者 CLI；
 - 有 Linux、macOS、Windows 硬件探测和 Hardware Compatibility Manifest（HCM）匹配；
+- 有启动时驱动诊断、HCM v2 artifact/evidence 门禁，以及 NVMe/SATA/IDE、
+  e1000e/e1000、XHCI/UHCI、HDA/AC97 的虚拟硬件矩阵；
 - 有跨平台 CI、产品计划和专题研究。
 
 这个里程碑证明 Andromeda 能构建、安装、进入真实桌面、运行一组日用工作流和 AI
@@ -37,8 +39,10 @@ Supported 或 Certified。
 2026-07-28 的 GCP 嵌套 KVM 日用版运行又在全新 32 GiB 虚拟磁盘上完成离线安装、
 Plasma Wayland 首启、revision 2 更新和 revision 1 回滚。受测 3.8 GiB ISO 的
 SHA-256 为
-`6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108`；
-消费能力、完整标记和证据边界见
+`6f8d74e5f14b7dab9c478b8fd538defbdbde717dee62bbc3c7ca5c13cc597108`。
+注意：该 PASS 记录早于证据提取器修复，修复只在原始串口日志上离线复验过；
+用最终版脚本一次性跑绿的完整 GCP 复跑仍在待办中。消费能力、完整标记和证据
+边界见
 [Daily Driver Candidate E2E](./docs/development/daily-driver-e2e.md#已验证运行)。
 
 ## 第一性目标
@@ -80,27 +84,28 @@ flowchart TD
 需要 Rust 1.85 或更新版本。
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 探测当前电脑（报告不收集序列号）：
 
 ```bash
-cargo run --bin andromeda -- hardware probe
+cargo run --locked --bin andromeda -- hardware probe
+cargo run --locked --bin andromeda -- hardware diagnose
 ```
 
 对示例 HCM 做本机匹配：
 
 ```bash
-cargo run --bin andromeda -- hardware check \
+cargo run --locked --bin andromeda -- hardware check \
   examples/hcm/developer-x86_64-pc.json
 ```
 
 创建一个显式授予只读目录范围的检查任务：
 
 ```bash
-cargo run --bin andromeda -- \
+cargo run --locked --bin andromeda -- \
   --state-dir .andromeda/state \
   task create-inspection . --requested-by local-user
 ```
@@ -108,7 +113,7 @@ cargo run --bin andromeda -- \
 启动本地任务服务：
 
 ```bash
-cargo run --bin andromeda-taskd
+cargo run --locked --bin andromeda-taskd
 curl http://127.0.0.1:7777/healthz
 ```
 
@@ -136,6 +141,7 @@ curl http://127.0.0.1:7777/healthz
 | 类别 | 当前产品状态 |
 |---|---|
 | QEMU/KVM x86-64 + OVMF | Daily Driver Candidate；安装/桌面/更新/回滚自动验收 |
+| QEMU NVMe/SATA/IDE + e1000e/e1000 | Phase 1 pairwise driver matrix |
 | 选定 x86-64 PC | 下一阶段 Developer Preview 候选 |
 | 未认证通用 PC | Community，探测不等于支持 |
 | 非 T2 Intel Mac | 逐机型 Pilot |
@@ -143,7 +149,9 @@ curl http://127.0.0.1:7777/healthz
 | M1/M2 Mac | 独立 Asahi Preview 候选 |
 | M3 及更新 Apple silicon（含 M5） | Watch；必须等待对应 Asahi 机型页与安装器，不作交付承诺 |
 
-详细规则见[硬件、驱动与迁移研究](./docs/research/hardware-drivers-and-migration.md)和[HCM 开发说明](./docs/development/hardware-compatibility.md)。
+详细规则见[硬件、驱动与迁移研究](./docs/research/hardware-drivers-and-migration.md)、
+[硬件普适性工程](./docs/development/hardware-enablement.md)和
+[HCM 开发说明](./docs/development/hardware-compatibility.md)。
 
 ## 路线
 
@@ -164,6 +172,7 @@ curl http://127.0.0.1:7777/healthz
 - [文档总览](./docs/README.md)
 - [Developer Preview 安装与验收](./docs/development/installable-preview.md)
 - [Daily Driver Candidate 与 GCP E2E](./docs/development/daily-driver-e2e.md)
+- [硬件普适性工程与自动矩阵](./docs/development/hardware-enablement.md)
 - [PC/macOS 操作系统全景](./docs/os-landscape-and-andromeda-architecture.md)
 - [开源组件采用矩阵](./docs/research/open-source-adoption-matrix.md)
 - [Windows 游戏、Office 与文件格式](./docs/research/windows-gaming-office-formats.md)

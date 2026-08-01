@@ -32,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     steps:
+      # Pinning policy: first-party actions/* are pinned to major tags;
+      # third-party actions are pinned to a full commit SHA.
       - uses: actions/checkout@v4
 
       - name: Free runner disk space
@@ -43,17 +45,35 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes binutils ovmf podman qemu-system-x86 qemu-utils shellcheck
+          sudo apt-get install --yes binutils ovmf podman qemu-system-x86 qemu-utils runc shellcheck
           sudo apt-get clean
+          runtime="$(command -v runc)"
+          printf 'PODMAN_RUNTIME=%s\nBUILDAH_RUNTIME=%s\n' \
+            "${runtime}" "${runtime}" >> "$GITHUB_ENV"
+          runc --version
 
       - name: Validate scripts
-        run: shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+        run: |
+          shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+          os/scripts/test-installer-platform-guard.sh
+          os/scripts/test-containerfile-layer-budget.sh
 
       - name: Build payloads and installer ISO
-        run: sudo os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
+        # INSTALLER_DEFAULT=1 makes the destructive automated install the
+        # GRUB default so the unattended VM lifecycle can run; build-iso.sh
+        # names that variant *-ci.iso so it is never mistaken for the safe
+        # interactive Developer Preview ISO (default 0).
+        env:
+          INSTALLER_DEFAULT: "1"
+        run: |
+          sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME,INSTALLER_DEFAULT \
+            os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
 
       - name: Install to a blank disk and verify lifecycle
         run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
+
+      - name: Verify pairwise virtual hardware matrix
+        run: sudo os/scripts/test-hardware-matrix.sh "$GITHUB_WORKSPACE/output"
 
       - name: Upload serial evidence
         if: always()
@@ -68,18 +88,23 @@ jobs:
             output/install-post.log
             output/ovmf-vars.txt
             output/diagnostics/**
+            output/hardware-matrix/**
           retention-days: 14
           include-hidden-files: true
           if-no-files-found: warn
 
       - name: Upload installer
+        # The uploaded ISO is the CI variant (*-ci.iso): its GRUB default is
+        # the destructive automated install. The artifact name says so; do
+        # not distribute it as a developer-facing preview image.
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Andromeda-Developer-Preview-x86_64-${{ github.sha }}
+          name: Andromeda-Developer-Preview-x86_64-ci-${{ github.sha }}
           path: |
             output/*.iso
             output/*.sha256
+            output/*.manifest.json
             output/andromeda-v1-history.json
           compression-level: 0
           retention-days: 3

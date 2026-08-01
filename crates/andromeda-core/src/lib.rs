@@ -10,7 +10,9 @@ mod task;
 
 pub use action::{
     ActionId, ActionKind, ActionOutcome, ActionPlan, ActionSpec, Evidence, OutcomeStatus,
-    RecoverySemantics, RiskLevel,
+    PlanValidationError, RecoverySemantics, RiskLevel,
 };
-pub use capability::{Capability, CapabilityId, CapabilityResource, FileAccess, IsolationLevel};
+pub use capability::{
+    Capability, CapabilityId, CapabilityResource, FileAccess, IsolationLevel, normalized_absolute,
+};
 pub use task::{Intent, TaskId, TaskState, TaskTransitionError};

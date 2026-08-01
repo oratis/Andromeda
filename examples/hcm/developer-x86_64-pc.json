@@ -1,8 +1,9 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "developer-x86-64-pc",
   "name": "Generic x86-64 developer PC",
   "tier": "community",
+  "boot_provider": "pc_uefi_shim",
   "selectors": [
     {
       "os_family": "linux",
@@ -30,6 +31,9 @@
     "stable",
     "hardware-enable"
   ],
+  "artifacts": [],
+  "evidence": [],
+  "expires_at": null,
   "notes": [
     "Community is not a certification claim.",
     "GPU, networking, audio, suspend, and update evidence must be added per exact machine."

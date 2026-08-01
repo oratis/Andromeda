@@ -21,11 +21,15 @@
 
 Intel Mac、T2 Mac 和 Apple silicon 不在这个镜像的已验收范围。未经 Hardware
 Compatibility Manifest 和真机测试的 PC 也只能视为 Community/Experimental。
+当前产物具有不可变的 `pc_x86_64` 平台身份。安装预检会同时验证 CPU 架构、Boot
+Provider、镜像内的 `/usr/lib/andromeda/platform.json` 与内嵌 payload OCI label；
+检测到任何 Apple 硬件时默认拒绝继续。Mac 必须使用保留 macOS/Recovery 的专用
+产物和安装流程，不能复用 PC 清盘路径。
 
 ## 安装前要求
 
 - 一台可从 USB 启动的 x86-64 UEFI 测试机，或支持 OVMF 的虚拟机；
-- 至少 32 GiB 空白磁盘和 8 GiB 内存；
+- 至少 64 GiB 空白磁盘和 8 GiB 内存；
 - 已备份所有数据；
 - 暂时关闭 Secure Boot。当前预览尚未完成自有密钥、签名轮换和真实固件矩阵认证。
 
@@ -39,7 +43,8 @@ generic bootc ISO 的临时 SquashFS/OverlayFS 安装环境以 `selinux=0` 启�
 `SELinux enforcing`，否则失败。
 
 > **危险：** `Automated destructive install (CI only)` 只供 QEMU 验收。它会清空
-> 第一块安装磁盘，不得在含有用户数据的机器上选择。
+> 第一块安装磁盘，不得在含有用户数据的机器上选择。该入口在预检阶段要求
+> `systemd-detect-virt --vm` 确认虚拟机；真机即使误选也会在分区前停止。
 
 ## 构建 ISO
 
@@ -53,29 +58,56 @@ sudo os/scripts/build-iso.sh
 
 - `output/Andromeda-Developer-Preview-x86_64.iso`
 - `output/Andromeda-Developer-Preview-x86_64.iso.sha256`
+- `output/Andromeda-Developer-Preview-x86_64.manifest.json`
+- `output/andromeda-v1-history.json`（v1 payload 的镜像层历史，CI 也会上传）
 - `output/andromeda-v2.tar`（仅用于生命周期测试）
+
+`INSTALLER_DEFAULT` 环境变量控制 ISO 的 GRUB 默认启动项，默认为 `0`
+（交互式图形安装器，面向人类，安全）。只有 CI 和自动化验收才应设置
+`INSTALLER_DEFAULT=1`：该值把 10 秒后自动清盘的 CI 安装项设为默认，产物
+会改名为 `Andromeda-Developer-Preview-x86_64-ci.iso`（含对应的 `.sha256`
+与 `.manifest.json`，manifest 中也记录 `installer_default`），绝不能把它
+当作面向开发者的预览镜像分发。构建过程会校验 `INSTALLER_DEFAULT` 只能是
+0 或 1，并断言 GRUB default 替换确实生效。
 
 ISO 使用 `image-builder` 的 `bootc-generic-iso` 类型，把
 `localhost/andromeda:v1` payload 嵌入安装环境，因此系统安装本身不依赖网络。
+产物 manifest 把 ISO SHA-256、payload digest、架构、Boot Provider 与 HEP ID
+绑定在一起，为后续签名、发布和 HCM 证据关联提供机器可读输入。
 
 ## 自动化空盘验收
 
 在安装 QEMU、OVMF 和 KVM 的 Linux 主机运行：
 
 ```bash
+sudo env INSTALLER_DEFAULT=1 os/scripts/build-iso.sh
 sudo os/scripts/test-install.sh
+```
+
+脚本必须以 root 运行（`modprobe`、`qemu-nbd`、`mount`），并要求存在
+`Andromeda-Developer-Preview-x86_64-ci.iso`——无人值守生命周期需要 CI 自动
+安装项作为 GRUB 默认项。OVMF 固件默认路径是 Debian/Ubuntu 布局
+（`/usr/share/OVMF/OVMF_CODE_4M.fd` 与 `OVMF_VARS_4M.fd`）；Fedora 等其他
+发行版请用环境变量覆盖，例如：
+
+```bash
+sudo env \
+  OVMF_CODE=/usr/share/edk2/ovmf/OVMF_CODE.fd \
+  OVMF_VARS_TEMPLATE=/usr/share/edk2/ovmf/OVMF_VARS.fd \
+  os/scripts/test-install.sh
 ```
 
 脚本执行以下真实状态转换：
 
-1. 创建新的 32 GiB qcow2 磁盘；
+1. 创建新的 64 GiB qcow2 磁盘；
 2. 以 OVMF UEFI 启动 ISO；
 3. 通过 CI 专用 Kickstart 清空并分区该磁盘；
 4. 从 ISO 内嵌 OCI payload 安装系统，注册 Andromeda UEFI NVRAM 启动项并写入
    标准 fallback 路径；
 5. 关机、移除 ISO，仅从安装后的磁盘启动；
 6. 验证 UEFI、SELinux enforcing、SDDM、硬件报告和 `taskd /healthz`；
-7. 导入 revision 2，执行 `bootc switch` 并重启；
+7. 下载 revision 2 归档，按宿主经 fw_cfg 注入的期望 SHA-256 校验通过后才
+   导入，执行 `bootc switch` 并重启；
 8. 确认 revision 2 已启动，执行 `bootc rollback` 并重启；
 9. 确认 revision 1 恢复，输出 `ANDROMEDA_E2E_OK`。
 

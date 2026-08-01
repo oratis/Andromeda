@@ -4,7 +4,12 @@ set -euo pipefail
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPOSITORY_ROOT
 readonly OUTPUT_DIR="${1:-${REPOSITORY_ROOT}/output}"
-readonly ISO_PATH="${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso"
+readonly ISO_PATH="${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.iso"
+
+if [[ "${EUID}" -ne 0 ]]; then
+    printf 'test-install.sh needs root for modprobe, qemu-nbd, and mount; run it with sudo.\n' >&2
+    exit 1
+fi
 readonly DISK_PATH="${OUTPUT_DIR}/andromeda-test.qcow2"
 readonly INSTALL_LOG="${OUTPUT_DIR}/install-serial.log"
 readonly BOOT_LOG="${OUTPUT_DIR}/boot-serial.log"
@@ -51,10 +56,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-test -f "${ISO_PATH}"
+if [[ ! -f "${ISO_PATH}" ]]; then
+    printf 'Missing CI installer ISO: %s\n' "${ISO_PATH}" >&2
+    printf 'Build it with INSTALLER_DEFAULT=1 os/scripts/build-iso.sh; this lifecycle test needs the destructive CI entry as the GRUB default.\n' >&2
+    exit 1
+fi
 test -f "${OUTPUT_DIR}/andromeda-v2.tar"
 test -f "${OVMF_CODE}"
 test -f "${OVMF_VARS_TEMPLATE}"
+update_sha256="$(sha256sum "${OUTPUT_DIR}/andromeda-v2.tar" | cut -d' ' -f1)"
+readonly update_sha256
 
 rm -rf "${DIAGNOSTICS_DIR}"
 mkdir -p \
@@ -63,7 +74,7 @@ mkdir -p \
     "${DIAGNOSTICS_DIR}/nvram" \
     "${DIAGNOSTICS_DIR}/root"
 rm -f "${DISK_PATH}" "${INSTALL_LOG}" "${BOOT_LOG}" "${OVMF_VARS}"
-qemu-img create -f qcow2 "${DISK_PATH}" 32G
+qemu-img create -f qcow2 "${DISK_PATH}" 64G
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS}"
 
 accel=tcg
@@ -104,8 +115,12 @@ printf '%s\n' "${install_status}" \
     >"${DIAGNOSTICS_DIR}/host/install-exit-status.txt"
 qemu-img info "${DISK_PATH}" \
     >"${DIAGNOSTICS_DIR}/host/qemu-img-info.txt" 2>&1 || true
+image_check_status=0
 qemu-img check "${DISK_PATH}" \
-    >"${DIAGNOSTICS_DIR}/host/qemu-img-check.txt" 2>&1 || true
+    >"${DIAGNOSTICS_DIR}/host/qemu-img-check.txt" 2>&1 \
+    || image_check_status="$?"
+printf '%s\n' "${image_check_status}" \
+    >"${DIAGNOSTICS_DIR}/host/qemu-img-check-status.txt"
 cp -f "${OVMF_VARS}" \
     "${DIAGNOSTICS_DIR}/nvram/OVMF_VARS.after-install.fd"
 
@@ -124,6 +139,7 @@ partprobe "${nbd_device}"
 udevadm trigger --settle "${nbd_device}"
 udevadm settle
 
+partition_probe_ok=0
 partition_probe_deadline="$((SECONDS + 30))"
 while (( SECONDS < partition_probe_deadline )); do
     blkid "${nbd_device}"* >/dev/null 2>&1 || true
@@ -131,6 +147,7 @@ while (( SECONDS < partition_probe_deadline )); do
         | grep -qi 'c12a7328-f81f-11d2-ba4b-00a0c93ec93b' \
         && lsblk -prno LABEL "${nbd_device}" \
         | grep -qx 'andromeda-root'; then
+        partition_probe_ok=1
         break
     fi
     sleep 1
@@ -143,6 +160,24 @@ blkid "${nbd_device}"* \
     >"${DIAGNOSTICS_DIR}/host/blkid.txt" 2>&1 || true
 sfdisk --dump "${nbd_device}" \
     >"${DIAGNOSTICS_DIR}/host/partition-table.sfdisk" 2>&1 || true
+
+# Diagnostics are collected above; report the primary failure cause before
+# any strict assertion can mask it with a confusing grep or mount error.
+if [[ "${install_status}" -ne 0 ]]; then
+    printf 'Installer exited with status %s.\n' "${install_status}" >&2
+    tail -100 "${INSTALL_LOG}" >&2 || true
+    exit "${install_status}"
+fi
+if [[ "${image_check_status}" -ne 0 ]]; then
+    printf 'Installed disk image failed qemu-img check with status %s.\n' \
+        "${image_check_status}" >&2
+    exit "${image_check_status}"
+fi
+if [[ "${partition_probe_ok}" -ne 1 ]]; then
+    printf 'Timed out waiting for the ESP GUID and andromeda-root label on %s.\n' \
+        "${nbd_device}" >&2
+    exit 1
+fi
 
 esp_partition="$(
     lsblk -prno NAME,PARTTYPE "${nbd_device}" \
@@ -204,35 +239,44 @@ strings --encoding=l "${OVMF_VARS}" \
     >"${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt"
 grep Andromeda "${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt" \
     | tee "${OUTPUT_DIR}/ovmf-vars.txt"
+grep -F '\EFI\fedora\shimx64.efi' \
+    "${DIAGNOSTICS_DIR}/nvram/strings-after-install.txt" \
+    | tee -a "${OUTPUT_DIR}/ovmf-vars.txt"
 
-if [[ "${install_status}" -ne 0 ]]; then
-    printf 'Installer exited with status %s.\n' "${install_status}" >&2
-    exit "${install_status}"
-fi
-
+# The guest reaches the host over slirp via 10.0.2.2, which forwards to the
+# host loopback; never expose the output directory on real interfaces.
 python3 -m http.server 8080 \
-    --bind 0.0.0.0 \
+    --bind 127.0.0.1 \
     --directory "${OUTPUT_DIR}" \
     >"${OUTPUT_DIR}/update-server.log" 2>&1 &
 http_pid="$!"
 
 qemu-system-x86_64 \
     "${common_qemu[@]}" \
+    -fw_cfg "name=opt/andromeda/update-sha256,string=${update_sha256}" \
     -boot order=c \
     -serial "file:${BOOT_LOG}" &
 qemu_pid="$!"
 
 deadline="$((SECONDS + 2700))"
 while (( SECONDS < deadline )); do
+    if grep -qE 'ANDROMEDA_.*_FAILED' "${BOOT_LOG}" 2>/dev/null; then
+        printf 'Installed system emitted a failure marker.\n' >&2
+        grep -E 'ANDROMEDA_.*_(FAILED|OK)' "${BOOT_LOG}" >&2
+        exit 1
+    fi
     if grep -q ANDROMEDA_E2E_OK "${BOOT_LOG}" 2>/dev/null; then
         grep -E \
             'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
             "${BOOT_LOG}"
         python3 - "${BOOT_LOG}" <<'PY'
 import pathlib
+import re
 import sys
 
-log = pathlib.Path(sys.argv[1]).read_text(errors="replace")
+log = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\0", b"").decode(errors="replace")
+log = log.replace("\r", "")
+log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
 markers = [
     "ANDROMEDA_SELINUX_LABELS_OK",
     "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",
@@ -245,18 +289,17 @@ markers = [
     "ANDROMEDA_ROLLBACK_BOOT_OK revision=1",
     "ANDROMEDA_E2E_OK",
 ]
+failures = re.findall(r"ANDROMEDA_[A-Z0-9_]*FAILED[^\n]*", log)
+if failures:
+    raise SystemExit(f"Failure marker present: {failures}")
+counts = [log.count(marker) for marker in markers]
+if counts != [1] * len(markers):
+    raise SystemExit(f"Daily-driver markers must occur exactly once: {counts}")
 positions = [log.find(marker) for marker in markers]
-if any(position < 0 for position in positions) or positions != sorted(positions):
+if positions != sorted(positions):
     raise SystemExit(f"Daily-driver marker sequence invalid: {positions}")
 PY
         exit 0
-    fi
-    if grep -q ANDROMEDA_E2E_FAILED "${BOOT_LOG}" 2>/dev/null; then
-        printf 'Installed system emitted a lifecycle failure marker.\n' >&2
-        grep -E \
-            'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
-            "${BOOT_LOG}" >&2
-        exit 1
     fi
     if grep -q 'Shell>' "${BOOT_LOG}" 2>/dev/null; then
         printf 'UEFI firmware could not find an installed bootloader.\n' >&2
