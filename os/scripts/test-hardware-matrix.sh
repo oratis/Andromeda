@@ -30,10 +30,18 @@ qemu-img --version > "${MATRIX_DIR}/qemu-img-version.txt"
 
 accel=tcg
 cpu=max
+profile_timeout_seconds=600
 if [[ -c /dev/kvm ]]; then
     accel=kvm
     cpu=host
+else
+    # Full-system TCG emulation is roughly an order of magnitude slower than
+    # KVM; the 600 s per-profile budget would always time out.
+    profile_timeout_seconds=3600
+    printf 'WARNING: /dev/kvm is unavailable; falling back to TCG emulation with a %s s per-profile timeout. Expect a very slow run.\n' \
+        "${profile_timeout_seconds}" >&2
 fi
+readonly profile_timeout_seconds
 
 run_profile() {
     local scenario="$1"
@@ -48,6 +56,7 @@ run_profile() {
     local image_check_status=0
     local deadline
     local -a devices
+    local -a qemu_command
 
     mkdir -p "${profile_dir}"
     qemu-img create -f qcow2 -F qcow2 -b "${BASE_DISK}" "${overlay}"
@@ -128,7 +137,7 @@ run_profile() {
     printf 'ANDROMEDA_MATRIX_START scenario=%s\n' "${scenario}"
     "${qemu_command[@]}" &
     qemu_pid="$!"
-    deadline="$((SECONDS + 600))"
+    deadline="$((SECONDS + profile_timeout_seconds))"
 
     while (( SECONDS < deadline )); do
         if grep -qE 'ANDROMEDA_.*_FAILED' "${serial_log}" 2>/dev/null; then

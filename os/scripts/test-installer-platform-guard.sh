@@ -108,4 +108,14 @@ write_manifest t2_x86_64 x86_64 t2_apple_efi
 write_dmi "Apple Inc." "MacBookPro16,1"
 expect_failure x86_64 unsupported_platform_variant
 
-printf 'ANDROMEDA_PLATFORM_GUARD_TEST_OK cases=11\n'
+write_dmi "QEMU" "Standard PC (Q35 + ICH9, 2009)"
+printf '%s\n' 'this is not json' > "${FIXTURE_ROOT}/platform.json"
+expect_failure x86_64 invalid_platform_manifest
+
+write_manifest pc_x86_64 x86_64 ""
+expect_failure x86_64 invalid_platform_manifest
+
+write_manifest pc_x86_64 x86_64 t2_apple_efi
+expect_failure x86_64 boot_provider_mismatch
+
+printf 'ANDROMEDA_PLATFORM_GUARD_TEST_OK cases=14\n'

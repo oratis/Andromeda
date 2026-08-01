@@ -20,226 +20,177 @@ LABEL io.andromeda.platform.variant="${PLATFORM_VARIANT}" \
       io.andromeda.platform.boot-provider="${BOOT_PROVIDER}" \
       io.andromeda.platform.hep-id="${HEP_ID}"
 
-RUN dnf -y install \
-        NetworkManager \
-        curl \
-        firewalld \
-        jq \
-        linux-firmware \
-        openssh-server \
-        podman \
-        qemu-guest-agent \
-        skopeo \
-        sudo \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        kernel-modules-extra \
-        libva-intel-media-driver \
-        libva-utils \
-        mesa-dri-drivers \
-        mesa-vulkan-drivers \
-        switcheroo-control \
-        vulkan-loader \
-        vulkan-tools \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        wireplumber \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        sddm \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        lcms2 \
-        libssh \
-        kwin \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        plasma-desktop \
-        plasma-nm \
-        plasma-workspace \
-        xdg-desktop-portal-kde \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        dolphin \
-        konsole \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        ark \
-        ffmpegthumbs \
-        gwenview \
-        kcalc \
-        kate \
-        kdegraphics-thumbnailers \
-        kinfocenter \
-        kio-extras \
-        okular \
-        plasma-pa \
-        plasma-systemmonitor \
-        spectacle \
-        xorg-x11-server-Xwayland \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        flatpak \
-        fedora-flathub-remote \
-        plasma-discover \
-        plasma-discover-flatpak \
-        qt6-qtwayland \
-        xdg-desktop-portal \
-        xdg-desktop-portal-gtk \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        pipewire \
-        pipewire-alsa \
-        pipewire-pulseaudio \
-        pipewire-utils \
-        wireplumber \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        alsa-firmware \
-        alsa-sof-firmware \
-        alsa-tools-firmware \
-        alsa-ucm \
-        alsa-utils \
-        bluez \
-        bluez-obexd \
-        bluedevil \
-        bolt \
-        cups \
-        cups-filters \
-        fprintd \
-        fwupd \
-        libcamera-gstreamer \
-        libcamera-tools \
-        pipewire-gstreamer \
-        pipewire-plugin-libcamera \
-        pipewire-v4l2 \
-        plasma-print-manager \
-        plasma-thunderbolt \
-        powerdevil \
-        sane-backends \
-        sane-backends-drivers-scanners \
-        system-config-printer \
-        thermald \
-        upower \
-        v4l-utils \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
+# Platform base: control-plane dependencies, guest agents, networking
+# and WWAN, storage tooling, sensors/input, device firmware, and
+# reliability defaults (zram + systemd-oomd).
 RUN dnf -y install \
         ModemManager \
+        NetworkManager \
         NetworkManager-bluetooth \
         NetworkManager-config-connectivity-fedora \
         NetworkManager-ppp \
         NetworkManager-wifi \
         NetworkManager-wwan \
-        iw \
-        mobile-broadband-provider-info \
-        usb_modeswitch \
-        wireless-regdb \
-        wpa_supplicant \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        btrfs-progs \
-        dosfstools \
-        e2fsprogs \
-        exfatprogs \
-        f2fs-tools \
-        kde-partitionmanager \
-        lvm2 \
-        mdadm \
-        ntfs-3g \
-        nvme-cli \
-        smartmontools \
-        udisks2 \
-        udisks2-lvm2 \
-        xfsprogs \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        iio-sensor-proxy \
-        libinput-utils \
-        libwacom \
-        pciutils \
-        tpm2-tools \
-        usbutils \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
         amd-gpu-firmware \
         amd-ucode-firmware \
         atheros-firmware \
         b43-fwcutter \
         b43-openfwwf \
         brcmfmac-firmware \
+        btrfs-progs \
         cirrus-audio-firmware \
+        curl \
+        dosfstools \
+        e2fsprogs \
+        exfatprogs \
+        f2fs-tools \
+        firewalld \
+        iio-sensor-proxy \
         intel-audio-firmware \
         intel-gpu-firmware \
         intel-vsc-firmware \
+        iw \
         iwlegacy-firmware \
         iwlwifi-dvm-firmware \
         iwlwifi-mvm-firmware \
+        jq \
+        kde-partitionmanager \
+        kernel-modules-extra \
+        libinput-utils \
+        libva-intel-media-driver \
+        libva-utils \
+        libwacom \
+        linux-firmware \
+        lvm2 \
+        mdadm \
+        mesa-dri-drivers \
+        mesa-vulkan-drivers \
+        mobile-broadband-provider-info \
         mt7xxx-firmware \
+        ntfs-3g \
         nvidia-gpu-firmware \
+        nvme-cli \
         nxpwireless-firmware \
+        openssh-server \
+        pciutils \
+        podman \
         qcom-wwan-firmware \
+        qemu-guest-agent \
         realtek-firmware \
+        skopeo \
+        smartmontools \
+        sudo \
+        switcheroo-control \
+        systemd-oomd-defaults \
+        tpm2-tools \
+        udisks2 \
+        udisks2-lvm2 \
+        usb_modeswitch \
+        usbutils \
+        vulkan-loader \
+        vulkan-tools \
+        wireless-regdb \
+        wpa_supplicant \
+        xfsprogs \
+        zram-generator-defaults \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
+# Desktop session and peripherals: Plasma/KWin/SDDM, portals, Flatpak,
+# PipeWire audio, Bluetooth, printing/scanning, camera, Thunderbolt,
+# fingerprint, firmware updates, and power management.
 RUN dnf -y install \
+        alsa-firmware \
+        alsa-sof-firmware \
+        alsa-tools-firmware \
+        alsa-ucm \
+        alsa-utils \
+        ark \
         avahi \
+        bluedevil \
+        bluez \
+        bluez-obexd \
+        bolt \
+        cups \
         cups-browsed \
+        cups-filters \
         cups-pk-helper \
+        dolphin \
+        fedora-flathub-remote \
+        ffmpegthumbs \
+        firewall-config \
+        flatpak \
+        fprintd \
+        fwupd \
+        gwenview \
         ipp-usb \
+        kate \
+        kcalc \
+        kdegraphics-thumbnailers \
+        kinfocenter \
+        kio-extras \
+        konsole \
+        kwin \
+        lcms2 \
+        libcamera-gstreamer \
+        libcamera-tools \
+        libssh \
         nss-mdns \
+        okular \
+        pipewire \
+        pipewire-alsa \
+        pipewire-gstreamer \
+        pipewire-plugin-libcamera \
+        pipewire-pulseaudio \
+        pipewire-utils \
+        pipewire-v4l2 \
+        plasma-desktop \
+        plasma-discover \
+        plasma-discover-flatpak \
+        plasma-nm \
+        plasma-pa \
+        plasma-print-manager \
+        plasma-systemmonitor \
+        plasma-thunderbolt \
+        plasma-workspace \
+        powerdevil \
+        qt6-qtwayland \
         sane-airscan \
+        sane-backends \
+        sane-backends-drivers-scanners \
+        sddm \
         simple-scan \
+        spectacle \
+        system-config-printer \
         system-config-printer-udev \
+        thermald \
+        upower \
+        v4l-utils \
+        wireplumber \
+        xdg-desktop-portal \
+        xdg-desktop-portal-gtk \
+        xdg-desktop-portal-kde \
+        xorg-x11-server-Xwayland \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
-RUN dnf -y install \
-        libreoffice-calc \
-        libreoffice-draw \
-        libreoffice-impress \
-        libreoffice-writer \
-        poppler-utils \
-        unzip \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
+# End-user applications and i18n: LibreOffice, Firefox, media codecs,
+# archives, Chinese input and fonts, locales, and the 32-bit gaming
+# runtime baseline.
 RUN dnf -y install \
         7zip \
+        alsa-lib.i686 \
         fcitx5 \
         fcitx5-autostart \
         fcitx5-chinese-addons \
         fcitx5-gtk \
         fcitx5-qt \
         ffmpeg-free \
+        firefox \
+        gamemode \
+        gamescope \
+        glibc-langpack-en \
+        glibc-langpack-zh \
         google-noto-color-emoji-fonts \
         gstreamer1-plugins-bad-free \
         gstreamer1-plugins-base \
@@ -248,42 +199,19 @@ RUN dnf -y install \
         hunspell \
         hunspell-en \
         liberation-fonts-all \
-        unar \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        alsa-lib.i686 \
-        gamemode \
-        gamescope \
+        libreoffice-calc \
+        libreoffice-draw \
+        libreoffice-impress \
+        libreoffice-writer \
         mangohud \
         mesa-dri-drivers.i686 \
         mesa-vulkan-drivers.i686 \
         pipewire-libs.i686 \
+        poppler-utils \
         steam-devices \
+        unar \
+        unzip \
         vulkan-loader.i686 \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        systemd-oomd-defaults \
-        zram-generator-defaults \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        firewall-config \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        firefox \
-    && dnf clean all \
-    && rm -rf /var/cache/dnf
-
-RUN dnf -y install \
-        glibc-langpack-en \
-        glibc-langpack-zh \
     && dnf clean all \
     && rm -rf /var/cache/dnf
 
