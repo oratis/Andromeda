@@ -10,7 +10,7 @@
 
 1. **“运行在所有硬件上”必须改写成“可探测所有硬件，并对通过认证的硬件作明确承诺”。** PC 的主板固件、ACPI 表、设备子系统、固件版本和 OEM 改型形成组合爆炸。即使 PCI/USB ID 相同，电源时序、音频拓扑、摄像头 ISP、休眠和混合显卡也可能因机型而异。一个负责任的 OS 不能只给出“支持/不支持”二元答案，而应发布机器可读的 Hardware Compatibility Manifest（HCM）和分级支持状态。
 2. **主航道应是 Linux LTS 内核 + 上游驱动 + Mesa + linux-firmware。** Linux 内核同时覆盖 x86-64 和 arm64，已有 PC 所需的 PCIe、USB、NVMe、网络、输入、音频、图形和电源管理框架。原创投入应集中在认证、质量、回归隔离、固件治理和体验，而不是另写一套驱动 ABI。Linux 内核整体采用 GPL-2.0-only；大量设备仍依赖可再分发但非自由的二进制固件，内核官方也明确说明，拒绝这些固件通常会以大量硬件失效为代价（[Kernel.org FAQ](https://www.kernel.org/faq.html)）。
-3. **PC 游戏要求同时经营开放和闭源 GPU 路线。** AMD/Intel 的内核 DRM 与 Mesa 路线最适合作为默认；NVIDIA 若要覆盖现实游戏硬件，不能只依赖 Nouveau/NVK，必须提供经过 Secure Boot 签名、与内核更新锁步测试的 NVIDIA 官方驱动渠道。NVK 已是 Vulkan 1.4 conformant，并覆盖 Kepler 至 Ada 以及消费级 Blackwell，但“API 一致性”不等于所有游戏、CUDA、功耗和新卡首发体验都等价于官方栈（[Mesa NVK](https://docs.mesa3d.org/drivers/nvk.html)）。
+3. **PC 游戏要求同时经营开放和闭源 GPU 路线。** AMD/Intel 的内核 DRM 与 Mesa 路线最适合作为默认；NVIDIA 若要覆盖现实游戏硬件，不能只依赖 Nouveau/NVK，必须提供经过 Secure Boot 签名、与内核更新锁步测试的 NVIDIA 官方驱动渠道。NVK 已是 Vulkan 1.4 conformant，并覆盖 Kepler 至 Ada 以及消费级 Blackwell，但“API 一致性”不等于所有游戏、CUDA、功耗和新卡首发体验都等价于官方栈（[Mesa NVK](https://docs.mesa3d.org/drivers/nvk.html)）。*NVK 的一致性与代际覆盖为 2026-07-26 上游状态快照；进入 Adopt/Pilot 前须按当日上游状态复核。*
 4. **Mac 必须拆成三条产品线。**
    - 不带 T2 的 Intel Mac：最接近普通 x86 PC，可对少数实测机型提供 `Supported`，但不能按“所有 Intel Mac”承诺。
    - 带 T2 的 Intel Mac：键盘、触控板、摄像头、音频等依赖 `apple-bce` 桥接；休眠、音频、混合显卡和 T2 Secure Enclave 仍有关键缺口，只适合 `Community/Experimental`。
@@ -764,7 +764,7 @@ Apple Boot Camp support software 是面向 Windows on Mac 的 Apple 驱动包，
 - 选择 AMD APU、Intel iGPU、AMD dGPU、NVIDIA 各一条参考硬件线；
 - 完成 UEFI Secure Boot、TPM2、UKI、模块签名与自动回退；
 - Adopt Mesa/PipeWire/libcamera/libinput/fprintd/fwupd；
-- Certified 5–10 台 PC，Supported 20–30 台；
+- 认证数量与[产品开发计划](../product-development-plan.md)分阶段目标对齐：本阶段交付 5 款 Tier 2 Supported 候选机型（对应 Stage 2，第 19–36 周）；10–15 款 Supported 机型与少量 Tier 3 Certified 候选按 Stage 3（第 37–60 周）节奏推进，不在本阶段提前承诺；
 - 迁移 MVP 覆盖文件、基础设置、浏览器书签、应用 inventory；
 - 建低空间、掉电、休眠和坞站 CI。
 
