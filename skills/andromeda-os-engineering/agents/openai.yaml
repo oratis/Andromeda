@@ -1,0 +1,4 @@
+interface:
+  display_name: "Andromeda OS Engineering"
+  short_description: "Research, build, test, and release Andromeda OS"
+  default_prompt: "Use $andromeda-os-engineering to develop, validate, and release the next Andromeda OS change."
