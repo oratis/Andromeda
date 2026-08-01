@@ -257,4 +257,3 @@ os/scripts/test-daily-driver.sh output
 4. 校验全部必需 capability evidence 为 `passed` 且未过期；
 5. 由第二位审核者批准 Tier 变化；
 6. 保存撤销入口，以便发现回归时立即阻断该 cohort。
-
