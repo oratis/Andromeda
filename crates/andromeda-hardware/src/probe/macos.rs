@@ -33,8 +33,11 @@ pub(super) fn probe() -> Result<HardwareReport, ProbeError> {
         boot: BootInfo {
             uefi: Some(!apple_silicon),
             secure_boot: None,
-            tpm2: false,
-            virtualization: true,
+            // Macs expose Apple boot policy / Secure Enclave rather than a
+            // TPM 2.0; the probe cannot verify a TPM equivalent, so the
+            // state is unknown instead of a hardcoded false.
+            tpm2: None,
+            virtualization: sysctl_string("kern.hv_support").map(|value| value == "1"),
         },
         devices: Vec::new(),
         warnings: vec![

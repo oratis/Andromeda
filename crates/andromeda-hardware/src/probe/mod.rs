@@ -10,6 +10,8 @@ mod linux;
 mod macos;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 mod other;
+#[cfg(any(target_os = "linux", all(test, unix)))]
+mod sysfs;
 #[cfg(target_os = "windows")]
 mod windows;
 
