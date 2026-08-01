@@ -13,6 +13,9 @@
 | 代码质量与正确性 | **A−** | [code-quality-review.md](code-quality-review.md) |
 | OS 镜像 / 安装器 / CI 基础设施 | **A−** | [os-infrastructure-review.md](os-infrastructure-review.md) |
 | 文档与产品一致性 | **B+** | [documentation-review.md](documentation-review.md) |
+| E2E 验证流水线（专项） | **B** | [e2e-pipeline-review.md](e2e-pipeline-review.md) |
+
+另有一篇跨阶段的工作总述与优化路线：[engagement-summary.md](engagement-summary.md)。
 
 ## 执行摘要
 
