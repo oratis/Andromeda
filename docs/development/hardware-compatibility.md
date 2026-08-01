@@ -66,7 +66,71 @@ Wi-Fi 无驱动，或主 GPU 正常而副 GPU 无驱动——整机降级为 `ne
 
 Schema 位于 [`schemas/hardware-compatibility-manifest.schema.json`](../../schemas/hardware-compatibility-manifest.schema.json)，示例位于 [`examples/hcm/developer-x86_64-pc.json`](../../examples/hcm/developer-x86_64-pc.json)。
 
+## HCM 清单签名与真实性（fail-closed）
+
+matcher 过去只校验清单的**内部一致性与新鲜度**，从不校验**真实性**：伪造一份
+`tier: certified`、selector 命中本机、证据“通过 / 2099 到期”的清单即可得到
+`certified`（安全评审发现 #1）。本节描述的 detached 签名机制关闭该缺口。
+
+### 机制
+
+- 清单可携带一个可选字段 `signature: { key_id, sig }`：
+  - `key_id` 指明应由哪把公钥验签；
+  - `sig` 是对清单**规范化字节**的 detached ed25519 签名，64 字节、128 位小写
+    十六进制。
+- **规范化（canonicalization）规则**——签名与验签走同一条路径，唯一权威定义在
+  `crates/andromeda-hardware/src/signing.rs` 的 `canonical_signing_bytes`：
+  1. 对**类型化模型**（而非原始文件）序列化，因此源文件的空白、键顺序，以及可选
+     字段写成 `null` 还是省略，都不改变被签字节；
+  2. 删除 `signature` 字段（签名不能覆盖自身）；
+  3. 输出紧凑 JSON，且**每个对象的键按 Unicode 标量值排序**；数组保持原有顺序；
+  4. 标量沿用 `serde_json` 的编码（字符串正确转义；清单只含整数与布尔，本身确定）。
+- **可信 keyring**：`TrustedKeyring` 把 `key_id` 映射到 ed25519 验签公钥（公钥同样以
+  64 位十六进制表示）。keyring 是唯一信任锚——空 keyring 不信任任何东西。
+
+### 强制语义
+
+- **提供 keyring 时（fail-closed）**：清单必须带签名、`key_id` 命中 keyring、且签名对
+  规范化字节验签通过，否则 `effective_tier` 降为 `Blocked`。未签名、未知 key、签名
+  格式非法、验签失败一律 `Blocked`；此外每个 artifact pin 的 `signing_key_id` 也必须
+  命中同一 keyring。
+- **未提供 keyring 时（咨询性，向后兼容不变）**：不要求也不校验签名，行为与历史
+  matcher 完全一致。
+- **manifest 级与 artifact 级签名的关系**：manifest 级签名是**真实性门禁**——一旦验签
+  通过，即同时认证了清单内声明的全部 `sha256` 与 `signing_key_id`；artifact 级
+  `signing_key_id` 标识“哪把受信任密钥为该制品摘要背书”，在 keyring 存在时由 matcher
+  校验其命中 keyring。至于**制品字节**是否与被认证的 `sha256` 一致，则由可选的
+  `ArtifactVerifier`（如 `DirectoryArtifactVerifier`）在本地重新哈希核对。
+
+### 库 API
+
+- 咨询性（默认，行为不变）：`evaluate_manifest` / `evaluate_manifest_with_verifier`；
+- fail-closed 验签：`evaluate_manifest_verified(report, manifest, keyring, verifier)`，
+  以及显式时钟的 `evaluate_manifest_at_verified(report, manifest, now, keyring, verifier)`。
+
+### 如何签名一份清单
+
+代码提供**验证路径**与一个确定性签名助手 `ManifestSigningKey`；密钥的生成、分发与
+**生产清单的实际签名**属于部署/运维职责，本 crate 不做固定：
+
+1. 离线生成 ed25519 私钥（32 字节 seed），存放于 HSM 或离线根并按策略轮换——本 crate
+   不规定；
+2. `ManifestSigningKey::from_seed(&seed)` 载入后，对**未签名**清单调用
+   `sign_manifest(&manifest, "<key_id>")`，得到 `{ key_id, sig }`；
+3. 把该对象写入清单的 `signature` 字段后发布；
+4. 把对应验签公钥（`verifying_key_hex()`，64 位十六进制）以 `{ "<key_id>": "<hex>" }`
+   形式分发给评估方，构成其 `TrustedKeyring`。
+
+> 本 crate 只提供“验证 + 一个可复现的签名助手 + 上述规范化与流程约定”。私钥管理、
+> 公钥分发与批量生产签名是运维工程，代码不代替。
+
 ## `hardware check` 作为预检门禁
+
+> **重要：`andromeda hardware check` 目前是咨询性的，不可作信任决策。** 现有 CLI 走
+> 默认（无 keyring）路径，只校验一致性与新鲜度，**不验签清单真实性**；伪造清单仍可得到
+> 非 `blocked` 结果与退出码 0。要让退出码具备真实性保证，评估方必须经库 API 传入
+> `TrustedKeyring`（`evaluate_manifest_verified`）。为 `hardware check` 增加
+> `--trusted-keys <path>` 开关以在 CLI 层强制验签，是自然的后续项（见“下一步”）。
 
 `andromeda hardware check <manifest>` 可以直接用于脚本和 CI 门禁：
 
@@ -100,7 +164,9 @@ andromeda hardware check examples/hcm/developer-x86_64-pc.json --require-tier co
 
 ## 下一步
 
-1. 对 HCM 使用离线根密钥和轮换签名；
+1. HCM detached ed25519 验签已在**库层**落地并 fail-closed（见“HCM 清单签名与真实性”）；
+   待办：为 `andromeda hardware check` 增加 `--trusted-keys <path>` 开关，把验签下沉到
+   CLI 层并使退出码具备真实性保证；同时建立离线根密钥的生成、分发与轮换流程；
 2. 对 HEP OCI digest 与签名身份进行在线/离线验证；
 3. 从 Windows/macOS source agent 导入更完整但经用户同意的设备 inventory；
 4. 建立 QEMU、参考 PC、Intel Mac、T2、M1/M2 分离的实验室队列；
