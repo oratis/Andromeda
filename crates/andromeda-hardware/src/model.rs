@@ -190,6 +190,24 @@ pub struct CapabilityEvidence {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Detached ed25519 signature that authenticates a whole [`HcmManifest`].
+///
+/// `sig` is the lowercase-hex ed25519 signature (64 bytes / 128 hex chars)
+/// over the manifest's *canonical* bytes — the manifest serialized through this
+/// model, with the `signature` field removed and all object keys sorted (see
+/// `crate::canonical_signing_bytes`). `key_id` names the public key expected to
+/// verify it; the verifier resolves that id in a [`crate::TrustedKeyring`].
+///
+/// A signature is only an authenticity *claim*. It gates nothing on its own:
+/// the matcher enforces it only when a keyring is supplied, and an unknown
+/// `key_id` or a bad `sig` is then fail-closed to `Blocked`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSignature {
+    pub key_id: String,
+    pub sig: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HcmManifest {
@@ -211,6 +229,10 @@ pub struct HcmManifest {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub notes: Vec<String>,
+    /// Detached authenticity signature over the rest of the manifest. Absent on
+    /// legacy/unsigned manifests; the canonicalization that produces the signed
+    /// bytes deliberately excludes this field so it can be added after signing.
+    pub signature: Option<ManifestSignature>,
 }
 
 impl HcmManifest {
