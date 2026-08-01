@@ -56,6 +56,7 @@ jobs:
         run: |
           shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
           os/scripts/test-installer-platform-guard.sh
+          os/scripts/test-containerfile-layer-budget.sh
 
       - name: Build payloads and installer ISO
         # INSTALLER_DEFAULT=1 makes the destructive automated install the
