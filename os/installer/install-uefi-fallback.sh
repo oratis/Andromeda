@@ -61,6 +61,16 @@ test -n "${parent_name}"
 test -n "${partition_number}"
 parent_device="/dev/${parent_name}"
 
+# Reinstallation must not accumulate duplicate NVRAM entries: drop any
+# existing Andromeda entries before creating the fresh one.
+while read -r stale_bootnum; do
+    printf 'removing stale Andromeda NVRAM entry Boot%s\n' "${stale_bootnum}"
+    efibootmgr --bootnum "${stale_bootnum}" --delete-bootnum >/dev/null
+done < <(
+    efibootmgr \
+        | sed -n -E 's/^Boot([0-9A-Fa-f]{4})\*? Andromeda([[:space:]].*)?$/\1/p'
+)
+
 efibootmgr \
     --create \
     --disk "${parent_device}" \

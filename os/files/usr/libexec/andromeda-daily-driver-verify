@@ -11,7 +11,11 @@ current_check=initialization
 
 emit() {
     local message="$1"
-    printf '%s\n' "${message}" | tee /dev/ttyS0
+    if [[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]; then
+        printf '%s\n' "${message}" | tee /dev/ttyS0
+    else
+        printf '%s\n' "${message}"
+    fi
     systemd-cat -t andromeda-ci printf '%s\n' "${message}"
 }
 
@@ -36,7 +40,8 @@ test "$(id -u "${test_user}")" -ge 1000
 test "$(stat --format=%U "${test_home}")" = "${test_user}"
 
 current_check=plasma-session
-deadline="$((SECONDS + 180))"
+# 300 s leaves headroom for nested KVM with llvmpipe software rendering.
+deadline="$((SECONDS + 300))"
 session_id=
 wayland_socket=
 while (( SECONDS < deadline )); do
@@ -166,8 +171,15 @@ if systemctl is-active --quiet sshd.service; then
     printf 'sshd must be disabled in the consumer image.\n' >&2
     on_error 1 "${LINENO}"
 fi
+if systemctl is-active --quiet sshd.socket; then
+    printf 'sshd socket activation must be disabled in the consumer image.\n' >&2
+    on_error 1 "${LINENO}"
+fi
+# Reject IPv4, IPv6, and dual-stack wildcard listeners: sshd binds both
+# 0.0.0.0:22 and [::]:22, and with bindv6only=0 an IPv6 wildcard socket
+# still accepts IPv4 connections.
 if ss --listening --tcp --numeric \
-    | grep -Eq '(^|[[:space:]])0\.0\.0\.0:22([[:space:]]|$)'; then
+    | grep -Eq '(^|[[:space:]])(0\.0\.0\.0|\[::\]|\*):22([[:space:]]|$)'; then
     printf 'The consumer image must not expose SSH on every interface.\n' >&2
     on_error 1 "${LINENO}"
 fi
@@ -230,7 +242,9 @@ EOF
         lo_profile="${work_dir}/libreoffice-profile"
         lo_profile_uri="file://${lo_profile}"
         current_check=office-docx
-        run_as_user timeout 120s libreoffice "-env:UserInstallation=${lo_profile_uri}" \
+        # The first headless conversion initializes a fresh LibreOffice
+        # profile; give it extra time under software rendering.
+        run_as_user timeout 300s libreoffice "-env:UserInstallation=${lo_profile_uri}" \
             --headless --convert-to 'docx:Office Open XML Text' \
             --outdir "${work_dir}" "${work_dir}/andromeda.fodt"
         current_check=office-xlsx
@@ -253,6 +267,8 @@ EOF
         unzip -t "${work_dir}/andromeda.docx" >/dev/null
         unzip -t "${work_dir}/andromeda.xlsx" >/dev/null
         unzip -t "${work_dir}/andromeda.pptx" >/dev/null
+        unzip -p "${work_dir}/andromeda.docx" word/document.xml \
+            | grep -q Andromeda
         pdfinfo "${work_dir}/andromeda.pdf" | grep -q '^Pages:'
 
         current_check=firefox-wayland
@@ -287,7 +303,52 @@ EOF
         done
         sleep 5
         run_as_user systemctl --user is-active --quiet "${firefox_unit}"
-        printf '%s\n' 'Firefox remained active in the real Wayland session.' \
+
+        # A surviving process does not prove Wayland: MOZ_ENABLE_WAYLAND=1
+        # silently falls back to Xwayland when the Wayland connection fails.
+        # Require an established unix socket from the Firefox main process to
+        # the compositor's wayland socket, matched by peer inode.
+        current_check=firefox-wayland-connection
+        firefox_wayland_connected=0
+        deadline="$((SECONDS + 60))"
+        while (( SECONDS < deadline )); do
+            firefox_main_pid="$(
+                run_as_user systemctl --user show "${firefox_unit}" \
+                    --property=MainPID --value
+            )"
+            if [[ "${firefox_main_pid}" =~ ^[0-9]+$ ]] \
+                && (( firefox_main_pid > 0 )); then
+                firefox_socket_inodes="$(
+                    find "/proc/${firefox_main_pid}/fd" -type l -print0 \
+                        2>/dev/null \
+                        | xargs -0 -r readlink 2>/dev/null \
+                        | sed -n 's/^socket:\[\([0-9]*\)\]$/\1/p'
+                )"
+                wayland_peer_inodes="$(
+                    ss --no-header --unix state established \
+                        "src ${wayland_socket}" 2>/dev/null \
+                        | awk '$NF ~ /^[0-9]+$/ { print $NF }'
+                )"
+                if [[ -n "${firefox_socket_inodes}" \
+                    && -n "${wayland_peer_inodes}" ]] \
+                    && grep -qxF -f <(printf '%s\n' "${wayland_peer_inodes}") \
+                        <<<"${firefox_socket_inodes}"; then
+                    firefox_wayland_connected=1
+                    break
+                fi
+            fi
+            sleep 2
+        done
+        if (( firefox_wayland_connected != 1 )); then
+            printf 'Firefox never connected to %s.\n' "${wayland_socket}" >&2
+            ss --unix --processes state established >&2 || true
+            run_as_user journalctl --user-unit="${firefox_unit}" \
+                --no-pager -n 100 >&2 || true
+            on_error 1 "${LINENO}"
+        fi
+        run_as_user systemctl --user is-active --quiet "${firefox_unit}"
+        printf '%s\n' \
+            "Firefox main pid ${firefox_main_pid} held an established connection to ${wayland_socket}." \
             > "${browser_dir}/firefox-wayland-ok.txt"
         chown "${test_user}:${test_user}" "${browser_dir}/firefox-wayland-ok.txt"
         run_as_user systemctl --user stop "${firefox_unit}"

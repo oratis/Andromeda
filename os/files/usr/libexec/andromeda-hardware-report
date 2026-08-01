@@ -24,5 +24,11 @@ if [[ -r "${scenario_path}" ]]; then
         marker="${marker} scenario=${scenario}"
     fi
 fi
-printf '%s\n' "${marker}" | tee /dev/ttyS0
+# This runs on every boot of every installed machine; the serial console is
+# CI evidence plumbing and must never fail the unit on real hardware.
+if [[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]; then
+    printf '%s\n' "${marker}" | tee /dev/ttyS0
+else
+    printf '%s\n' "${marker}"
+fi
 systemd-cat -t andromeda-hardware printf '%s\n' "${marker}"

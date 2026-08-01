@@ -303,7 +303,7 @@ RUN mkdir -p /usr/lib/andromeda \
         --arg image_revision "${IMAGE_REVISION}" \
         '{schema_version:1,variant:$variant,architecture:$architecture,boot_provider:$boot_provider,hep_id:$hep_id,image_revision:$image_revision}' \
         > /usr/lib/andromeda/platform.json \
-    && systemctl disable sshd.service \
+    && systemctl disable sshd.service sshd.socket \
     && systemctl enable \
         NetworkManager.service \
         andromeda-first-boot-labels.service \

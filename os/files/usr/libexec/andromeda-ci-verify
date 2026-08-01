@@ -5,10 +5,15 @@ readonly STATE_DIR=/var/lib/andromeda-ci
 readonly STATE_FILE="${STATE_DIR}/state"
 readonly UPDATE_ARCHIVE=/var/tmp/andromeda-v2.tar
 readonly UPDATE_URL=http://10.0.2.2:8080/andromeda-v2.tar
+readonly UPDATE_SHA256_FW_CFG=/sys/firmware/qemu_fw_cfg/by_name/opt/andromeda/update-sha256/raw
 
 emit() {
     local message="$1"
-    printf '%s\n' "${message}" | tee /dev/ttyS0
+    if [[ -c /dev/ttyS0 && -w /dev/ttyS0 ]]; then
+        printf '%s\n' "${message}" | tee /dev/ttyS0
+    else
+        printf '%s\n' "${message}"
+    fi
     systemd-cat -t andromeda-ci printf '%s\n' "${message}"
 }
 
@@ -23,7 +28,29 @@ require_runtime_health() {
     systemctl is-active --quiet andromeda-taskd.service
     systemctl is-active --quiet sddm.service
     curl --fail --silent --show-error --retry 30 --retry-delay 2 \
+        --retry-connrefused \
         http://127.0.0.1:7777/healthz >/dev/null
+}
+
+# The lifecycle payload arrives over plain HTTP from the QEMU host. The host
+# test harness passes the expected SHA-256 through fw_cfg; refuse to import
+# anything that does not match. This is CI-only wiring (the unit is gated on
+# andromeda.ci=1), so a missing fw_cfg entry is a hard failure, not a fallback.
+verify_update_archive() {
+    local expected_sha256 actual_sha256
+    modprobe qemu_fw_cfg 2>/dev/null || true
+    test -r "${UPDATE_SHA256_FW_CFG}"
+    expected_sha256="$(
+        tr -cd 'A-Fa-f0-9' < "${UPDATE_SHA256_FW_CFG}" \
+            | tr '[:upper:]' '[:lower:]'
+    )"
+    test "${#expected_sha256}" -eq 64
+    actual_sha256="$(sha256sum "${UPDATE_ARCHIVE}" | cut -d' ' -f1)"
+    if [[ "${actual_sha256}" != "${expected_sha256}" ]]; then
+        emit "ANDROMEDA_UPDATE_VERIFY_FAILED expected=${expected_sha256} actual=${actual_sha256}"
+        return 1
+    fi
+    emit "ANDROMEDA_UPDATE_VERIFY_OK sha256=${actual_sha256}"
 }
 
 install -d -m 0700 "${STATE_DIR}"
@@ -51,7 +78,9 @@ case "${state}:${revision}" in
     first-boot:1)
         emit "ANDROMEDA_FIRST_BOOT_OK revision=1"
         curl --fail --location --show-error --retry 60 --retry-delay 2 \
+            --retry-connrefused \
             --output "${UPDATE_ARCHIVE}" "${UPDATE_URL}"
+        verify_update_archive
         skopeo copy --retry-times 5 \
             "oci-archive:${UPDATE_ARCHIVE}" \
             containers-storage:localhost/andromeda:v2
