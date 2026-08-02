@@ -199,21 +199,22 @@ matcher 过去只校验清单的**内部一致性与新鲜度**，从不校验**
 
 ## `hardware check` 作为预检门禁
 
-> **重要：`andromeda hardware check` 目前是咨询性的，不可作信任决策。** 现有 CLI 走
-> 默认（无 keyring）路径，只校验一致性与新鲜度，**不验签清单真实性**；伪造清单仍可得到
-> 非 `blocked` 结果与退出码 0。要让退出码具备真实性保证，评估方必须经库 API 传入
-> `TrustedKeyring`（`evaluate_manifest_verified`）。为 `hardware check` 增加
-> `--trusted-keys <path>` 开关以在 CLI 层强制验签，是自然的后续项（见“下一步”）。
+> **真实性语义见上文[“信任边界：真实性必须显式开启”](#信任边界真实性必须显式开启)
+> 及其三档校验强度表。** 概括：不带 `--trusted-keys` 的调用是咨询性的，退出码不具备
+> 真实性保证；带 `--trusted-keys` 时验签 fail-closed，退出码可作信任门控；
+> `--require-tier supported|certified` 不带 keyring 会被直接拒绝执行，除非显式
+> `--allow-unverified`。
 
 `andromeda hardware check <manifest>` 可以直接用于脚本和 CI 门禁：
 
 - 退出码 `0`：selector 匹配、requirements 满足，且（如提供
   `--require-tier`）有效 tier 达标；
+- 退出码 `1`：**拒绝执行**——`--require-tier supported|certified` 既未带
+  `--trusted-keys` 也未带 `--allow-unverified`，不产生判定结果；probe 失败、
+  manifest 无法读取或 `schema_version` 未知等输入错误同样以 `1` 退出；
 - 退出码 `2`：`effective_tier` 为 `blocked`；
 - 退出码 `3`：`effective_tier` 低于 `--require-tier <tier>` 指定的最低
-  等级；
-- 其他非零退出码：probe 失败、manifest 无法读取或 `schema_version`
-  未知。
+  等级。
 
 Tier 阶梯从低到高为 `blocked < community < reference < supported <
 certified`（`reference` 只有虚拟 L0–L2 证据，因此低于要求实体认证的
@@ -237,9 +238,9 @@ andromeda hardware check examples/hcm/developer-x86_64-pc.json --require-tier co
 
 ## 下一步
 
-1. HCM detached ed25519 验签已在**库层**落地并 fail-closed（见“HCM 清单签名与真实性”）；
-   待办：为 `andromeda hardware check` 增加 `--trusted-keys <path>` 开关，把验签下沉到
-   CLI 层并使退出码具备真实性保证；同时建立离线根密钥的生成、分发与轮换流程；
+1. HCM detached ed25519 验签已在库层与 CLI 层（`hardware check --trusted-keys`，配套
+   `hardware keygen` / `hardware sign`）落地并 fail-closed；待办：建立离线根密钥的
+   生成、分发与轮换流程，并补充签名/密钥撤销机制；
 2. 对 HEP OCI digest 与签名身份进行在线/离线验证；
 3. 从 Windows/macOS source agent 导入更完整但经用户同意的设备 inventory；
 4. 建立 QEMU、参考 PC、Intel Mac、T2、M1/M2 分离的实验室队列；
