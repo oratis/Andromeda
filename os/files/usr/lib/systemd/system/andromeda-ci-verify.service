@@ -7,7 +7,21 @@ Wants=network-online.target andromeda-hardware-report.service andromeda-taskd.se
 [Service]
 Type=oneshot
 ExecStart=/usr/libexec/andromeda-ci-verify
-TimeoutStartSec=20min
+# TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4).
+# This is the innermost budget of the nest and must stay strictly below the
+# host's per-boot budget:
+#
+#   12min (here)
+#     < 14min per-boot budget  (this unit + ~2min firmware/kernel/sddm/plasma)
+#   3 x 14min = 42min          (first-boot, update, rollback)
+#     < 45min                  test-install.sh boot deadline (2700 s)
+#
+# It was 20min, which made 3 x 20 = 60min > the 45min host deadline: a slow but
+# healthy guest would be killed by the host with no unit-level diagnostic.
+# Observed full lifecycle including all three boots is 10-15min, so 12min per
+# boot is roughly 4x headroom. Raising this REQUIRES raising the boot deadline in
+# test-install.sh and re-checking os-e2e.yml timeout-minutes.
+TimeoutStartSec=12min
 
 [Install]
 WantedBy=graphical.target

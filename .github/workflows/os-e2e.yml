@@ -2,6 +2,20 @@ name: Installable OS
 
 on:
   workflow_dispatch:
+  # Upstream-drift detector. Most of what this workflow consumes is NOT pinned:
+  # the fedora-bootc base is a rolling tag, ~300 dnf packages float, and
+  # ovmf/qemu/podman come from ubuntu-latest apt. Those inputs break without any
+  # commit here -- the fedora-bootc `manifest unknown` outage (run 30702410393)
+  # was discovered by an unrelated PR author, which is the worst possible place
+  # to learn about it. A nightly run moves that discovery to a scheduled job.
+  #
+  # Two `schedule` properties are load-bearing and intentional: scheduled runs
+  # fire only on the default branch, and the `paths:` filters below do NOT apply
+  # to them. Drift must be caught on a day when nothing under os/** changed.
+  # See docs/reviews/e2e-pipeline-review.md P0 #5 (prerequisite for the supply
+  # chain work in P1 #8).
+  schedule:
+    - cron: "0 3 * * *"
   push:
     branches:
       - main
@@ -20,7 +34,11 @@ on:
       - "os/**"
 
 concurrency:
-  group: os-e2e-${{ github.event.pull_request.number || github.ref }}
+  # github.event_name is part of the key so the nightly schedule run and a push
+  # to main -- which share github.ref -- cannot cancel each other. Without it,
+  # `cancel-in-progress` would let any push to main silently kill the very
+  # drift detection the schedule exists to provide, and vice versa.
+  group: os-e2e-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -30,7 +48,28 @@ jobs:
   install-update-rollback:
     name: UEFI install, first boot, update, and rollback
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4).
+    # This is the outermost budget and must exceed the sum of everything below
+    # it, or a genuinely slow run surfaces as an unattributable job cancellation
+    # instead of a named stage timeout:
+    #
+    #   andromeda-ci-verify.service TimeoutStartSec  12 min
+    #     < per-boot budget (unit + ~2 min boot)     14 min
+    #   3 boots x 14 min                             42 min
+    #     < test-install.sh boot deadline            45 min (2700 s)
+    #
+    #   build payloads + ISO                         <= 50 min (observed max 42.25)
+    #   + test-install.sh install timeout             45 min
+    #   + test-install.sh boot deadline               45 min
+    #   + test-hardware-matrix.sh (3 x 600 s)         30 min
+    #   + free-disk/apt/validate/upload               ~5 min
+    #   = 175 min                                     < 180 min (here)
+    #
+    # It was 150, which the worst case already exceeded. Build is the one term
+    # with no enforced ceiling; if it regresses past ~50 min, raise this number
+    # in the same change. P1 #6 (cross-run layer cache) is expected to cut build
+    # to ~18 min, at which point this can come back down.
+    timeout-minutes: 180
     steps:
       # Pinning policy: first-party actions/* are pinned to major tags;
       # third-party actions are pinned to a full commit SHA.
@@ -54,7 +93,8 @@ jobs:
 
       - name: Validate scripts
         run: |
-          shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+          shellcheck os/scripts/*.sh os/scripts/lib/*.sh os/installer/*.sh \
+            os/files/usr/libexec/*
           os/scripts/test-installer-platform-guard.sh
           # Static Containerfile layer-COUNT floor only; no image exists yet.
           # The layer-SIZE budget runs post-build below against real history.
