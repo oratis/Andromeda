@@ -371,8 +371,11 @@
         "result": {
           "enum": [
             "passed",
-            "failed"
-          ]
+            "degraded",
+            "failed",
+            "unknown"
+          ],
+          "description": "Verdict for one certified capability. `degraded` means the capability works with a limitation that must be publicly disclosed; it satisfies evidence below `certified` and blocks `certified`. `unknown` means no verdict was produced and always blocks — the certification plan requires that unknown cannot promote. The plan's `blocked` verdict maps onto `failed`; `failed` is kept rather than renamed because renaming it would change the canonical bytes of every manifest already signed."
         },
         "evidence_uri": {
           "type": "string",

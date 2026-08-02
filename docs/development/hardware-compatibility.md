@@ -133,11 +133,48 @@ Wi-Fi 无驱动，或主 GPU 正常而副 GPU 无驱动——整机降级为 `ne
 - `boot_provider` 会原样出现在评估输出中，但由**安装器预检**（platform
   identity 比对）而非 matcher 执行；matcher 的 evidence 中会明确注明这一点；
 - Supported 及以上必须固定 kernel/driver/firmware/HEP artifact；
-- capability evidence 必须通过、未过期且可追溯；
+- capability evidence 必须未过期、可追溯，且其判定不阻断所声明的 tier（见下）；
 - 支持声明到期后自动降为 Blocked；
 - PCI 设备可以匹配 subsystem vendor/device 和 revision，不能只按品牌承诺。
 
 Schema 位于 [`schemas/hardware-compatibility-manifest.schema.json`](../../schemas/hardware-compatibility-manifest.schema.json)，示例位于 [`examples/hcm/developer-x86_64-pc.json`](../../examples/hcm/developer-x86_64-pc.json)。
+
+## 证据判定词汇
+
+`evidence.result` 取四值。此前只有 `passed`/`failed`，导致
+[认证测试计划](./hardware-certification-test-plan.md) §7 要求的"降级"与"未知"
+**无法表达**——而这两种状态恰恰是整套支持策略赖以成立的部分：把降级压成
+`passed` 是夸大，压成 `failed` 又会阻断一台真正可用的机器。
+
+| 取值 | 含义 | 阻断哪些 tier |
+|---|---|---|
+| `passed` | 能力验证通过 | 无 |
+| `degraded` | 能力可用但有**必须公开披露**的限制（例如 codec 只能解码不能编码、suspend 仅在交流供电下可靠） | 仅阻断 `certified` |
+| `failed` | 能力验证失败 | **全部** |
+| `unknown` | 未产出判定：未运行、结论不确定或证据不可获取 | **全部** |
+
+两条设计约束值得记录：
+
+1. **`unknown` 在每个 tier 都 fail-closed。** "没测"是最容易被误当成"测过没问题"的
+   状态，认证计划也明确 `unknown` 不能晋级，因此它不被当作"缺省无此项"忽略。
+2. **认证计划的 `blocked` 映射到 `failed`，`failed` 没有被改名。** 规范化会重新
+   序列化类型化模型，改名或调整既有取值的编码会让**所有已签名清单的签名失效**。
+   同理，新增取值不影响 `passed`/`failed` 的编码——仓库有两条测试锁定这一点：
+   一条断言四个取值的 wire 编码，一条对只用旧取值的清单做真实签名→验签往返。
+
+`degraded` 通过时，评估输出的 `evidence` 中会显式带上"限制必须公开披露"，
+避免降级被静默接受。
+
+> **注：两处已知设计张力，均只作记录、不改变当前行为，留待后续决定。**
+>
+> 1. `certified` 清单携带 `degraded` 证据时，整机直接 `effective_tier =
+>    blocked`，而**不是**降级为 `supported`。诚实登记降级的作者比谎报
+>    `passed` 的作者拿到更差的结果——这一激励问题没有消失，只是从
+>    "passed/failed 二值"上移到了 certified 这一个 tier；是否引入降级式回退
+>    是尚未定案的后续设计。
+> 2. 在 `community` 这一证据可选的 tier 上，登记 `unknown` 会被评估为
+>    `blocked`，而**完全删掉该条目**则保持 `community`——fail-closed 在唯一
+>    允许不带证据的 tier 上奖励了删除记录。同样标记为后续决定。
 
 ## HCM 清单签名与真实性（fail-closed）
 

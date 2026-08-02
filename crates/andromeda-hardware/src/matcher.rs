@@ -483,22 +483,54 @@ fn evaluate_manifest_evidence(
         missing.push("HCM support declaration has expired".into());
     }
 
+    // One exhaustive match per entry: a future `EvidenceResult` variant fails
+    // to compile here instead of silently falling through to "passed". Expiry
+    // is checked after the verdict so a stale *failure* reports the failure
+    // rather than the staleness; both block, but the more actionable reason is
+    // the one worth surfacing.
     for item in &manifest.evidence {
-        if item.result == EvidenceResult::Failed {
-            missing.push(format!(
+        match item.result {
+            EvidenceResult::Passed => {
+                if item.expires_at <= now {
+                    missing.push(format!(
+                        "capability evidence '{}' has expired",
+                        item.capability
+                    ));
+                } else {
+                    evidence.push(format!(
+                        "capability evidence '{}' is passed and current",
+                        item.capability
+                    ));
+                }
+            }
+            EvidenceResult::Degraded => {
+                if item.result.blocks(manifest.tier) {
+                    missing.push(format!(
+                        "capability evidence '{}' is degraded, which the certified tier does \
+                         not allow",
+                        item.capability
+                    ));
+                } else if item.expires_at <= now {
+                    missing.push(format!(
+                        "capability evidence '{}' has expired",
+                        item.capability
+                    ));
+                } else {
+                    evidence.push(format!(
+                        "capability evidence '{}' is degraded and current; the limitation must be \
+                         publicly disclosed",
+                        item.capability
+                    ));
+                }
+            }
+            EvidenceResult::Failed => missing.push(format!(
                 "capability evidence '{}' records a failure",
                 item.capability
-            ));
-        } else if item.expires_at <= now {
-            missing.push(format!(
-                "capability evidence '{}' has expired",
+            )),
+            EvidenceResult::Unknown => missing.push(format!(
+                "capability evidence '{}' has no verdict; unknown cannot promote",
                 item.capability
-            ));
-        } else {
-            evidence.push(format!(
-                "capability evidence '{}' is passed and current",
-                item.capability
-            ));
+            )),
         }
     }
 
@@ -898,6 +930,134 @@ mod tests {
     }
 
     #[test]
+    fn unknown_capability_evidence_blocks_every_tier() {
+        // "Not measured" is the state most easily mistaken for "measured
+        // fine", so it fails closed everywhere rather than being ignored.
+        for tier in [
+            SupportTier::Community,
+            SupportTier::Reference,
+            SupportTier::Supported,
+            SupportTier::Certified,
+        ] {
+            let mut manifest = manifest();
+            manifest.tier = tier;
+            manifest.evidence[0].result = crate::EvidenceResult::Unknown;
+            let evaluation = evaluate_manifest(&report(), &manifest);
+            assert_eq!(
+                evaluation.effective_tier,
+                SupportTier::Blocked,
+                "unknown evidence must block {tier:?}"
+            );
+            assert!(
+                evaluation
+                    .missing
+                    .iter()
+                    .any(|reason| reason.contains("unknown cannot promote"))
+            );
+        }
+    }
+
+    #[test]
+    fn degraded_evidence_is_usable_below_certified_and_blocks_certified() {
+        // A machine whose codec decodes but does not encode is genuinely
+        // usable; flattening that into Failed understates it, and into Passed
+        // overstates it. Certified is the tier that promises no known
+        // degradation, so that is where it stops — every lower tier keeps its
+        // declared level.
+        for tier in [
+            SupportTier::Community,
+            SupportTier::Reference,
+            SupportTier::Supported,
+            SupportTier::Certified,
+        ] {
+            let mut manifest = manifest();
+            manifest.tier = tier;
+            manifest.evidence[0].result = crate::EvidenceResult::Degraded;
+            let evaluation = evaluate_manifest(&report(), &manifest);
+            if tier == SupportTier::Certified {
+                assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+                assert!(
+                    evaluation
+                        .missing
+                        .iter()
+                        .any(|reason| reason.contains("is degraded"))
+                );
+            } else {
+                assert_eq!(
+                    evaluation.effective_tier, tier,
+                    "degraded evidence must not block {tier:?}: {:?}",
+                    evaluation.missing
+                );
+                assert!(
+                    evaluation
+                        .evidence
+                        .iter()
+                        .any(|note| note.contains("degraded and current")
+                            && note.contains("publicly disclosed")),
+                    "a degradation must be surfaced, not silently accepted: {:?}",
+                    evaluation.evidence
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn existing_evidence_verdicts_keep_their_wire_encoding() {
+        // Adding variants must not change how the pre-existing ones
+        // canonicalize: canonical_signing_bytes re-serializes the typed model,
+        // so a renamed or reordered verdict would silently invalidate every
+        // manifest already signed.
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Passed).unwrap(),
+            "\"passed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Unknown).unwrap(),
+            "\"unknown\""
+        );
+        // The deserialize side of the same contract for the new variants.
+        assert_eq!(
+            serde_json::from_str::<crate::EvidenceResult>("\"degraded\"").unwrap(),
+            crate::EvidenceResult::Degraded
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::EvidenceResult>("\"unknown\"").unwrap(),
+            crate::EvidenceResult::Unknown
+        );
+    }
+
+    #[test]
+    fn a_signature_over_pre_existing_verdicts_still_verifies() {
+        // The end-to-end form of the guarantee above: sign a manifest that
+        // uses only the verdicts that existed before this change, and confirm
+        // the signature still validates now that the enum has grown.
+        let key = crate::ManifestSigningKey::from_seed(&[3u8; 32]);
+        let mut manifest = manifest();
+        manifest.evidence[0].result = crate::EvidenceResult::Passed;
+        manifest.signature = Some(key.sign_manifest(&manifest, "growth-test").expect("sign"));
+
+        let mut keyring = crate::TrustedKeyring::new();
+        keyring
+            .insert_hex("growth-test", &key.verifying_key_hex())
+            .expect("insert");
+        assert!(
+            matches!(
+                crate::verify_manifest_signature(&manifest, &keyring),
+                crate::ManifestSignatureStatus::Verified { ref key_id } if key_id == "growth-test"
+            ),
+            "signature over pre-existing verdicts must still verify after the enum grew"
+        );
+    }
+
+    #[test]
     fn boot_provider_is_surfaced_in_the_evaluation() {
         let evaluation = evaluate_manifest(&report(), &manifest());
         assert_eq!(evaluation.boot_provider, crate::BootProvider::PcUefiShim);
@@ -996,6 +1156,13 @@ mod tests {
                         "evidence_uri": "https://example.invalid/e",
                         "collected_at": "2026-01-01T00:00:00Z",
                         "expires_at": "2027-01-01T00:00:00Z"
+                    },
+                    {
+                        "capability": "video_encode",
+                        "result": "degraded",
+                        "evidence_uri": "https://example.invalid/e2",
+                        "collected_at": "2026-01-01T00:00:00Z",
+                        "expires_at": "2027-01-01T00:00:00Z"
                     }
                 ],
                 "expires_at": "2027-01-01T00:00:00Z",
@@ -1005,7 +1172,8 @@ mod tests {
         .expect("schema-full manifest");
         assert_eq!(full.requirements.len(), 3);
         assert_eq!(full.artifacts.len(), 1);
-        assert_eq!(full.evidence.len(), 1);
+        assert_eq!(full.evidence.len(), 2);
+        assert_eq!(full.evidence[1].result, crate::EvidenceResult::Degraded);
     }
 
     #[test]
@@ -1391,6 +1559,54 @@ mod tests {
         assert_eq!(
             schema_names, declared_names,
             "schema tier enum order must equal the SupportTier declaration order in model.rs"
+        );
+    }
+
+    /// Locks the JSON schema `evidence.result` enum to the `EvidenceResult`
+    /// declaration order in `model.rs`, so future reordering fails CI.
+    #[test]
+    fn schema_evidence_result_enum_matches_model_declaration_order() {
+        let declared = [
+            crate::EvidenceResult::Passed,
+            crate::EvidenceResult::Degraded,
+            crate::EvidenceResult::Failed,
+            crate::EvidenceResult::Unknown,
+        ];
+        // Exhaustive match: adding an `EvidenceResult` variant without listing
+        // it here fails to compile, so this guard can never silently miss one.
+        for result in declared {
+            match result {
+                crate::EvidenceResult::Passed
+                | crate::EvidenceResult::Degraded
+                | crate::EvidenceResult::Failed
+                | crate::EvidenceResult::Unknown => {}
+            }
+        }
+        let declared_names: Vec<String> = declared
+            .iter()
+            .map(|result| {
+                serde_json::to_value(result)
+                    .expect("serialize result")
+                    .as_str()
+                    .expect("result serializes to a string")
+                    .to_owned()
+            })
+            .collect();
+
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/hardware-compatibility-manifest.schema.json"
+        ))
+        .expect("schema parses");
+        let schema_names: Vec<String> = schema["$defs"]["evidence"]["properties"]["result"]["enum"]
+            .as_array()
+            .expect("schema evidence result enum is an array")
+            .iter()
+            .map(|value| value.as_str().expect("enum entry is a string").to_owned())
+            .collect();
+
+        assert_eq!(
+            schema_names, declared_names,
+            "schema evidence.result enum order must equal the EvidenceResult declaration order in model.rs"
         );
     }
 

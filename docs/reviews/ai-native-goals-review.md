@@ -254,12 +254,15 @@ BIOS/EC/TB/PD/SSD 固件 + 设备 ID + 镜像 digest；但 schema 的 selector �
 | ACPI HID/CID/UID、DT `compatible` | ✗ |
 | Apple `model_identifier`/`board_id`/`soc` | ✗ |
 | 排除（负向）选择器 | ✗ |
-| `degraded` / `unknown` 证据结果 | ✗（enum 只有 `passed`/`failed`） |
+| `degraded` / `unknown` 证据结果 | ✓ 已补（[#26](https://github.com/oratis/Andromeda/pull/26)） |
 | 撤销（CRL）对象 | ✗ |
 
-**最要命的是倒数第二行**：cert plan §7 要求每项测试产出
-`pass/degraded/unsupported/blocked/unknown`，而 schema 只接受 `passed|failed`——
-**恰恰是整套策略赖以生存的"降级/未知"状态无法进入 HCM**。
+证据判定词汇一行已由 [#26](https://github.com/oratis/Andromeda/pull/26) 补齐：
+schema 与模型现在接受 `passed|degraded|failed|unknown`，cert plan §7 的
+`blocked` 映射到 `failed`、`unsupported` 不写入 `evidence[]`。**现在最要命的是
+仍然开着的 selector 与撤销两类行**：cohort 定义所需的主板/固件/ACPI/负向选择器
+全部无法表达，CRL 对象也不存在——补齐之前，"精确圈定被认证机器并在回归时立即
+阻断该 cohort"仍然做不到。
 
 ### 4.3 安装器比文档更具破坏性
 
@@ -314,8 +317,10 @@ harness 无 `/dev/kvm` 即硬失败，而仓库**没有任何 nightly/scheduled 
 
 7. `agent-runtime-spec.md`、`andromeda-threat-model.md`（产品计划 §13 第 1、2 项，
    所有 AI 原生声称的地基）。
-8. HCM schema v3：cohort key 字段、`degraded`/`unknown` 证据结果、撤销对象、
-   排除选择器（§4.2）。manifest 级签名字段已在 `main` 上落地，不再属于此项。
+8. HCM schema v3：cohort key 字段、撤销对象、排除选择器（§4.2）。manifest 级签名
+   字段已在 `main` 上落地；`degraded`/`unknown` 证据词汇已补齐；二者不再属于此项。
+   撤销对象需注意**必须与清单同等验签**，否则是 fail-open（见
+   [整改设计对抗评审](./remediation-design-review.md) §2）。
 9. `developer-experience-spec.md`（**目前完全缺**）：开发容器 + GPU/CUDA 直通、语言
    工具链策略、Homebrew 等价物、`/usr/local` 可写性、"开发者模式"的完整定义。
 10. Gamescope ↔ KWin 集成设计（会话切换、HDR/VRR/缩放/帧限归属、GPU reset 处理）。

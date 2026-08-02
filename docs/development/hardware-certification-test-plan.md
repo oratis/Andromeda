@@ -121,6 +121,17 @@ Apple 路径的额外限制：
 每项输出 `pass`、`degraded`、`unsupported`、`blocked` 或 `unknown`，并附原始
 证据 URI。`unknown` 不能晋级。
 
+写入 HCM 时按下表映射到 `evidence.result`（详见
+[HCM 开发说明](./hardware-compatibility.md#证据判定词汇)）：
+
+| 套件判定 | HCM `evidence.result` | 说明 |
+|---|---|---|
+| `pass` | `passed` | |
+| `degraded` | `degraded` | 仅阻断 `certified`；限制必须公开披露 |
+| `blocked` | `failed` | HCM 保留 `failed` 而非改名为 `blocked`——改名会使**所有已签名清单失效** |
+| `unknown` | `unknown` | 在每个 tier 都阻断 |
+| `unsupported` | —— | 表示"本机不具备该能力"，不是测试失败。**不写入 `evidence[]`**，应记入 cohort 的已知缺口清单，否则会与"测过但不通过"混淆 |
+
 ### 7.1 启动与生命周期
 
 - 冷启动 10 次、热重启 10 次、关机 10 次；
@@ -271,7 +282,7 @@ os/scripts/test-install.sh output
 1. 校验 evidence 包签名和所有 digest；
 2. 校验 HCM selector 精确匹配；
 3. 校验 artifact pins 与被测镜像一致；
-4. 校验全部必需 capability evidence 为 `passed` 且未过期；
+4. 校验全部必需 capability evidence 的判定不阻断目标 tier（见 §7 映射表）且未过期；
 5. 由第二位审核者批准 Tier 变化；
 6. 保存撤销入口，以便发现回归时立即阻断该 cohort。
 
