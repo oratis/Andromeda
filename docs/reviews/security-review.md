@@ -34,7 +34,7 @@ HCM（`crates/andromeda-hardware/src/matcher.rs`、`model.rs`）
 
 taskd（`crates/andromeda-taskd/src/lib.rs`、`main.rs`）
 - **DNS-rebinding 防护（针对浏览器）**：只接受 `localhost/127.0.0.1/[::1]`（`lib.rs:72-98`）。
-- **阻塞操作放入 `spawn_blocking`**，请求体 2MB 上限，plan `MAX_PLAN_ACTIONS=10_000` 上限。
+- **阻塞操作放入 `spawn_blocking`**，请求体 2MB 上限，plan `MAX_PLAN_ACTIONS=10_000` 上限，单任务 capability 总量 `MAX_TASK_CAPABILITIES=10_000` 上限（按授予后总量计，创建与补授两条路径都强制）。
 - **plan 校验**：迭代式环检测不爆栈；**存储**：临时文件 + fsync + 目录 fsync + 原子 rename + 跨进程排他锁 + 乐观修订号 + 孤儿清理。
 
 OS / 安装 / 供应链

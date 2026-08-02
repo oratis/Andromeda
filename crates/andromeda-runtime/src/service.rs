@@ -31,8 +31,16 @@ pub const MAX_PLAN_ACTIONS: usize = 10_000;
 ///
 /// The limit is deliberately far above any real plan: a capability exists to
 /// scope one action's resource, so a plan at the action ceiling needs at most
-/// a comparable number of grants.
-pub const MAX_TASK_CAPABILITIES: usize = 10_000;
+/// a comparable number of grants — which is why this ceiling is *defined as*
+/// [`MAX_PLAN_ACTIONS`] rather than as an independent literal.
+///
+/// The two bounds compound: policy evaluation runs once per action, so the
+/// worst case grows with the product of per-action required-capability ids
+/// and held capabilities. The policy engine resolves required ids through a
+/// hash map of the held capabilities built once per evaluation, so that
+/// product costs O(1) lookups plus one O(held) map build per action — it no
+/// longer multiplies into per-id linear scans of the full capability list.
+pub const MAX_TASK_CAPABILITIES: usize = MAX_PLAN_ACTIONS;
 
 /// Actor recorded on events that the policy engine itself appends.
 const EVALUATION_ACTOR: &str = "policy-engine";
@@ -469,8 +477,12 @@ impl TaskService {
             .into());
         }
         // Bound the resulting total, not this request: otherwise repeated
-        // grants of an allowed size would walk past the limit.
-        let total = record.capabilities.len() + request.capabilities.len();
+        // grants of an allowed size would walk past the limit. Saturating so
+        // the security check itself has no debug-build overflow panic path.
+        let total = record
+            .capabilities
+            .len()
+            .saturating_add(request.capabilities.len());
         if total > MAX_TASK_CAPABILITIES {
             return Err(ValidationError::TooManyCapabilities {
                 capabilities: total,
@@ -1045,15 +1057,24 @@ mod tests {
     }
 
     #[test]
+    fn plan_at_the_action_limit_is_accepted() {
+        // Pins the boundary from the acceptance side: exactly
+        // MAX_PLAN_ACTIONS is legal, so the rejection test above cannot be
+        // satisfied by an off-by-one `>=` in the bound check.
+        let mut request = inspection_request(workspace_path());
+        request.plan.actions = (0..MAX_PLAN_ACTIONS).map(|_| reason_action()).collect();
+        assert_eq!(validate_plan(&request.plan, &[]), Ok(()));
+    }
+
+    #[test]
     fn oversized_capability_list_is_rejected() {
         // Actions were capped but grants were not, so a caller could attach an
         // unbounded capability list that every evaluation scans and every
         // write persists.
         let request = inspection_request(workspace_path());
         let capability = request.capabilities[0].clone();
-        let capabilities: Vec<Capability> = (0..=MAX_TASK_CAPABILITIES)
-            .map(|_| capability.clone())
-            .collect();
+        let capabilities: Vec<Capability> =
+            std::iter::repeat_n(capability, MAX_TASK_CAPABILITIES + 1).collect();
         assert_eq!(
             validate_plan(&request.plan, &capabilities),
             Err(ValidationError::TooManyCapabilities {
@@ -1061,6 +1082,18 @@ mod tests {
                 limit: MAX_TASK_CAPABILITIES,
             })
         );
+    }
+
+    #[test]
+    fn capability_list_at_the_limit_is_accepted() {
+        // Pins the boundary from the acceptance side: exactly
+        // MAX_TASK_CAPABILITIES is legal, so the rejection test above cannot
+        // be satisfied by an off-by-one `>=` in the bound check.
+        let request = inspection_request(workspace_path());
+        let capability = request.capabilities[0].clone();
+        let capabilities: Vec<Capability> =
+            std::iter::repeat_n(capability, MAX_TASK_CAPABILITIES).collect();
+        assert_eq!(validate_plan(&request.plan, &capabilities), Ok(()));
     }
 
     #[test]
@@ -1074,12 +1107,11 @@ mod tests {
         request.capabilities.clear();
         let created = service.create(request).expect("create");
 
-        // Seed the record just under the ceiling without going through the
+        // Seed the record exactly at the ceiling without going through the
         // (deliberately bounded) grant path.
         let mut seeded = service.get(created.plan.task_id).expect("reload");
-        seeded.capabilities = (0..MAX_TASK_CAPABILITIES)
-            .map(|_| capability.clone())
-            .collect();
+        seeded.capabilities =
+            std::iter::repeat_n(capability.clone(), MAX_TASK_CAPABILITIES).collect();
         let expected = seeded.revision;
         seeded.revision += 1;
         service.store.save(&seeded, expected).expect("seed");
@@ -1094,10 +1126,53 @@ mod tests {
                 },
             )
             .expect_err("one more grant must exceed the ceiling");
-        assert!(matches!(
-            error,
-            ServiceError::Validation(ValidationError::TooManyCapabilities { .. })
-        ));
+        // Exact payload: the error must report the post-grant TOTAL, not the
+        // size of the rejected request.
+        match error {
+            ServiceError::Validation(ValidationError::TooManyCapabilities {
+                capabilities,
+                limit,
+            }) => {
+                assert_eq!(capabilities, MAX_TASK_CAPABILITIES + 1);
+                assert_eq!(limit, MAX_TASK_CAPABILITIES);
+            }
+            other => panic!("expected TooManyCapabilities, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grant_landing_exactly_on_the_capability_limit_is_accepted() {
+        // Pins the grant-path boundary from the acceptance side: a grant
+        // whose post-grant total is exactly MAX_TASK_CAPABILITIES must
+        // succeed, so the rejection test above cannot be satisfied by an
+        // off-by-one `>=` in the grant gate.
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        let capability = request.capabilities[0].clone();
+        request.capabilities.clear();
+        let created = service.create(request).expect("create");
+
+        // Seed the record one below the ceiling without going through the
+        // grant path, then traverse the real grant bound check at the limit.
+        let mut seeded = service.get(created.plan.task_id).expect("reload");
+        seeded.capabilities =
+            std::iter::repeat_n(capability.clone(), MAX_TASK_CAPABILITIES - 1).collect();
+        let expected = seeded.revision;
+        seeded.revision += 1;
+        service.store.save(&seeded, expected).expect("seed");
+
+        let granted = service
+            .grant_capabilities(
+                created.plan.task_id,
+                GrantCapabilitiesRequest {
+                    capabilities: vec![capability],
+                    actor: "approver".into(),
+                    expected_revision: seeded.revision,
+                },
+            )
+            .expect("a grant landing exactly on the limit must succeed");
+        assert_eq!(granted.capabilities.len(), MAX_TASK_CAPABILITIES);
     }
 
     #[test]
