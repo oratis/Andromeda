@@ -39,6 +39,23 @@ jobs:
       # major tags; third-party actions are pinned to a full commit SHA with a
       # trailing version comment.
       - uses: actions/checkout@v4
+      # Static, needs no VM, no built image, and no Rust toolchain -- only the
+      # checkout -- so it runs FIRST, before the multi-minute cargo steps: the
+      # invariant it checks is about os-e2e.yml itself, and the whole point of
+      # keeping it in this job is ~1-minute feedback instead of learning about
+      # a budget violation from the very timeout it prevents. ci.yml also has
+      # no `paths:` filter, so a change to os-e2e.yml alone still gets
+      # checked. Deliberately NOT duplicated into os-e2e.yml.
+      - run: os/scripts/test-ci-timeout-budget.sh
+      # Lint the shell harnesses outside the expensive os-e2e build job so a
+      # script-only change gets shellcheck feedback here in seconds. Same file
+      # set as os-e2e.yml's validate step, and deliberately kept in BOTH
+      # places: os-e2e's nightly schedule run must stay self-contained, and
+      # this job must catch script breakage without waiting for an E2E runner.
+      # No apt step: the ubuntu-latest runner image ships shellcheck.
+      - run: |
+          shellcheck os/scripts/*.sh os/scripts/lib/*.sh os/installer/*.sh \
+            os/files/usr/libexec/*
       - uses: dtolnay/rust-toolchain@8641a17e25bf5b40c118d48fe0f81e8655731839 # 1.85.0
         with:
           components: clippy,rustfmt
@@ -70,13 +87,6 @@ jobs:
             os/files/usr/libexec/*
       - run: os/scripts/test-installer-platform-guard.sh
       - run: os/scripts/test-containerfile-layer-budget.sh
-      # Static, needs no VM and no built image, so it belongs with the other
-      # guards here rather than in os-e2e.yml: the invariant it checks is about
-      # os-e2e.yml itself, and learning it is violated after waiting for the
-      # E2E runner would be learning it from the very timeout it prevents.
-      # ci.yml also has no `paths:` filter, so a change to os-e2e.yml alone
-      # still gets checked. Deliberately NOT duplicated into os-e2e.yml.
-      - run: os/scripts/test-ci-timeout-budget.sh
 
   supply-chain:
     name: Container image pin freshness
