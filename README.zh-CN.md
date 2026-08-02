@@ -483,8 +483,9 @@ stateDiagram-v2
 | `GET` | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
 | `GET` | `/v1/tasks/{id}` | 读取任务 |
 | `POST` | `/v1/tasks/{id}/capabilities` | 给已存在任务补授权；每个新 capability 必须 `issued_to == plan.task_id` 且当前有效；带 `expected_revision` |
+| `POST` | `/v1/tasks/{id}/outcomes` | 记录单个 action 的执行结果与证据；追加 `outcome_recorded` 事件并使 revision +1。只允许在 `Running`/`Verifying` 记录，每 action 至多一条（append-only），且该 action 必须属于该计划 |
 | `POST` | `/v1/tasks/{id}/evaluate` | 评估、不执行；**逐 action** 解析隔离等级，结果作为 `evaluated` 事件追加并使 revision +1 |
-| `POST` | `/v1/tasks/{id}/transition` | 带 revision 的状态转换；`Ready`/`Running` 两条边受策略门控 |
+| `POST` | `/v1/tasks/{id}/transition` | 带 revision 的状态转换；`Ready`/`Running`/`Succeeded` 三条边受门控。`Ready → Running` 用请求携带的确认值（默认缺省）重跑策略，未确认的 L3 副作用被拒；`Verifying → Succeeded` 要求每个 action 都有带证据的成功 outcome |
 
 错误响应统一为 `{"error": <code>, "message": <text>}`：
 
@@ -659,20 +660,31 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
 - 权限由宿主 Capability Broker/Policy 决定，不由自然语言决定；
 - deny 规则优先于 capability 授权；
 - capability 资源范围化、独立过期、不含密钥值；
-- L2 未知内容需要强隔离决策，L3 外部副作用需要 brokered 决策和最终确认；
-- 计划状态不能跳过验证直接成功；
+- L3 外部副作用**不能进入 `running`**，除非该次转换显式携带确认；确认默认缺省，
+  并连同 actor 一起记入状态变更事件；
+- 任务**不能进入 `succeeded`**，除非计划中每个 action 都有已记录的 outcome，
+  状态为成功或跳过，且**至少携带一条 evidence**；
 - 任务写入使用原子替换、跨进程锁和乐观 revision 校验；
+- `taskd` 启动时拒绝绑定到非回环地址，除非显式 opt-out；
 - 硬件报告不含序列号，且其本身不授予支持等级。
 
 ### 当前尚不成立的部分
 
-- 当前 `taskd` 是非特权开发服务，无认证，默认只监听 `127.0.0.1`；
-- CLI 的 `--isolation` 只用于策略模拟，不是沙箱证明；
+- `taskd` **没有任何鉴权**：本地任意进程经 loopback 即可驱动全部 API 并自签发 capability。
+  `Host` 头校验只防御浏览器 DNS rebinding；
+- 隔离等级由**调用方自报，而非执行环境证明**——CLI 的 `--isolation` 只是策略模拟，
+  不是沙箱证明，且当前不存在任何沙箱；
+- L3 确认是**调用方自报，而非 broker 证明**：它证明"确认这一步发生过并被归属"，
+  不证明"确认来自真实的人"；
+- 证据由执行方自己记录，**没有独立 verifier**；
+- `andromeda hardware check` **不是信任门控**，见 [SECURITY.md](./SECURITY.md)；
 - 当前没有真实 tool executor，不应把 API 暴露到不可信网络；
 - 以下均**未实现**，任何集成都不得暗示其存在：模型调用与 planner、
-  bubblewrap/SELinux/microVM executor、credential broker、外部 connector/MCP broker、
-  签名 policy bundle、verifier 与 rollback/compensation executor、用户身份与远程认证、
+  bubblewrap/SELinux/microVM executor、credential broker、确认代理、
+  外部 connector/MCP broker、签名 policy bundle、独立 verifier 与
+  rollback/compensation executor、本地调用方认证、用户身份与远程认证、
   多租户、Task Center 图形界面。
+
 
 安全问题请阅读 [SECURITY.md](./SECURITY.md)。涉及权限边界、凭据泄露、文件系统逃逸、
 任务策略绕过、不安全更新/恢复、固件或破坏性硬件操作的未修复漏洞，

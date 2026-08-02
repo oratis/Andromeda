@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use andromeda_core::{
-    ActionId, ActionPlan, Capability, CapabilityId, IsolationLevel, PlanValidationError, TaskId,
-    TaskState,
+    ActionId, ActionOutcome, ActionPlan, Capability, CapabilityId, IsolationLevel, OutcomeStatus,
+    PlanValidationError, TaskId, TaskState,
 };
 use andromeda_policy::{DecisionEffect, EvaluationContext, PolicyDecision, PolicyEngine};
 use chrono::{DateTime, Utc};
@@ -39,6 +39,20 @@ pub struct StateTransitionRequest {
     pub to: TaskState,
     pub actor: String,
     pub expected_revision: u64,
+    /// Whether the caller has obtained the final human confirmation that an
+    /// L3 external side effect requires.
+    ///
+    /// Defaults to `false`, so the `Ready -> Running` gate rejects a plan
+    /// containing unconfirmed external side effects unless the caller states
+    /// otherwise. The value is recorded on the resulting
+    /// [`TaskEventKind::StateChanged`] event so the audit trail shows who
+    /// asserted the confirmation.
+    ///
+    /// v0 boundary: the confirmation is *asserted* by the caller, not attested
+    /// by a trusted broker. Until a host confirmation broker exists this gate
+    /// proves that a confirmation step was taken, not who took it.
+    #[serde(default)]
+    pub external_side_effect_confirmed: bool,
 }
 
 /// Additional capabilities granted to an existing task (see
@@ -49,6 +63,18 @@ pub struct GrantCapabilitiesRequest {
     pub capabilities: Vec<Capability>,
     pub actor: String,
     /// The revision the caller believes is current; the grant is rejected
+    /// with a [`StoreError::RevisionConflict`] on a mismatch.
+    pub expected_revision: u64,
+}
+
+/// One recorded execution outcome for a single action (see
+/// [`TaskService::record_outcome`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecordOutcomeRequest {
+    pub outcome: ActionOutcome,
+    pub actor: String,
+    /// The revision the caller believes is current; the record is rejected
     /// with a [`StoreError::RevisionConflict`] on a mismatch.
     pub expected_revision: u64,
 }
@@ -90,9 +116,15 @@ pub struct TaskEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskEventKind {
     Created,
+    /// A state transition was applied. `external_side_effect_confirmed`
+    /// records the confirmation the caller supplied with the transition, so
+    /// the audit trail preserves whether an L3 commit point was confirmed and
+    /// by which actor.
     StateChanged {
         from: TaskState,
         to: TaskState,
+        #[serde(default)]
+        external_side_effect_confirmed: bool,
     },
     /// Capabilities were granted to the task after creation. `capabilities`
     /// lists the newly added grants and `plan_fully_granted` records whether,
@@ -111,6 +143,14 @@ pub enum TaskEventKind {
         external_side_effect_confirmed: bool,
         decisions: BTreeMap<ActionId, PolicyDecision>,
     },
+    /// An execution outcome was recorded for one action. The outcome itself
+    /// lives in [`TaskRecord::outcomes`]; the event marks when and by whom it
+    /// was appended.
+    OutcomeRecorded {
+        action_id: ActionId,
+        status: OutcomeStatus,
+        evidence_count: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +162,12 @@ pub struct TaskRecord {
     pub capabilities: Vec<Capability>,
     #[serde(default)]
     pub events: Vec<TaskEvent>,
+    /// Execution outcomes recorded so far, at most one per action. The
+    /// `Verifying -> Succeeded` gate requires every planned action to have a
+    /// successful, evidenced outcome here, so a task cannot be declared
+    /// successful merely by asserting the state.
+    #[serde(default)]
+    pub outcomes: Vec<ActionOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -153,6 +199,12 @@ pub enum ValidationError {
     WrongCapabilitySubject(CapabilityId),
     #[error("capability {0} is not active (expired or not yet issued)")]
     InactiveCapability(CapabilityId),
+    #[error("outcome references action {0}, which is not part of the plan")]
+    UnknownOutcomeAction(ActionId),
+    #[error("action {0} already has a recorded outcome")]
+    DuplicateOutcome(ActionId),
+    #[error("outcomes may only be recorded while Running or Verifying, not in {0:?}")]
+    OutcomeNotAllowedInState(TaskState),
 }
 
 impl From<PlanValidationError> for ValidationError {
@@ -179,6 +231,34 @@ pub enum TransitionGuardError {
         blocked: usize,
         reasons: Vec<String>,
     },
+    /// The plan contains L3 external side effects and the transition did not
+    /// carry the final confirmation. This is the commit point promised by the
+    /// product security boundary; it is deliberately **not** implied.
+    #[error(
+        "transition to Running requires explicit external side-effect confirmation for action(s): {}",
+        .actions.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    ExternalConfirmationRequired { actions: Vec<ActionId> },
+    /// `Verifying -> Succeeded` was attempted while some planned action had no
+    /// recorded outcome at all.
+    #[error(
+        "transition to Succeeded requires a recorded outcome for every action; missing: {}",
+        .actions.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    MissingOutcomes { actions: Vec<ActionId> },
+    /// An action's recorded outcome is not compatible with overall success.
+    #[error(
+        "transition to Succeeded blocked by non-successful outcome(s) for action(s): {}",
+        .actions.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    UnsuccessfulOutcomes { actions: Vec<ActionId> },
+    /// An action's outcome carried no evidence, so success would be
+    /// self-asserted rather than demonstrated.
+    #[error(
+        "transition to Succeeded requires evidence on every outcome; action(s) without evidence: {}",
+        .actions.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    )]
+    MissingEvidence { actions: Vec<ActionId> },
 }
 
 #[derive(Debug, Error)]
@@ -229,6 +309,7 @@ impl TaskService {
                 actor: request.actor,
                 kind: TaskEventKind::Created,
             }],
+            outcomes: Vec::new(),
         };
         self.store.create(&record)?;
         Ok(record)
@@ -388,14 +469,86 @@ impl TaskService {
         Ok(record)
     }
 
+    /// Records one action's execution outcome under optimistic concurrency.
+    ///
+    /// Outcomes are the evidence substrate for the `Verifying -> Succeeded`
+    /// gate: an action without a recorded, evidenced, successful outcome
+    /// cannot contribute to a successful task. Outcomes are append-only —
+    /// re-recording an action is rejected rather than overwriting history —
+    /// and may only be recorded while the task is `Running` or `Verifying`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the outcome references an unknown
+    /// action, the action already has an outcome, or the task is in a state
+    /// that does not accept outcomes; a revision conflict on a stale
+    /// `expected_revision`; or a store error on persistence failure.
+    pub fn record_outcome(
+        &self,
+        task_id: TaskId,
+        request: RecordOutcomeRequest,
+    ) -> Result<TaskRecord, ServiceError> {
+        let mut record = self.store.get(task_id)?;
+        if record.revision != request.expected_revision {
+            return Err(StoreError::RevisionConflict {
+                task_id,
+                expected: request.expected_revision,
+                actual: record.revision,
+            }
+            .into());
+        }
+        if !matches!(record.state, TaskState::Running | TaskState::Verifying) {
+            return Err(ValidationError::OutcomeNotAllowedInState(record.state).into());
+        }
+        let action_id = request.outcome.action_id;
+        if !record
+            .plan
+            .actions
+            .iter()
+            .any(|action| action.id == action_id)
+        {
+            return Err(ValidationError::UnknownOutcomeAction(action_id).into());
+        }
+        if record
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.action_id == action_id)
+        {
+            return Err(ValidationError::DuplicateOutcome(action_id).into());
+        }
+
+        let status = request.outcome.status;
+        let evidence_count = request.outcome.evidence.len();
+        record.outcomes.push(request.outcome);
+        let expected = record.revision;
+        record.revision += 1;
+        record.events.push(TaskEvent {
+            id: Uuid::new_v4(),
+            occurred_at: Utc::now(),
+            actor: request.actor,
+            kind: TaskEventKind::OutcomeRecorded {
+                action_id,
+                status,
+                evidence_count,
+            },
+        });
+        self.store.save(&record, expected)?;
+        Ok(record)
+    }
+
     /// Applies one checked, optimistic-concurrency state transition.
     ///
-    /// Two edges are additionally policy-gated so that `Ready`/`Running` are
-    /// not reachable merely by asserting them:
+    /// Three edges are additionally gated so that `Ready`/`Running`/`Succeeded`
+    /// are not reachable merely by asserting them:
     ///
     /// - `AwaitingApproval -> Ready` requires the plan to be fully granted.
     /// - `Ready -> Running` re-runs policy for every action at its per-action
-    ///   minimum isolation and is rejected if any action is `Deny` or `Ask`.
+    ///   minimum isolation, using the confirmation the caller supplied on the
+    ///   request. Any `Deny` blocks the transition; an `Ask` (an unconfirmed
+    ///   L3 external side effect) blocks it with
+    ///   [`TransitionGuardError::ExternalConfirmationRequired`].
+    /// - `Verifying -> Succeeded` requires every planned action to have a
+    ///   recorded outcome that is successful and carries evidence.
     ///
     /// # Errors
     ///
@@ -418,7 +571,7 @@ impl TaskService {
         }
         let from = record.state;
         let to = from.transition(request.to)?;
-        self.guard_transition(from, to, &record)?;
+        self.guard_transition(from, to, &record, request.external_side_effect_confirmed)?;
         record.state = to;
         record.revision += 1;
         record.events.push(TaskEvent {
@@ -428,6 +581,7 @@ impl TaskService {
             kind: TaskEventKind::StateChanged {
                 from,
                 to: request.to,
+                external_side_effect_confirmed: request.external_side_effect_confirmed,
             },
         });
         self.store.save(&record, request.expected_revision)?;
@@ -436,12 +590,14 @@ impl TaskService {
 
     /// Policy gate for authorization-sensitive transitions. Structural edge
     /// validity is already checked by [`TaskState::transition`]; this adds the
-    /// authorization checks that make `Ready`/`Running` meaningful.
+    /// authorization and evidence checks that make `Ready`/`Running`/
+    /// `Succeeded` meaningful.
     fn guard_transition(
         &self,
         from: TaskState,
         to: TaskState,
         record: &TaskRecord,
+        external_side_effect_confirmed: bool,
     ) -> Result<(), TransitionGuardError> {
         match (from, to) {
             (TaskState::AwaitingApproval, TaskState::Ready) => {
@@ -450,37 +606,103 @@ impl TaskService {
                 }
             }
             (TaskState::Ready, TaskState::Running) => {
-                let now = Utc::now();
-                let reasons: Vec<String> = record
-                    .plan
-                    .actions
-                    .iter()
-                    .filter_map(|action| {
-                        let context = EvaluationContext::at(
-                            now,
-                            action.risk.minimum_isolation(),
-                            &record.capabilities,
-                            true,
-                        );
-                        let decision = self.policy.evaluate(action, &context);
-                        (decision.effect != DecisionEffect::Allow).then(|| {
-                            format!(
-                                "action {} -> {:?}: {}",
-                                action.id,
-                                decision.effect,
-                                decision.reasons.join("; ")
-                            )
-                        })
-                    })
-                    .collect();
-                if !reasons.is_empty() {
-                    return Err(TransitionGuardError::PolicyBlocked {
-                        blocked: reasons.len(),
-                        reasons,
-                    });
-                }
+                self.guard_ready_to_running(record, external_side_effect_confirmed)?;
+            }
+            (TaskState::Verifying, TaskState::Succeeded) => {
+                Self::guard_verifying_to_succeeded(record)?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Re-runs the deterministic policy engine over every action at the moment
+    /// of execution, using the confirmation the caller actually supplied.
+    ///
+    /// `Ask` and `Deny` are reported separately: an `Ask` means the action is
+    /// otherwise authorized but is an L3 external side effect awaiting its
+    /// final confirmation, which is a different operator action than fixing a
+    /// missing or expired grant.
+    fn guard_ready_to_running(
+        &self,
+        record: &TaskRecord,
+        external_side_effect_confirmed: bool,
+    ) -> Result<(), TransitionGuardError> {
+        let now = Utc::now();
+        let mut denied = Vec::new();
+        let mut awaiting_confirmation = Vec::new();
+        for action in &record.plan.actions {
+            let context = EvaluationContext::at(
+                now,
+                action.risk.minimum_isolation(),
+                &record.capabilities,
+                external_side_effect_confirmed,
+            );
+            let decision = self.policy.evaluate(action, &context);
+            match decision.effect {
+                DecisionEffect::Allow => {}
+                DecisionEffect::Ask => awaiting_confirmation.push(action.id),
+                DecisionEffect::Deny => denied.push(format!(
+                    "action {} -> {:?}: {}",
+                    action.id,
+                    decision.effect,
+                    decision.reasons.join("; ")
+                )),
+            }
+        }
+        if !denied.is_empty() {
+            return Err(TransitionGuardError::PolicyBlocked {
+                blocked: denied.len(),
+                reasons: denied,
+            });
+        }
+        if !awaiting_confirmation.is_empty() {
+            return Err(TransitionGuardError::ExternalConfirmationRequired {
+                actions: awaiting_confirmation,
+            });
+        }
+        Ok(())
+    }
+
+    /// Requires demonstrated, not asserted, success: every planned action must
+    /// have a recorded outcome, that outcome must be compatible with overall
+    /// success, and it must carry at least one piece of evidence.
+    fn guard_verifying_to_succeeded(record: &TaskRecord) -> Result<(), TransitionGuardError> {
+        let mut missing = Vec::new();
+        let mut unsuccessful = Vec::new();
+        let mut without_evidence = Vec::new();
+        for action in &record.plan.actions {
+            let Some(outcome) = record
+                .outcomes
+                .iter()
+                .find(|outcome| outcome.action_id == action.id)
+            else {
+                missing.push(action.id);
+                continue;
+            };
+            match outcome.status {
+                OutcomeStatus::Succeeded | OutcomeStatus::Skipped => {
+                    if outcome.evidence.is_empty() {
+                        without_evidence.push(action.id);
+                    }
+                }
+                OutcomeStatus::Failed | OutcomeStatus::RolledBack | OutcomeStatus::Compensated => {
+                    unsuccessful.push(action.id);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            return Err(TransitionGuardError::MissingOutcomes { actions: missing });
+        }
+        if !unsuccessful.is_empty() {
+            return Err(TransitionGuardError::UnsuccessfulOutcomes {
+                actions: unsuccessful,
+            });
+        }
+        if !without_evidence.is_empty() {
+            return Err(TransitionGuardError::MissingEvidence {
+                actions: without_evidence,
+            });
         }
         Ok(())
     }
@@ -496,8 +718,10 @@ impl TaskService {
     /// the action target (file scope, network host, system setting, or
     /// external service), and that no deny rule matches. It deliberately
     /// does not check the real executor isolation or final side-effect
-    /// confirmation; both are re-evaluated with real values at evaluation
-    /// time.
+    /// confirmation; both are re-evaluated with real values on the
+    /// `Ready -> Running` edge (see [`TaskService::guard_ready_to_running`]),
+    /// which is where an unconfirmed L3 side effect is actually blocked. This
+    /// is why `Ready` means "authorized in principle", not "cleared to run".
     fn plan_fully_granted(&self, plan: &ActionPlan, capabilities: &[Capability]) -> bool {
         let now = Utc::now();
         plan.actions.iter().all(|action| {
@@ -548,8 +772,8 @@ mod tests {
     use std::path::PathBuf;
 
     use andromeda_core::{
-        ActionKind, ActionSpec, CapabilityResource, FileAccess, Intent, RecoverySemantics,
-        RiskLevel,
+        ActionKind, ActionSpec, CapabilityResource, Evidence, FileAccess, Intent,
+        RecoverySemantics, RiskLevel,
     };
     use andromeda_policy::{DecisionEffect, PolicySet};
     use tempfile::TempDir;
@@ -642,6 +866,7 @@ mod tests {
                     to: TaskState::Running,
                     actor: "runner".into(),
                     expected_revision: 0,
+                    external_side_effect_confirmed: false,
                 },
             )
             .expect("transition");
@@ -666,6 +891,7 @@ mod tests {
                     to: TaskState::Running,
                     actor: "stale-runner".into(),
                     expected_revision: 0,
+                    external_side_effect_confirmed: false,
                 },
             )
             .expect_err("stale transition");
@@ -935,6 +1161,7 @@ mod tests {
                     to: TaskState::Ready,
                     actor: "approver".into(),
                     expected_revision: 1,
+                    external_side_effect_confirmed: false,
                 },
             )
             .expect("ready");
@@ -957,6 +1184,7 @@ mod tests {
                     to: TaskState::Ready,
                     actor: "sneaky".into(),
                     expected_revision: 0,
+                    external_side_effect_confirmed: false,
                 },
             )
             .expect_err("ungranted approval must not reach Ready");
@@ -995,6 +1223,7 @@ mod tests {
             revision: 0,
             capabilities: Vec::new(),
             events: Vec::new(),
+            outcomes: Vec::new(),
         };
         service.store.create(&record).expect("seed ready record");
 
@@ -1005,12 +1234,346 @@ mod tests {
                     to: TaskState::Running,
                     actor: "runner".into(),
                     expected_revision: 0,
+                    external_side_effect_confirmed: false,
                 },
             )
             .expect_err("denied action must block Running");
         assert!(matches!(
             error,
             ServiceError::Guard(TransitionGuardError::PolicyBlocked { .. })
+        ));
+    }
+
+    // --- L3 external side-effect confirmation gate -------------------------
+
+    #[test]
+    fn l3_plan_cannot_start_without_explicit_confirmation() {
+        // Regression guard: the Ready -> Running gate previously hardcoded
+        // `external_side_effect_confirmed = true`, which made the L3 commit
+        // point promised by the security boundary unreachable dead code.
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let created = service.create(mixed_isolation_request()).expect("create");
+        assert_eq!(created.state, TaskState::Ready);
+
+        let error = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Running,
+                    actor: "runner".into(),
+                    expected_revision: 0,
+                    external_side_effect_confirmed: false,
+                },
+            )
+            .expect_err("unconfirmed L3 side effect must not reach Running");
+        match error {
+            ServiceError::Guard(TransitionGuardError::ExternalConfirmationRequired { actions }) => {
+                assert_eq!(actions.len(), 1, "only the L3 action awaits confirmation");
+            }
+            other => panic!("expected ExternalConfirmationRequired, found {other:?}"),
+        }
+
+        // The rejected transition must not have advanced the record.
+        assert_eq!(
+            service.get(created.plan.task_id).expect("reload").revision,
+            0
+        );
+    }
+
+    #[test]
+    fn confirmed_l3_plan_starts_and_records_the_confirmation() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let created = service.create(mixed_isolation_request()).expect("create");
+
+        let running = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Running,
+                    actor: "operator".into(),
+                    expected_revision: 0,
+                    external_side_effect_confirmed: true,
+                },
+            )
+            .expect("confirmed L3 transition");
+        assert_eq!(running.state, TaskState::Running);
+        // The confirmation is preserved for audit, attributed to the actor.
+        let event = running.events.last().expect("state change event");
+        assert_eq!(event.actor, "operator");
+        match &event.kind {
+            TaskEventKind::StateChanged {
+                external_side_effect_confirmed,
+                ..
+            } => assert!(external_side_effect_confirmed),
+            other => panic!("expected StateChanged, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn l1_only_plan_does_not_need_confirmation() {
+        // The confirmation gate must fire only for real external side effects.
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let created = service
+            .create(inspection_request(workspace_path()))
+            .expect("create");
+        let running = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Running,
+                    actor: "runner".into(),
+                    expected_revision: 0,
+                    external_side_effect_confirmed: false,
+                },
+            )
+            .expect("L1 plan needs no external confirmation");
+        assert_eq!(running.state, TaskState::Running);
+    }
+
+    // --- Verifying -> Succeeded evidence gate ------------------------------
+
+    /// Drives a freshly created L1 task to `Verifying`, returning the service,
+    /// the task id, the single action id, and the current revision.
+    fn task_in_verifying(temp: &TempDir) -> (TaskService, TaskId, ActionId, u64) {
+        let service = service(temp);
+        let created = service
+            .create(inspection_request(workspace_path()))
+            .expect("create");
+        let task_id = created.plan.task_id;
+        let action_id = created.plan.actions[0].id;
+        let running = service
+            .transition(
+                task_id,
+                StateTransitionRequest {
+                    to: TaskState::Running,
+                    actor: "runner".into(),
+                    expected_revision: 0,
+                    external_side_effect_confirmed: false,
+                },
+            )
+            .expect("running");
+        let verifying = service
+            .transition(
+                task_id,
+                StateTransitionRequest {
+                    to: TaskState::Verifying,
+                    actor: "runner".into(),
+                    expected_revision: running.revision,
+                    external_side_effect_confirmed: false,
+                },
+            )
+            .expect("verifying");
+        (service, task_id, action_id, verifying.revision)
+    }
+
+    fn outcome(
+        action_id: ActionId,
+        status: OutcomeStatus,
+        evidence: Vec<Evidence>,
+    ) -> ActionOutcome {
+        let now = Utc::now();
+        ActionOutcome {
+            action_id,
+            status,
+            started_at: now,
+            finished_at: now,
+            evidence,
+            error: None,
+        }
+    }
+
+    fn evidence() -> Vec<Evidence> {
+        vec![Evidence {
+            kind: "assertion".into(),
+            summary: "directory listing matched the expected entries".into(),
+            attributes: BTreeMap::new(),
+        }]
+    }
+
+    fn succeed(
+        service: &TaskService,
+        task_id: TaskId,
+        revision: u64,
+    ) -> Result<TaskRecord, ServiceError> {
+        service.transition(
+            task_id,
+            StateTransitionRequest {
+                to: TaskState::Succeeded,
+                actor: "verifier".into(),
+                expected_revision: revision,
+                external_side_effect_confirmed: false,
+            },
+        )
+    }
+
+    #[test]
+    fn succeeded_requires_a_recorded_outcome_for_every_action() {
+        // Regression guard: Verifying -> Succeeded was previously ungated, so
+        // any caller could mark a task successful without executing anything.
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, _, revision) = task_in_verifying(&temp);
+        let error = succeed(&service, task_id, revision).expect_err("no outcomes recorded");
+        assert!(matches!(
+            error,
+            ServiceError::Guard(TransitionGuardError::MissingOutcomes { .. })
+        ));
+    }
+
+    #[test]
+    fn succeeded_requires_evidence_on_each_outcome() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, action_id, revision) = task_in_verifying(&temp);
+        let recorded = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(action_id, OutcomeStatus::Succeeded, Vec::new()),
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect("record outcome");
+        let error =
+            succeed(&service, task_id, recorded.revision).expect_err("outcome carries no evidence");
+        assert!(matches!(
+            error,
+            ServiceError::Guard(TransitionGuardError::MissingEvidence { .. })
+        ));
+    }
+
+    #[test]
+    fn succeeded_is_blocked_by_a_failed_outcome() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, action_id, revision) = task_in_verifying(&temp);
+        let recorded = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(action_id, OutcomeStatus::Failed, evidence()),
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect("record outcome");
+        let error = succeed(&service, task_id, recorded.revision).expect_err("failed outcome");
+        assert!(matches!(
+            error,
+            ServiceError::Guard(TransitionGuardError::UnsuccessfulOutcomes { .. })
+        ));
+    }
+
+    #[test]
+    fn evidenced_successful_outcome_allows_success() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, action_id, revision) = task_in_verifying(&temp);
+        let recorded = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(action_id, OutcomeStatus::Succeeded, evidence()),
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect("record outcome");
+        match &recorded.events.last().expect("outcome event").kind {
+            TaskEventKind::OutcomeRecorded {
+                status,
+                evidence_count,
+                ..
+            } => {
+                assert_eq!(*status, OutcomeStatus::Succeeded);
+                assert_eq!(*evidence_count, 1);
+            }
+            other => panic!("expected OutcomeRecorded, found {other:?}"),
+        }
+
+        let succeeded = succeed(&service, task_id, recorded.revision).expect("success");
+        assert_eq!(succeeded.state, TaskState::Succeeded);
+        assert_eq!(succeeded.outcomes.len(), 1);
+    }
+
+    // --- record_outcome validation ----------------------------------------
+
+    #[test]
+    fn outcome_for_an_unplanned_action_is_rejected() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, _, revision) = task_in_verifying(&temp);
+        let error = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(ActionId::new(), OutcomeStatus::Succeeded, evidence()),
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect_err("action is not in the plan");
+        assert!(matches!(
+            error,
+            ServiceError::Validation(ValidationError::UnknownOutcomeAction(_))
+        ));
+    }
+
+    #[test]
+    fn outcomes_are_append_only_per_action() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, action_id, revision) = task_in_verifying(&temp);
+        let recorded = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(action_id, OutcomeStatus::Failed, evidence()),
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect("first outcome");
+        // A failed outcome must not be overwritable by a later "successful"
+        // one; history is append-only.
+        let error = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(action_id, OutcomeStatus::Succeeded, evidence()),
+                    actor: "executor".into(),
+                    expected_revision: recorded.revision,
+                },
+            )
+            .expect_err("duplicate outcome");
+        assert!(matches!(
+            error,
+            ServiceError::Validation(ValidationError::DuplicateOutcome(_))
+        ));
+    }
+
+    #[test]
+    fn outcomes_cannot_be_recorded_before_execution_starts() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let created = service
+            .create(inspection_request(workspace_path()))
+            .expect("create");
+        let error = service
+            .record_outcome(
+                created.plan.task_id,
+                RecordOutcomeRequest {
+                    outcome: outcome(
+                        created.plan.actions[0].id,
+                        OutcomeStatus::Succeeded,
+                        evidence(),
+                    ),
+                    actor: "executor".into(),
+                    expected_revision: 0,
+                },
+            )
+            .expect_err("task is only Ready");
+        assert!(matches!(
+            error,
+            ServiceError::Validation(ValidationError::OutcomeNotAllowedInState(TaskState::Ready))
         ));
     }
 

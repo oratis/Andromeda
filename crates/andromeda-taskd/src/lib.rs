@@ -1,12 +1,13 @@
 //! Local HTTP API for the Andromeda task control plane.
 
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use andromeda_core::TaskId;
 use andromeda_runtime::{
-    CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, ServiceError,
-    StateTransitionRequest, StoreError, TaskService,
+    CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, RecordOutcomeRequest,
+    ServiceError, StateTransitionRequest, StoreError, TaskService,
 };
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
@@ -27,6 +28,7 @@ pub fn app(service: TaskService) -> Router {
         .route("/v1/tasks", get(list_tasks).post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task))
         .route("/v1/tasks/{task_id}/capabilities", post(grant_capabilities))
+        .route("/v1/tasks/{task_id}/outcomes", post(record_outcome))
         .route("/v1/tasks/{task_id}/evaluate", post(evaluate_task))
         .route("/v1/tasks/{task_id}/transition", post(transition_task))
         .layer(middleware::from_fn(require_loopback_host))
@@ -60,6 +62,51 @@ async fn require_loopback_host(request: Request, next: Next) -> Response {
             })),
         )
             .into_response()
+    }
+}
+
+/// A bind address was rejected because it would expose the unauthenticated
+/// API beyond the local host.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NonLoopbackBind {
+    pub address: SocketAddr,
+}
+
+impl std::fmt::Display for NonLoopbackBind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "refusing to bind {}: taskd has no authentication, so binding beyond loopback would \
+             expose the full task API to that network. The Host-header check only defends \
+             browsers against DNS rebinding and does not protect a non-loopback bind. Set \
+             ANDROMEDA_ALLOW_NON_LOOPBACK=1 only inside an already-isolated network namespace.",
+            self.address
+        )
+    }
+}
+
+impl std::error::Error for NonLoopbackBind {}
+
+/// Enforces the documented rule that `taskd` must not listen beyond loopback.
+///
+/// The `Host` middleware inspects a header, not the accepting socket, so it
+/// cannot make a public bind safe; a non-browser client simply sends
+/// `Host: localhost`. This check is the actual mechanism behind the rule, and
+/// it fails closed: a non-loopback address is rejected unless the operator
+/// explicitly opts out via `allow_override`.
+///
+/// # Errors
+///
+/// Returns [`NonLoopbackBind`] when `address` is not a loopback address and
+/// `allow_override` is false.
+pub fn ensure_loopback_bind(
+    address: SocketAddr,
+    allow_override: bool,
+) -> Result<(), NonLoopbackBind> {
+    if address.ip().is_loopback() || allow_override {
+        Ok(())
+    } else {
+        Err(NonLoopbackBind { address })
     }
 }
 
@@ -147,6 +194,19 @@ async fn grant_capabilities(
     let task_id = parse_task_id(&task_id)?;
     let record = run_blocking(&state, move |service| {
         service.grant_capabilities(task_id, request)
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(record)?))
+}
+
+async fn record_outcome(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<RecordOutcomeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    let record = run_blocking(&state, move |service| {
+        service.record_outcome(task_id, request)
     })
     .await?;
     Ok(Json(serde_json::to_value(record)?))
@@ -332,6 +392,121 @@ mod tests {
         (status, json)
     }
 
+    #[test]
+    fn non_loopback_binds_are_refused_unless_explicitly_allowed() {
+        // The Host middleware checks a header, not the accepting socket, so it
+        // cannot protect a public bind. This is the mechanism that does.
+        let public: SocketAddr = "0.0.0.0:7777".parse().expect("addr");
+        let routable: SocketAddr = "192.168.1.10:7777".parse().expect("addr");
+        let any_v6: SocketAddr = "[::]:7777".parse().expect("addr");
+        for address in [public, routable, any_v6] {
+            assert_eq!(
+                ensure_loopback_bind(address, false),
+                Err(NonLoopbackBind { address }),
+                "{address} must be refused by default"
+            );
+            assert_eq!(
+                ensure_loopback_bind(address, true),
+                Ok(()),
+                "{address} must be reachable behind an explicit opt-out"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_binds_are_accepted() {
+        for address in ["127.0.0.1:7777", "[::1]:7777", "127.0.0.5:1"] {
+            let address: SocketAddr = address.parse().expect("addr");
+            assert_eq!(ensure_loopback_bind(address, false), Ok(()));
+        }
+    }
+
+    #[tokio::test]
+    async fn succeeding_a_task_requires_recorded_evidence() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let create = inspection_request(workspace_path());
+        let task_id = create.plan.task_id;
+        let action_id = create.plan.actions[0].id;
+        send(&app, local_request("POST", "/v1/tasks", Some(&create))).await;
+
+        let mut revision = 0;
+        for state in ["running", "verifying"] {
+            let (status, body) = send(
+                &app,
+                local_request(
+                    "POST",
+                    &format!("/v1/tasks/{task_id}/transition"),
+                    Some(&json!({
+                        "to": state,
+                        "actor": "runner",
+                        "expected_revision": revision,
+                    })),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{state}: {body}");
+            revision = body["revision"].as_u64().expect("revision");
+        }
+
+        // Without an outcome the verifier cannot declare success.
+        let (status, body) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&json!({
+                    "to": "succeeded",
+                    "actor": "verifier",
+                    "expected_revision": revision,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "invalid_task");
+
+        let now = chrono::Utc::now();
+        let (status, body) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/outcomes"),
+                Some(&json!({
+                    "outcome": {
+                        "action_id": action_id,
+                        "status": "succeeded",
+                        "started_at": now,
+                        "finished_at": now,
+                        "evidence": [{"kind": "assertion", "summary": "listing matched"}],
+                        "error": null,
+                    },
+                    "actor": "executor",
+                    "expected_revision": revision,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        revision = body["revision"].as_u64().expect("revision");
+
+        let (status, body) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&json!({
+                    "to": "succeeded",
+                    "actor": "verifier",
+                    "expected_revision": revision,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["state"], "succeeded");
+    }
+
     #[tokio::test]
     async fn health_endpoint_reports_api_version() {
         let temp = TempDir::new().expect("tempdir");
@@ -477,6 +652,7 @@ mod tests {
             to: andromeda_core::TaskState::Running,
             actor: "runner".into(),
             expected_revision: 0,
+            external_side_effect_confirmed: false,
         };
         let (status, updated) = send(
             &app,
@@ -516,6 +692,7 @@ mod tests {
             to: andromeda_core::TaskState::Succeeded,
             actor: "runner".into(),
             expected_revision: 0,
+            external_side_effect_confirmed: false,
         };
         let (status, error) = send(
             &app,
@@ -628,6 +805,7 @@ mod tests {
             to: TaskState::Ready,
             actor: "sneaky".into(),
             expected_revision: 0,
+            external_side_effect_confirmed: false,
         };
         let (status, error) = send(
             &app,
@@ -663,6 +841,7 @@ mod tests {
             to: TaskState::Ready,
             actor: "approver".into(),
             expected_revision: 1,
+            external_side_effect_confirmed: false,
         };
         let (status, ready) = send(
             &app,

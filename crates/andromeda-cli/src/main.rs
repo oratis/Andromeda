@@ -3,15 +3,18 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use andromeda_core::{
-    ActionId, ActionKind, ActionPlan, ActionSpec, Capability, CapabilityId, CapabilityResource,
-    FileAccess, Intent, IsolationLevel, RecoverySemantics, RiskLevel, TaskId, TaskState,
+    ActionId, ActionKind, ActionOutcome, ActionPlan, ActionSpec, Capability, CapabilityId,
+    CapabilityResource, Evidence, FileAccess, Intent, IsolationLevel, OutcomeStatus,
+    RecoverySemantics, RiskLevel, TaskId, TaskState,
 };
 use andromeda_hardware::{
-    HcmManifest, SupportTier, diagnose_report, evaluate_manifest, probe_host,
+    DirectoryArtifactVerifier, HcmManifest, SupportTier, diagnose_report, evaluate_manifest,
+    evaluate_manifest_with_verifier, probe_host,
 };
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{
-    CreateTaskRequest, EvaluationRequest, FileTaskStore, StateTransitionRequest, TaskService,
+    CreateTaskRequest, EvaluationRequest, FileTaskStore, RecordOutcomeRequest,
+    StateTransitionRequest, TaskService,
 };
 use chrono::Utc;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -69,6 +72,23 @@ enum TaskCommand {
         #[arg(long)]
         confirm_external: bool,
     },
+    /// Record one action's execution outcome, the evidence a task needs to
+    /// reach `succeeded`.
+    RecordOutcome {
+        task_id: String,
+        #[arg(long)]
+        action_id: String,
+        #[arg(long, value_enum, default_value = "succeeded")]
+        status: CliOutcomeStatus,
+        /// Human-readable evidence summary. Repeat for multiple items; a
+        /// `Verifying -> Succeeded` transition requires at least one.
+        #[arg(long = "evidence")]
+        evidence: Vec<String>,
+        #[arg(long)]
+        expected_revision: u64,
+        #[arg(long, default_value = "local-user")]
+        actor: String,
+    },
     /// Apply a checked state transition.
     Transition {
         task_id: String,
@@ -78,7 +98,34 @@ enum TaskCommand {
         expected_revision: u64,
         #[arg(long, default_value = "local-user")]
         actor: String,
+        /// Assert that the final human confirmation for L3 external side
+        /// effects was obtained. Required for `Ready -> Running` on any plan
+        /// containing external side effects; without it the transition is
+        /// rejected rather than silently treated as confirmed.
+        #[arg(long)]
+        confirm_external: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliOutcomeStatus {
+    Succeeded,
+    Failed,
+    Skipped,
+    RolledBack,
+    Compensated,
+}
+
+impl From<CliOutcomeStatus> for OutcomeStatus {
+    fn from(value: CliOutcomeStatus) -> Self {
+        match value {
+            CliOutcomeStatus::Succeeded => Self::Succeeded,
+            CliOutcomeStatus::Failed => Self::Failed,
+            CliOutcomeStatus::Skipped => Self::Skipped,
+            CliOutcomeStatus::RolledBack => Self::RolledBack,
+            CliOutcomeStatus::Compensated => Self::Compensated,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -91,6 +138,11 @@ enum HardwareCommand {
     ///
     /// Exit codes: 0 when the effective tier is usable, 2 when it is
     /// `blocked`, 3 when it is below the tier given via `--require-tier`.
+    ///
+    /// Without `--artifact-root` the manifest's pinned `sha256` values are
+    /// taken on faith: the evaluation then proves internal consistency and
+    /// freshness only, never authenticity, and must not be used as a trust
+    /// gate.
     Check {
         manifest: PathBuf,
         /// Fail (exit code 3) unless the effective tier is at least this
@@ -98,6 +150,16 @@ enum HardwareCommand {
         /// certified.
         #[arg(long, value_enum)]
         require_tier: Option<CliSupportTier>,
+        /// Directory holding the pinned artifacts. When given, each pin is
+        /// resolved to `<root>/<name>` and its SHA-256 is recomputed and
+        /// compared; a mismatched or missing artifact blocks the tier.
+        #[arg(long)]
+        artifact_root: Option<PathBuf>,
+        /// Trusted `signing_key_id` value; repeatable. When any is given, a
+        /// pin naming no key or an untrusted key is rejected. Requires
+        /// `--artifact-root`.
+        #[arg(long = "trusted-key", requires = "artifact_root")]
+        trusted_keys: Vec<String>,
     },
 }
 
@@ -193,9 +255,29 @@ fn handle_hardware(command: HardwareCommand) -> Result<(), Box<dyn std::error::E
         HardwareCommand::Check {
             manifest,
             require_tier,
+            artifact_root,
+            trusted_keys,
         } => {
             let manifest = load_manifest(&manifest)?;
-            let evaluation = evaluate_manifest(&report, &manifest);
+            let evaluation = if let Some(root) = artifact_root {
+                let verifier = if trusted_keys.is_empty() {
+                    DirectoryArtifactVerifier::new(root)
+                } else {
+                    DirectoryArtifactVerifier::with_trusted_keys(root, trusted_keys)
+                };
+                evaluate_manifest_with_verifier(&report, &manifest, Some(&verifier))
+            } else {
+                // Without a verifier the pinned digests are unchecked, so the
+                // result describes consistency and freshness only. Say so on
+                // stderr rather than letting a script read the exit code as
+                // proof of authenticity.
+                eprintln!(
+                    "warning: --artifact-root was not given, so pinned artifact digests were not \
+                     verified; this result attests manifest consistency and freshness only and is \
+                     not a trust gate"
+                );
+                evaluate_manifest(&report, &manifest)
+            };
             print_json(&evaluation)?;
             if evaluation.effective_tier == SupportTier::Blocked {
                 std::process::exit(2);
@@ -259,11 +341,45 @@ fn handle_task(
             };
             print_json(&service.evaluate(TaskId::from_str(&task_id)?, &request)?)?;
         }
+        TaskCommand::RecordOutcome {
+            task_id,
+            action_id,
+            status,
+            evidence,
+            expected_revision,
+            actor,
+        } => {
+            let now = Utc::now();
+            let outcome = ActionOutcome {
+                action_id: ActionId::from_str(&action_id)?,
+                status: status.into(),
+                started_at: now,
+                finished_at: now,
+                evidence: evidence
+                    .into_iter()
+                    .map(|summary| Evidence {
+                        kind: "operator-assertion".into(),
+                        summary,
+                        attributes: BTreeMap::new(),
+                    })
+                    .collect(),
+                error: None,
+            };
+            print_json(&service.record_outcome(
+                TaskId::from_str(&task_id)?,
+                RecordOutcomeRequest {
+                    outcome,
+                    actor,
+                    expected_revision,
+                },
+            )?)?;
+        }
         TaskCommand::Transition {
             task_id,
             to,
             expected_revision,
             actor,
+            confirm_external,
         } => {
             print_json(&service.transition(
                 TaskId::from_str(&task_id)?,
@@ -271,6 +387,7 @@ fn handle_task(
                     to: to.into(),
                     actor,
                     expected_revision,
+                    external_side_effect_confirmed: confirm_external,
                 },
             )?)?;
         }

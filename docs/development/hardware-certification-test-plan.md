@@ -258,8 +258,9 @@ cohort 阶段标签**，不是 `SupportTier` 的取值，HCM 中不能声明它�
 ```bash
 cargo test --workspace --locked
 os/scripts/test-installer-platform-guard.sh
+os/scripts/test-containerfile-layer-budget.sh
 os/scripts/test-hardware-matrix.sh output
-os/scripts/test-daily-driver.sh output
+os/scripts/test-install.sh output
 ```
 
 当前虚拟矩阵覆盖 `modern-nvme`、`q35-sata` 与 `legacy-i440fx`。实体调度器应

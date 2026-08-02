@@ -426,6 +426,7 @@ mod tests {
             revision: 0,
             capabilities: Vec::new(),
             events: Vec::new(),
+            outcomes: Vec::new(),
         }
     }
 

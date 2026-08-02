@@ -14,6 +14,12 @@ struct Args {
     listen: SocketAddr,
     #[arg(long, env = "ANDROMEDA_STATE_DIR", default_value = ".andromeda/state")]
     state_dir: PathBuf,
+    /// Permit binding to a non-loopback address. The API has no
+    /// authentication, so this exposes every task, plan, and capability to
+    /// that network; only meaningful inside an already-isolated network
+    /// namespace.
+    #[arg(long, env = "ANDROMEDA_ALLOW_NON_LOOPBACK", default_value_t = false)]
+    allow_non_loopback: bool,
 }
 
 #[tokio::main]
@@ -24,6 +30,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     let args = Args::parse();
+    andromeda_taskd::ensure_loopback_bind(args.listen, args.allow_non_loopback)?;
+    if !args.listen.ip().is_loopback() {
+        tracing::warn!(
+            listen = %args.listen,
+            "binding beyond loopback with ANDROMEDA_ALLOW_NON_LOOPBACK; the task API is \
+             UNAUTHENTICATED and now reachable from this network"
+        );
+    }
     let store = FileTaskStore::open(&args.state_dir)?;
     let service = TaskService::new(store, PolicyEngine::default());
     let listener = tokio::net::TcpListener::bind(args.listen).await?;

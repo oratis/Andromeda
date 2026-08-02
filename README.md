@@ -509,8 +509,9 @@ Exit codes for `hardware check`:
 | `GET` | `/v1/tasks` | List tasks as `{"tasks": [...], "warnings": [...]}`; a corrupt record file is skipped and reported in `warnings` instead of failing the whole listing |
 | `GET` | `/v1/tasks/{id}` | Read one task |
 | `POST` | `/v1/tasks/{id}/capabilities` | Grant capabilities to an existing task; each new capability must have `issued_to == plan.task_id` and be currently active; takes `expected_revision` |
+| `POST` | `/v1/tasks/{id}/outcomes` | Record one action's execution outcome and evidence; appends an `outcome_recorded` event and bumps the revision. Allowed only while `Running`/`Verifying`, at most one per action (append-only), and the action must belong to the plan |
 | `POST` | `/v1/tasks/{id}/evaluate` | Evaluate without executing; isolation is resolved **per action**, and the result is appended as an `evaluated` event, bumping the revision |
-| `POST` | `/v1/tasks/{id}/transition` | Revision-checked state transition; the `Ready` and `Running` edges are policy-gated |
+| `POST` | `/v1/tasks/{id}/transition` | Revision-checked state transition; the `Ready`, `Running`, and `Succeeded` edges are gated. `Ready -> Running` re-runs policy using the confirmation the request carries (default absent) and rejects unconfirmed L3 side effects; `Verifying -> Succeeded` requires an evidenced successful outcome for every action |
 
 Errors are uniformly `{"error": <code>, "message": <text>}`:
 
@@ -706,22 +707,33 @@ Detailed rules are in
 - authority is decided by the host Capability Broker and policy, never by natural language;
 - deny rules override capability grants;
 - a capability is resource-scoped, expires independently, and contains no secret value;
-- L2 actions require a strong-isolation decision, and L3 external side effects require a
-  brokered decision plus final confirmation;
-- task state cannot reach success without passing verification;
+- an L3 external side effect **cannot reach `running`** unless the transition explicitly carries
+  confirmation; confirmation defaults to absent and is recorded on the state-change event with
+  its actor;
+- a task **cannot reach `succeeded`** unless every planned action has a recorded outcome that
+  succeeded or was skipped and carries at least one piece of evidence;
 - task writes use atomic replacement, cross-process locking, and optimistic revision checks;
+- `taskd` refuses to bind to a non-loopback address at startup unless explicitly overridden;
 - hardware reports omit serial numbers and do not themselves grant a support tier.
 
 ### What does not hold yet
 
-- `taskd` is a non-privileged development service with no authentication, bound to `127.0.0.1`
-  by default;
-- the CLI's `--isolation` is only a policy simulation, not a sandbox proof;
+- `taskd` has **no authentication of any kind**: any local process reaching loopback can drive
+  the full API and mint its own capabilities. The `Host` header check defends browsers against
+  DNS rebinding only;
+- isolation levels are **asserted by the caller, not attested** by an execution environment —
+  the CLI's `--isolation` is a policy simulation, not a sandbox proof, and no sandbox exists;
+- the L3 confirmation is **caller-asserted, not broker-attested**: it proves a commit point was
+  taken and by whom, not that a human took it;
+- evidence is recorded by the executing party; there is **no independent verifier**;
+- `andromeda hardware check` is **not a trust gate** — see [SECURITY.md](./SECURITY.md);
 - there is no real tool executor, so the API must not be exposed to untrusted networks;
 - the following are **not implemented**, and no integration may imply otherwise: model
-  invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, external
-  connector/MCP broker, signed policy bundles, verifier and rollback/compensation executors,
-  user identity and remote authentication, multi-tenancy, and the Task Center GUI.
+  invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, confirmation
+  broker, external connector/MCP broker, signed policy bundles, independent verifier and
+  rollback/compensation executors, local caller authentication, user identity and remote
+  authentication, multi-tenancy, and the Task Center GUI.
+
 
 For security issues, read [SECURITY.md](./SECURITY.md). **Do not open a public issue** for an
 unpatched vulnerability involving privilege boundaries, credential exposure, filesystem escape,
