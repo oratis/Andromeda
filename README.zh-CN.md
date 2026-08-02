@@ -340,11 +340,14 @@ RUST_LOG=info cargo run --locked --bin andromeda-taskd
 ```
 
 ```bash
-curl http://127.0.0.1:7777/healthz
+curl -H "Authorization: Bearer $(cat .andromeda/taskd-token)" http://127.0.0.1:7777/healthz
 ```
 
-默认监听 `127.0.0.1:7777`，状态目录 `.andromeda/state`。
-**当前 API 没有任何认证，禁止改为非 loopback 监听。**
+默认监听 `127.0.0.1:7777`，状态目录 `.andromeda/state`，首次启动会在
+`.andromeda/taskd-token` 生成权限为 `0600` 的 API 令牌。
+**每个请求都需要该令牌，`/healthz` 也不例外，且无法关闭。**
+该令牌只把本机的服务账号与 root 同其他本地用户区分开——仍然没有远程认证与用户身份，
+因此禁止改为非 loopback 监听。
 
 ---
 
@@ -478,11 +481,16 @@ stateDiagram-v2
 ## HTTP API 参考
 
 `andromeda-taskd` 参数：`--listen`（`ANDROMEDA_LISTEN`，默认 `127.0.0.1:7777`）、
-`--state-dir`（`ANDROMEDA_STATE_DIR`，默认 `.andromeda/state`）。
+`--state-dir`（`ANDROMEDA_STATE_DIR`，默认 `.andromeda/state`）、
+`--auth-token-file`（`ANDROMEDA_AUTH_TOKEN_FILE`，默认 `.andromeda/taskd-token`）、
+`--capability-keyring`（`ANDROMEDA_CAPABILITY_KEYRING`，默认不设置）。
+
+**以下所有路径（含 `/healthz`）都必须携带 `Authorization: Bearer <令牌>`**，否则返回
+401 `unauthorized`。详见下方"本地鉴权（强制，不可关闭）"一节。
 
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| `GET` | `/healthz` | 服务状态与 API 版本 |
+| `GET` | `/healthz` | 服务状态、API 版本，以及当前安全姿态：`authentication`（恒为 `bearer_token`）与 `capability_admission`（`unsigned_allowed` / `require_signed`） |
 | `POST` | `/v1/tasks` | 校验并创建任务 |
 | `GET` | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
 | `GET` | `/v1/tasks/{id}` | 读取任务 |
@@ -496,18 +504,68 @@ stateDiagram-v2
 | HTTP | `error` | 触发条件 |
 |---|---|---|
 | 400 | `bad_request` | task id 不是合法 UUID 等 |
+| 401 | `unauthorized` | 缺少、格式错误或不匹配的 `Authorization: Bearer` 令牌 |
 | 403 | `forbidden_host` | `Host` 不是 loopback |
 | 404 | `not_found` | 任务不存在 |
 | 409 | `already_exists` | 重复的 `task_id` |
 | 409 | `revision_conflict` | `expected_revision` 过期 |
 | 422 | `external_confirmation_required` | 计划含 L3 外部副作用，而 `Ready → Running` 未携带确认 |
 | 422 | `missing_evidence` | `Verifying → Succeeded` 时仍有 action 缺少已记录 outcome、outcome 非成功、或 outcome 不含 evidence |
+| 422 | `capability_not_admitted` | `require_signed` 模式下，capability 未签名、由未知密钥签发、格式错误或签名后被篡改 |
 | 422 | `invalid_task` | 计划校验失败、非法状态转换、或其余策略门控拒绝（计划未完全授权、action 被策略 Deny） |
 | 500 | `internal_error` | 序列化或内部故障 |
 
 请求体使用 `deny_unknown_fields`：`expiresAt` 这类 camelCase 拼写会被**拒绝**（422），
 而不是被静默丢弃。所有 `TaskService` 调用都在 `tokio::task::spawn_blocking` 中执行，
 阻塞的文件锁与 fsync 不会占用 async worker，`/healthz` 在锁竞争时依旧可响应。
+
+### 本地鉴权（强制，不可关闭）
+
+每个请求都必须携带 `Authorization: Bearer <令牌>`，`/healthz` 也不例外。缺失、格式错误或
+不匹配一律 401 `unauthorized`，响应带 `WWW-Authenticate: Bearer`，且**不区分**是三者中的哪一种
+（区分只会帮助攻击者试探）。令牌比较是常数时间的。
+
+**保证点在 serve 接线，而不是配置校验**：`andromeda_taskd::app` 按值接收 `Authenticator`；
+该类型没有 `Default`、没有公开字段、没有任何表示"无鉴权"的变体，所有构造函数都可失败并拒绝
+空或短于 32 字符的秘密。因此**匿名监听在类型上不可表示**——不存在能产生它的命令行开关、
+环境变量或单元指令。鉴权是**最外层**中间件，未认证请求在 Host 校验、请求体解析和任何
+存储锁之前就被拒绝。
+
+令牌文件（`--auth-token-file`）在首次启动时生成 32 字节 CSPRNG 随机值（十六进制），
+以 `0600` 原子写入，重启复用。若其所在目录对 group/other 有任何权限，taskd 拒绝启动。
+该保护模型——目录 `0700`、文件 `0600`——**只在 `crates/andromeda-taskd/src/auth.rs` 定义一处**，
+启动时断言，并由单元测试断言镜像内的 `andromeda-taskd.service` 与之一致。
+仓库中**没有任何文件写死 uid/gid**：服务身份就是 systemd 的 `DynamicUser`，目录只由 systemd 创建。
+
+实际效果是把调用方从"本机任意进程/用户"收敛到"**服务账号与 root**"：
+
+```bash
+curl -H "Authorization: Bearer $(sudo cat /run/andromeda-taskd/token)" \
+  http://127.0.0.1:7777/healthz
+```
+
+> [!IMPORTANT]
+> 这**不**防御已取得 root 或服务账号的攻击者，也**不是**远程认证或用户身份。
+> 令牌是单一共享秘密，无法区分不同调用方，因此尚不能作为策略评估的 `subject`。
+
+### capability 准入（签名）
+
+`Capability` 可携带受信签发方的 detached ed25519 签名。`/healthz` 报告当前模式：
+
+- `unsigned_allowed`（默认，也是镜像内的模式）：接受未签名 capability。
+  **这不是安全边界**——通过认证的调用方仍可自铸任意 capability。
+- `require_signed`：由 `--capability-keyring` 指定 JSON `{"key_id": "<64 位十六进制>"}` 启用。
+  此后创建与补授两条路径都会以 422 `capability_not_admitted` 拒绝未签名、未知密钥、
+  格式错误或签名后被篡改的 capability。空 keyring 直接启动失败，而不是伪装成已加固却拒绝一切。
+
+> [!IMPORTANT]
+> 签名本身**并不**关闭"能力自签发"：持私钥者即签发方，而本仓库尚无任何组件签发 capability
+> ——这正是镜像刻意不配置 keyring 的原因。该缺口要等到受信宿主组件持有密钥、
+> 且请求方够不到它时才闭合。见[威胁模型](docs/andromeda-threat-model.md) §4.2、§6.2。
+
+签名字段是可选的，未签名 capability 的序列化结果与旧版本逐字节一致，升级后已持久化的记录
+照常解析。验签**永远**在 `MAX_TASK_CAPABILITIES` 长度上界之后执行，因此调用方无法用无界向量
+迫使无界的 ed25519 计算。
 
 ### Host 校验（DNS rebinding 防护）
 
@@ -517,9 +575,9 @@ stateDiagram-v2
 
 > [!CAUTION]
 > Host 校验**只防御浏览器发起的 DNS rebinding，不是鉴权**，也不能保护非 loopback 绑定。
-> 任何非浏览器客户端都可以自带 `Host: localhost` 通过校验。若把 `ANDROMEDA_LISTEN` 改为
-> 非 loopback 地址，API 会向该网络**无鉴权暴露**。此外，本地任意进程/用户经 loopback
-> 亦可无鉴权访问。**禁止把 `taskd` 绑定到 loopback 之外。**
+> 任何非浏览器客户端都可以自带 `Host: localhost` 通过校验——但仍需持有本地令牌；两层检查
+> 相互独立，谁也不能替代谁。若把 `ANDROMEDA_LISTEN` 改为非 loopback 地址，整个 API 就会
+> 以一个为同机调用设计的共享秘密暴露在该网络上。**禁止把 `taskd` 绑定到 loopback 之外。**
 
 ---
 
@@ -672,12 +730,19 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
   状态为成功或跳过，且**至少携带一条 evidence**；
 - 任务写入使用原子替换、跨进程锁和乐观 revision 校验；
 - `taskd` 启动时拒绝绑定到非回环地址，除非显式 opt-out；
+- **`taskd` 的每个请求都经过鉴权**：匿名监听在类型系统中不可表示，因此没有任何开关、
+  环境变量或单元指令能产生它；
+- 配置了 keyring 时，capability 签名以 fail-closed 方式校验，且**永远**在长度上界之后执行，
+  强制验签因此不可能拿到无界输入；
 - 硬件报告不含序列号，且其本身不授予支持等级。
 
 ### 当前尚不成立的部分
 
-- `taskd` **没有任何鉴权**：本地任意进程经 loopback 即可驱动全部 API 并自签发 capability。
-  `Host` 头校验只防御浏览器 DNS rebinding；
+- **capability 仍是自签发的**：签名与验签机制已存在，但没有任何组件签发 capability，
+  因此镜像运行在 `unsigned_allowed`，通过认证的调用方依旧可以自铸授权。持私钥者即签发方；
+- `taskd` 的本地令牌**不是用户身份**：它是单一共享秘密，只把服务账号与 root 同其他本地用户
+  区分开。没有远程认证、没有多租户，该令牌也不能充当策略 `subject`。
+  `Host` 头校验只防御浏览器 DNS rebinding，不是鉴权；
 - 隔离等级由**调用方自报，而非执行环境证明**——CLI 的 `--isolation` 只是策略模拟，
   不是沙箱证明，且当前不存在任何沙箱；
 - L3 确认是**调用方自报，而非 broker 证明**：它证明"确认这一步发生过并被归属"，
@@ -690,8 +755,8 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
 - 以下均**未实现**，任何集成都不得暗示其存在：模型调用与 planner、
   bubblewrap/SELinux/microVM executor、credential broker、确认代理、
   外部 connector/MCP broker、签名 policy bundle、独立 verifier 与
-  rollback/compensation executor、本地调用方认证、用户身份与远程认证、
-  多租户、Task Center 图形界面。
+  rollback/compensation executor、**受信 capability 签发方**（验签已实现，无人签发）、
+  用户身份与远程认证、多租户、Task Center 图形界面。
 
 
 完整的信任边界分析与已知未修攻击面见

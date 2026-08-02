@@ -2,7 +2,7 @@
 
 ## Project maturity
 
-Andromeda is a v0 engineering prototype and is not a production operating system. The current task service is non-privileged, has no authentication, and binds to loopback by default. Do not expose it to untrusted networks or use it to protect production secrets.
+Andromeda is a v0 engineering prototype and is not a production operating system. The current task service is non-privileged, binds to loopback by default, and requires a local bearer token on every request — a token that separates this host's service account and root from other local users, and is not remote authentication or user identity. Do not expose it to untrusted networks or use it to protect production secrets.
 
 ## Reporting a vulnerability
 
@@ -37,4 +37,6 @@ Two boundaries are called out here because integrations get them wrong:
 - `taskd` refuses to bind to a non-loopback address at startup unless explicitly overridden. The `Host` header check defends browsers against DNS rebinding only and is not authentication.
 - Hardware reports omit serial numbers and do not themselves grant a support tier.
 
-The current runtime evaluates policies but does not execute tools. Executor, sandbox/microVM attestation, credential broker, independent verifier, confirmation broker, signed policy bundles, append-only audit, local caller authentication, and remote authentication are not implemented yet and must not be implied by integrations. Signed-manifest (HCM) verification is implemented in the hardware library but is not wired to any CLI entry point, so it provides no protection in practice yet. In particular, `taskd` has **no authentication of any kind**: any local process reaching loopback can drive the full API and mint its own capabilities.
+The current runtime evaluates policies but does not execute tools. Executor, sandbox/microVM attestation, credential broker, independent verifier, confirmation broker, signed policy bundles, append-only audit, a trusted capability issuer, user identity, and remote authentication are not implemented yet and must not be implied by integrations. Signed-manifest (HCM) verification is implemented in the hardware library but is not wired to any CLI entry point, so it provides no protection in practice yet.
+
+`taskd` now authenticates every request against a local bearer token, and an unauthenticated listener is not representable in the type system, so no configuration can turn it off. Two limits matter and must not be overstated: the token is a single shared secret protected by file permissions, so it separates the service account and root from other local users but is neither user identity nor remote authentication; and **capabilities are still self-issued** — verification, keyrings, and fail-closed refusal all exist, but no component issues capabilities, so the shipped image accepts unsigned grants and an authenticated caller can still mint its own. Whoever holds the signing key is the issuer.

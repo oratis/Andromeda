@@ -30,9 +30,11 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 
 ## API
 
+**所有**路径（含 `/healthz`）都要求 `Authorization: Bearer <令牌>`，否则 401 `unauthorized`。详见下方"本地鉴权"。
+
 | 方法 | 路径 | 作用 |
 |---|---|---|
-| GET | `/healthz` | 服务状态与 API 版本 |
+| GET | `/healthz` | 服务状态、API 版本，以及当前安全姿态：`authentication`（恒为 `bearer_token`）与 `capability_admission`（`unsigned_allowed` / `require_signed`） |
 | POST | `/v1/tasks` | 校验并创建任务（重复 task_id 返回 409 `already_exists`） |
 | GET | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
 | GET | `/v1/tasks/{id}` | 读取任务 |
@@ -43,15 +45,46 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 
 所有 `TaskService` 调用在 `tokio::task::spawn_blocking` 中执行，阻塞的文件锁和 fsync 不会占用 async worker，`/healthz` 在锁竞争时依旧可响应。
 
+### 本地鉴权（强制，不可关闭）
+
+**每个请求都必须携带本地 bearer 令牌，`/healthz` 也不例外**：
+
+```http
+Authorization: Bearer <令牌>
+```
+
+缺失、格式错误或不匹配一律返回 401 `unauthorized`，响应带 `WWW-Authenticate: Bearer`，且**不区分失败原因**（区分只会帮助攻击者试探）。令牌比较是常数时间的。
+
+**保证点在 serve 接线，不在配置校验**：`andromeda_taskd::app(service, authenticator)` 必须接收一个 `Authenticator`；该类型没有 `Default`、没有公开字段、没有任何表示"匿名/关闭"的变体，且所有构造函数都可失败并拒绝空或短于 32 字符的秘密。因此**"匿名监听"在类型上不可表示**——不存在能关掉鉴权的命令行开关、环境变量或配置项，镜像里的 systemd 单元也没有这样的指令。鉴权中间件是**最外层**，未认证请求在 Host 校验、请求体解析和任何存储锁之前就被拒绝。
+
+**令牌文件**：`--auth-token-file`（`ANDROMEDA_AUTH_TOKEN_FILE`，默认 `.andromeda/taskd-token`，镜像内为 `/run/andromeda-taskd/token`）。文件不存在时由 taskd 生成 32 字节 CSPRNG 随机值（十六进制 64 字符），以 `0600` 原子写入；已存在则复用（重启不会踢掉持有旧令牌的调用方）。
+
+**权限与身份模型只定义一处**：`crates/andromeda-taskd/src/auth.rs` 的常量定义令牌目录（`0700`）与文件（`0600`）必须具备的权限，`ensure_private` 在**启动时断言**，不满足即拒绝启动并说明原因。单元 `andromeda-taskd.service` 的 `RuntimeDirectory=`/`RuntimeDirectoryMode=`/`StateDirectoryMode=`/`UMask=` 与这些常量的一致性由单元测试断言，二者不会漂移。仓库中**没有任何文件写死 uid/gid**：服务身份就是 systemd 分配的 `DynamicUser`，目录由 systemd 按该身份创建，taskd 从不自己 `mkdir`。
+
+**这条边界能保证与不能保证的**：令牌位于只有属主可访问的目录中，因此它把调用方从"本机任意进程/用户"收敛为"**服务账号与 root**"。它**不**防御已取得 root 或服务账号的攻击者，**不**提供远程认证或用户身份，也**不**区分多个调用方（是单一共享秘密，因此还不能作为策略评估的 `subject`）。运维以 root 读取令牌驱动 API：`Authorization: Bearer $(sudo cat /run/andromeda-taskd/token)`。
+
+### capability 准入（签名）
+
+`/healthz` 返回 `capability_admission`，报告当前模式：
+
+- `unsigned_allowed`（默认，也是镜像内的模式）：接受未签名 capability。**这不是安全边界**——通过认证的调用方仍可自铸任意 capability，即安全评审 #3 记录的情形。
+- `require_signed`：由 `--capability-keyring`（`ANDROMEDA_CAPABILITY_KEYRING`）指定 JSON `{"key_id": "<64 位十六进制 ed25519 公钥>"}` 启用。此后创建与补授两条路径都要求每个 capability 携带能被 keyring 验证的 detached 签名；未签名、未知 key、格式错误、签名后被篡改一律以 422 `capability_not_admitted` 拒绝。空 keyring 直接启动失败（否则会伪装成已加固却拒绝一切）。
+
+镜像**刻意不配置** keyring：仓库中尚无任何 capability 签发组件，配置了就会拒绝现有客户端的全部请求。签名机制本身**不**关闭"能力自签发"——持私钥者即签发方，见[威胁模型](../andromeda-threat-model.md) §4.2、§6.2。
+
+`Capability.signature` 是可选字段，缺省时序列化输出与旧版本逐字节一致，旧的未签名记录照常解析为"未签名"，因此升级不会作废已持久化的任务。
+
+**强制验签的输入必须先有长度上界**：`create` 先跑 `validate_plan`（内含 `MAX_TASK_CAPABILITIES`），`grant_capabilities` 先算授予后总量（必然覆盖单次请求长度），之后才做 Ed25519 验证；`CapabilityAdmission::admit` 自身再复述一次该上界。因此不存在"对无界向量强制验签"的本地 DoS 路径。
+
 ### Host 校验（DNS rebinding 防护）
 
 `taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost` 与字面回环 IP（127.0.0.0/8、`[::1]` 及其 IPv4-mapped 形式，可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
 
-注意：Host 校验**只防御浏览器发起的 DNS rebinding**，不是鉴权，也**不能保护非 loopback 绑定**。它只检查请求携带的 `Host` 头取值，不检查实际入站接口。任何非浏览器客户端（curl／脚本／攻击者）都可以自带 `Host: localhost` 通过校验。此外，本地任意进程/用户经 loopback 亦可无鉴权访问 API。远程鉴权在下述能力实现前不存在（参见 `getting-started.md`、`README.md` 的一致说明）。
+注意：Host 校验**只防御浏览器发起的 DNS rebinding**，不是鉴权，也**不能保护非 loopback 绑定**。它只检查请求携带的 `Host` 头取值，不检查实际入站接口。任何非浏览器客户端（curl／脚本／攻击者）都可以自带 `Host: localhost` 通过校验——但仍需持有本地令牌（见上方"本地鉴权"）。两层相互独立：持令牌的调用方依旧会被 Host 校验拦下，反之亦然。**远程**鉴权与用户身份在下述能力实现前不存在（参见 `getting-started.md`、`README.md` 的一致说明）。
 
 ### 绑定地址强制（非 Host 校验）
 
-因为 Host 校验保护不了绑定面，`taskd` 在**启动时**校验监听地址：非回环地址直接拒绝启动并说明原因。只有显式设置 `ANDROMEDA_ALLOW_NON_LOOPBACK=1`（或 `--allow-non-loopback`）才能越过，并会打印醒目警告说明 API 无鉴权。这把"禁止绑定 loopback 之外"从文档约定变成机制。
+因为 Host 校验保护不了绑定面，`taskd` 在**启动时**校验监听地址：非回环地址直接拒绝启动并说明原因。只有显式设置 `ANDROMEDA_ALLOW_NON_LOOPBACK=1`（或 `--allow-non-loopback`）才能越过，并会打印醒目警告：此时整个 API 会以一个为同机调用设计的共享令牌暴露在该网络上。这把"禁止绑定 loopback 之外"从文档约定变成机制。镜像内的单元不设置该变量（有单元测试断言这一点）。
 
 生产部署另有内核级纵深防御：`andromeda-taskd.service` 设置 `IPAddressAllow=localhost` / `IPAddressDeny=any`。
 
@@ -69,7 +102,7 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - 实际执行时的隔离等级足够（`evaluate` 会用真实 isolation 重新判定）；
 - capability 在执行时刻仍未过期；
 - 外部副作用已获得最终人工确认（L3 在 `evaluate` 时仍会返回 `ask`）；
-- capability 本身来自可信签发方——v0 控制面不校验签发链，创建者可以自铸 capability。因此 `Ready ≠ 已授权执行`，执行前仍必须经过 `evaluate` 与（未来的）broker 审批。
+- capability 本身来自可信签发方。这一条现在**取决于部署模式**：`unsigned_allowed`（默认）下创建者仍可自铸 capability；`require_signed` 下每个 capability 都必须由 keyring 中的密钥签发，但由于仓库中尚无签发组件，"谁持私钥谁就是签发方"仍是未闭合的部分。因此 `Ready ≠ 已授权执行`，执行前仍必须经过 `evaluate` 与（未来的）broker 审批。
 
 ### 逐 action 评估隔离
 
@@ -91,7 +124,7 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - **`Ready → Running`**：对每个 action 以其逐 action 最低隔离重跑策略引擎，**使用请求体显式提供的 `external_side_effect_confirmed`（默认 `false`）**。任一 action 为 `Deny` 即拒绝并列出原因；任一 action 为 `Ask`（即未确认的 L3 外部副作用）则以 `external_confirmation_required` 拒绝，并列出待确认的 action。这使 `Running` 成为强制的重新授权点与 **L3 提交点**：capability 在 `Ready` 之后过期会在此被挡下，未确认的外部副作用也无法启动。确认值记入 `state_changed` 事件，与 actor 一起留痕。
 - **`Verifying → Succeeded`**：要求计划中**每个** action 都有已记录的 outcome；outcome 状态必须是 `succeeded` 或 `skipped`（`failed`/`rolled_back`/`compensated` 一律拒绝），且**每条 outcome 至少携带一条 evidence**。因此"成功"是被证明的，不是被断言的。
 
-被门控拒绝的转换一律返回 422，`error` 码按需要的操作员动作区分：未确认 L3 外部副作用（`Ready → Running` 的 `Ask`）返回 `external_confirmation_required`；`Verifying → Succeeded` 的证据门控（缺 outcome、outcome 非成功、outcome 无 evidence）返回 `missing_evidence`；其余门控与结构性拒绝（计划未完全授权、action 被策略 Deny、非法状态转换、计划校验失败）返回 `invalid_task`。
+被门控拒绝的转换一律返回 422，`error` 码按需要的操作员动作区分：未确认 L3 外部副作用（`Ready → Running` 的 `Ask`）返回 `external_confirmation_required`；`Verifying → Succeeded` 的证据门控（缺 outcome、outcome 非成功、outcome 无 evidence）返回 `missing_evidence`；capability 未通过准入（`require_signed` 下未签名／未知 key／格式错误／被篡改）返回 `capability_not_admitted`——这要求的操作员动作是"去取一份签发方签过的授权"，与"修计划"不同；其余门控与结构性拒绝（计划未完全授权、action 被策略 Deny、非法状态转换、计划校验失败）返回 `invalid_task`。未通过鉴权的请求根本到不了这一层，返回 401 `unauthorized`。
 
 #### L3 确认的 v0 边界
 
@@ -136,7 +169,8 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - **确认代理**：L3 确认目前由调用方自报（见上方 v0 边界），尚无把参数摘要绑定到用户
   确认的 host broker；
 - rollback/compensation executor；
-- 用户身份、远程认证和多租户；
+- **capability 签发方**：验签、keyring 与 fail-closed 拒绝已实现，但**没有任何组件签发 capability**。在受信宿主组件持有私钥（且调用方够不到）之前，签名只证明"某人签过"，不证明"调用方无权自签"；
+- 用户身份、远程认证和多租户：本地 bearer 令牌是**单一共享秘密**，只区分"服务账号/root"与"其他本地用户"，不能区分多个调用方，因此还不能作为策略评估的 `subject`；
 - Task Center 图形界面。
 
 在这些能力实现前，`taskd` 只能作为 loopback 开发服务。
