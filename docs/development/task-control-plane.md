@@ -111,7 +111,8 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - 每次受支持的状态变化、每次授权补授（`granted`）、每次结果记录（`outcome_recorded`）和每次策略评估都追加 event；
 - 执行结果与证据保存在 `TaskRecord.outcomes`（每个 action 至多一条，append-only：已记录的 outcome 不可被覆盖）；
 - store 打开时在独占锁内清理崩溃残留的 `.{uuid}.tmp` 孤儿文件；
-- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套。
+- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套；
+- 单个 task 累计最多 `MAX_TASK_CAPABILITIES`（10 000）个 capability——创建与补授（`grant_capabilities`）两条路径都强制，且按**授予后的总量**计而非单次请求的数量，因此重复补授无法越过上限；重复的 capability 按条目计数，而非按去重后的权限计数。
 
 ### Compaction 策略
 

@@ -121,7 +121,9 @@ quarantine/下载/外部挂载）、文件类型嗅探与污点标记，独立�
 - capability 生效窗口 `issued_at <= now < expires_at`；注意 `expires_at` 是 `Option`，
   为 `None` 时**永不过期**——叠加 §6.2 的自签发，攻击者可以铸造一个永不过期的 capability；
 - scope 必须实际覆盖 target（文件前缀 + 读写、网络 host、系统设置 key、外部服务 operation）；
-- `issued_to` 必须等于 `plan.task_id`。
+- `issued_to` 必须等于 `plan.task_id`；
+- 单任务 capability 总量上限 `MAX_TASK_CAPABILITIES = 10_000`：创建与补授两条路径都按
+  **授予后的总量**（而非单次请求的数量）强制，重复条目按条计数，反复补授无法越过上限。
 
 **已知弱点（未修，最严重）**：**capability 由调用方自带且无签名**。`CreateTaskRequest`
 同时携带 plan 与 capabilities，而 `task_id` 也由调用方自选，因此

@@ -9,7 +9,8 @@ mod store;
 
 pub use service::{
     CreateTaskRequest, EvaluationReport, EvaluationRequest, GrantCapabilitiesRequest,
-    MAX_PLAN_ACTIONS, RecordOutcomeRequest, ServiceError, StateTransitionRequest, TaskEvent,
-    TaskEventKind, TaskRecord, TaskService, TransitionGuardError, ValidationError,
+    MAX_PLAN_ACTIONS, MAX_TASK_CAPABILITIES, RecordOutcomeRequest, ServiceError,
+    StateTransitionRequest, TaskEvent, TaskEventKind, TaskRecord, TaskService,
+    TransitionGuardError, ValidationError,
 };
 pub use store::{FileTaskStore, ListWarning, StoreError, TaskListing};

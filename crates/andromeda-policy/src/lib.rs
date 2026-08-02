@@ -4,11 +4,12 @@
 //! risk floors, isolation, capability expiry, resource scope, and explicit
 //! deny rules before an executor receives an action.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use andromeda_core::{
-    ActionKind, ActionSpec, Capability, CapabilityResource, FileAccess, IsolationLevel, RiskLevel,
-    normalized_absolute,
+    ActionKind, ActionSpec, Capability, CapabilityId, CapabilityResource, FileAccess,
+    IsolationLevel, RiskLevel, normalized_absolute,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -165,15 +166,20 @@ impl PolicyEngine {
 
         self.push_denied_target_reasons(action, &mut reasons);
 
+        // Resolve required ids through a hash map built once per evaluation
+        // instead of a linear scan per required id, so the cost is
+        // O(held + required) rather than O(held × required). Insertion keeps
+        // the FIRST occurrence of a duplicated id, matching the previous
+        // `.find` (first-match) semantics exactly.
+        let mut granted: HashMap<CapabilityId, &Capability> =
+            HashMap::with_capacity(context.capabilities.len());
+        for capability in context.capabilities {
+            granted.entry(capability.id).or_insert(capability);
+        }
         let capabilities: Vec<_> = action
             .required_capabilities
             .iter()
-            .filter_map(|required| {
-                context
-                    .capabilities
-                    .iter()
-                    .find(|candidate| candidate.id == *required)
-            })
+            .filter_map(|required| granted.get(required).copied())
             .collect();
 
         if capabilities.len() == action.required_capabilities.len() {
