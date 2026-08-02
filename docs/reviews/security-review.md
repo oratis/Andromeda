@@ -22,7 +22,7 @@ Andromeda 当前是一个**纯决策（policy-as-a-decision-function）**的 v0 
 - **Deny-first + 理由累积**：任一检查失败即 `Deny`，deny 规则不被匹配的能力覆盖所推翻（`lib.rs:146-220`；测试 `deny_rules_override_a_matching_capability`）。
 - **路径穿越防护**：目标先经 `normalized_absolute` 词法归一，`/tmp/../etc/passwd` 命中 `/etc`；不可归一/相对路径直接拒绝（`lib.rs:257-273` + `capability.rs:134-154`；测试 `deny_rules_cannot_be_dodged_by_path_traversal`、`relative_file_targets_are_denied`）。
 - **Windows deny root 大小写不敏感**：`path_starts_with` 在 `#[cfg(windows)]` 下按分量 `eq_ignore_ascii_case`（`lib.rs:408-418`）。
-- **网络 deny 覆盖子域/端口/大小写且不误伤 lookalike**：`sub.evil.com`、`EVIL.com`、`evil.com.` 均命中，`notevil.com` 不命中（`lib.rs:242-250,372-396`）。
+- **网络 deny 覆盖子域/端口/大小写且不误伤 lookalike**：`sub.evil.com`、`EVIL.com`、`evil.com.` 均命中，`notevil.com` 不命中（`lib.rs:242-250,372-396`）。但覆盖有一处已知缺口：不可解析的端口后缀（如 `evil.com:99999`）会整串被当作主机名字面量，deny 规则不命中，见[威胁模型](../andromeda-threat-model.md) §6.4。
 - **`ExternalCall` 在首个 `:` 切分并拒绝 service 名含 `:` 的歧义能力**（`lib.rs:334-348`）。
 - **`MoveFile` 双端点写覆盖 + 目的地 deny 检查 + 缺失 destination 即拒绝**（`lib.rs:227-239,294-305`）。
 - **能力生效窗口**：`now >= issued_at && now < expires_at`（`capability.rs:98-104`）。

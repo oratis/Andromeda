@@ -74,8 +74,9 @@ source-sink 污点跟踪、`read(secret) + network(send)` 组合需二次数据�
 即可把任务标记成功。
 
 更根本的是：`TaskRecord` 原本**没有任何 outcome/evidence 字段**，而
-`andromeda-core` 的 `Evidence` / `ActionOutcome` / `OutcomeStatus` /
-`RecoverySemantics` 四个类型**在整个 workspace 里从未被构造过**。
+`andromeda-core` 的 `Evidence` / `ActionOutcome` / `OutcomeStatus`
+三个类型**在整个 workspace 里从未被构造过**（`RecoverySemantics` 除外：
+它在 CLI 的计划构造与多处测试夹具中一直有构造点）。
 
 因此 README 组件表里 `andromeda-core` 的"Evidence、恢复语义"在本轮修复前是
 **死类型**——这是 README 唯一的实质性过度声称。

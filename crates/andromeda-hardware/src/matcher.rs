@@ -4,7 +4,7 @@ use crate::model::id_matches;
 use crate::signing::{ManifestSignatureStatus, TrustedKeyring, verify_manifest_signature};
 use crate::{
     ArtifactPin, CapabilityRequirement, CompatibilityEvaluation, DeviceInfo, EvidenceResult,
-    HardwareReport, HardwareSelector, HcmManifest, SupportTier,
+    HardwareReport, HardwareSelector, HcmManifest, ManifestAuthenticity, SupportTier,
 };
 
 /// Verdict for a single pinned artifact, produced by an [`ArtifactVerifier`].
@@ -185,9 +185,10 @@ fn evaluate(
         evaluate_requirement(report, requirement, &mut evidence, &mut missing);
     }
     evaluate_manifest_evidence(manifest, now, &mut evidence, &mut missing);
-    if let Some(keyring) = keyring {
-        evaluate_signature(manifest, keyring, &mut evidence, &mut missing);
-    }
+    let manifest_authenticity = match keyring {
+        Some(keyring) => evaluate_signature(manifest, keyring, &mut evidence, &mut missing),
+        None => ManifestAuthenticity::NotChecked,
+    };
     evaluate_artifacts(manifest, keyring, verifier, &mut evidence, &mut missing);
 
     let requirements_met = missing.is_empty();
@@ -202,12 +203,15 @@ fn evaluate(
             SupportTier::Blocked
         },
         boot_provider: manifest.boot_provider,
+        manifest_authenticity,
         evidence,
         missing,
     }
 }
 
-/// Turns the manifest signature verdict into evidence or a fail-closed reason.
+/// Turns the manifest signature verdict into evidence or a fail-closed reason,
+/// and returns the same verdict as structured [`ManifestAuthenticity`] for the
+/// evaluation output.
 ///
 /// Only ever called when a [`TrustedKeyring`] is supplied. Any status other
 /// than `Verified` lands in `missing`, which drives `effective_tier` to
@@ -218,24 +222,41 @@ fn evaluate_signature(
     keyring: &TrustedKeyring,
     evidence: &mut Vec<String>,
     missing: &mut Vec<String>,
-) {
+) -> ManifestAuthenticity {
+    // The structured `reason` deliberately equals the `missing` string, so the
+    // two views of one verdict can never drift apart.
+    let fail = |missing: &mut Vec<String>, reason: String| {
+        missing.push(reason.clone());
+        ManifestAuthenticity::Failed { reason }
+    };
     match verify_manifest_signature(manifest, keyring) {
-        ManifestSignatureStatus::Verified { key_id } => evidence.push(format!(
-            "manifest signature verified against trusted key '{key_id}'"
-        )),
-        ManifestSignatureStatus::Unsigned => missing.push(
+        ManifestSignatureStatus::Verified { key_id } => {
+            evidence.push(format!(
+                "manifest signature verified against trusted key '{key_id}'"
+            ));
+            ManifestAuthenticity::Verified { key_id }
+        }
+        ManifestSignatureStatus::Unsigned => fail(
+            missing,
             "manifest is unsigned but a trusted keyring is configured; authenticity cannot be established"
                 .to_owned(),
         ),
-        ManifestSignatureStatus::UnknownKey { key_id } => missing.push(format!(
-            "manifest signature names key '{key_id}', which is not in the trusted keyring"
-        )),
-        ManifestSignatureStatus::Malformed { reason } => {
-            missing.push(format!("manifest signature is malformed: {reason}"));
-        }
-        ManifestSignatureStatus::Invalid { key_id, reason } => missing.push(format!(
-            "manifest signature failed ed25519 verification for key '{key_id}': {reason}"
-        )),
+        ManifestSignatureStatus::UnknownKey { key_id } => fail(
+            missing,
+            format!(
+                "manifest signature names key '{key_id}', which is not in the trusted keyring"
+            ),
+        ),
+        ManifestSignatureStatus::Malformed { reason } => fail(
+            missing,
+            format!("manifest signature is malformed: {reason}"),
+        ),
+        ManifestSignatureStatus::Invalid { key_id, reason } => fail(
+            missing,
+            format!(
+                "manifest signature failed ed25519 verification for key '{key_id}': {reason}"
+            ),
+        ),
     }
 }
 
@@ -1126,6 +1147,12 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("manifest signature verified against trusted key"))
         );
+        assert_eq!(
+            evaluation.manifest_authenticity,
+            ManifestAuthenticity::Verified {
+                key_id: "prod-key".into()
+            }
+        );
     }
 
     #[test]
@@ -1188,6 +1215,10 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("manifest is unsigned"))
         );
+        assert!(matches!(
+            &evaluation.manifest_authenticity,
+            ManifestAuthenticity::Failed { reason } if reason.contains("unsigned")
+        ));
     }
 
     #[test]
@@ -1202,6 +1233,50 @@ mod tests {
                 .missing
                 .iter()
                 .any(|reason| reason.contains("signature") || reason.contains("unsigned"))
+        );
+        assert_eq!(
+            evaluation.manifest_authenticity,
+            ManifestAuthenticity::NotChecked
+        );
+    }
+
+    /// Consumers gate on `manifest_authenticity` as a structured JSON field
+    /// instead of substring-matching evidence strings, so its serialized shape
+    /// is contract: internally tagged, `snake_case`.
+    #[test]
+    fn manifest_authenticity_serializes_as_a_structured_json_field() {
+        // Verified.
+        let mut signed = manifest();
+        let keyring = sign_with_key(&mut signed, "prod-key");
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &signed, Utc::now(), &keyring, None);
+        let json = serde_json::to_value(&evaluation).expect("serialize evaluation");
+        assert_eq!(json["manifest_authenticity"]["type"], "verified");
+        assert_eq!(json["manifest_authenticity"]["key_id"], "prod-key");
+
+        // Failed: same keyring, but the manifest is unsigned.
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest(), Utc::now(), &keyring, None);
+        let json = serde_json::to_value(&evaluation).expect("serialize evaluation");
+        assert_eq!(json["manifest_authenticity"]["type"], "failed");
+        assert!(
+            json["manifest_authenticity"]["reason"]
+                .as_str()
+                .expect("reason is a string")
+                .contains("unsigned")
+        );
+
+        // Not checked: the advisory, keyring-less path.
+        let evaluation = evaluate_manifest(&report(), &manifest());
+        let json = serde_json::to_value(&evaluation).expect("serialize evaluation");
+        assert_eq!(json["manifest_authenticity"]["type"], "not_checked");
+        assert_eq!(
+            json["manifest_authenticity"]
+                .as_object()
+                .expect("authenticity is an object")
+                .len(),
+            1,
+            "not_checked carries no payload beyond its tag"
         );
     }
 

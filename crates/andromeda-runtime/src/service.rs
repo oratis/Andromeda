@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use andromeda_core::{
     ActionId, ActionOutcome, ActionPlan, Capability, CapabilityId, IsolationLevel, OutcomeStatus,
@@ -57,9 +57,10 @@ pub struct StateTransitionRequest {
     ///
     /// Defaults to `false`, so the `Ready -> Running` gate rejects a plan
     /// containing unconfirmed external side effects unless the caller states
-    /// otherwise. The value is recorded on the resulting
-    /// [`TaskEventKind::StateChanged`] event so the audit trail shows who
-    /// asserted the confirmation.
+    /// otherwise. On that edge — the only one whose gate consumes the value —
+    /// it is recorded on the resulting [`TaskEventKind::StateChanged`] event
+    /// so the audit trail shows who asserted the confirmation; other edges
+    /// record no confirmation.
     ///
     /// v0 boundary: the confirmation is *asserted* by the caller, not attested
     /// by a trusted broker. Until a host confirmation broker exists this gate
@@ -129,15 +130,20 @@ pub struct TaskEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskEventKind {
     Created,
-    /// A state transition was applied. `external_side_effect_confirmed`
-    /// records the confirmation the caller supplied with the transition, so
-    /// the audit trail preserves whether an L3 commit point was confirmed and
-    /// by which actor.
+    /// A state transition was applied. `external_side_effect_confirmed` is
+    /// `Some` only on the `Ready -> Running` edge — the one transition whose
+    /// gate consumes the confirmation — and records the value the caller
+    /// supplied there, so the audit trail preserves whether the L3 commit
+    /// point was confirmed and by which actor. Every other edge records
+    /// `None` rather than stamping a meaningless `false`/`true` on events
+    /// where no confirmation was consulted. Old records that persisted a
+    /// plain bool deserialize as `Some(bool)`; records without the field
+    /// deserialize as `None`.
     StateChanged {
         from: TaskState,
         to: TaskState,
         #[serde(default)]
-        external_side_effect_confirmed: bool,
+        external_side_effect_confirmed: Option<bool>,
     },
     /// Capabilities were granted to the task after creation. `capabilities`
     /// lists the newly added grants and `plan_fully_granted` records whether,
@@ -220,6 +226,14 @@ pub enum ValidationError {
     DuplicateOutcome(ActionId),
     #[error("outcomes may only be recorded while Running or Verifying, not in {0:?}")]
     OutcomeNotAllowedInState(TaskState),
+    #[error(
+        "outcome for action {action} finished at {finished_at}, before it started at {started_at}"
+    )]
+    OutcomeFinishedBeforeStarted {
+        action: ActionId,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    },
 }
 
 impl From<PlanValidationError> for ValidationError {
@@ -505,9 +519,10 @@ impl TaskService {
     /// # Errors
     ///
     /// Returns a validation error when the outcome references an unknown
-    /// action, the action already has an outcome, or the task is in a state
-    /// that does not accept outcomes; a revision conflict on a stale
-    /// `expected_revision`; or a store error on persistence failure.
+    /// action, the action already has an outcome, the outcome claims to have
+    /// finished before it started, or the task is in a state that does not
+    /// accept outcomes; a revision conflict on a stale `expected_revision`;
+    /// or a store error on persistence failure.
     pub fn record_outcome(
         &self,
         task_id: TaskId,
@@ -526,20 +541,26 @@ impl TaskService {
             return Err(ValidationError::OutcomeNotAllowedInState(record.state).into());
         }
         let action_id = request.outcome.action_id;
-        if !record
-            .plan
-            .actions
-            .iter()
-            .any(|action| action.id == action_id)
-        {
+        let planned: BTreeSet<ActionId> =
+            record.plan.actions.iter().map(|action| action.id).collect();
+        if !planned.contains(&action_id) {
             return Err(ValidationError::UnknownOutcomeAction(action_id).into());
         }
-        if record
+        let recorded: BTreeSet<ActionId> = record
             .outcomes
             .iter()
-            .any(|outcome| outcome.action_id == action_id)
-        {
+            .map(|outcome| outcome.action_id)
+            .collect();
+        if recorded.contains(&action_id) {
             return Err(ValidationError::DuplicateOutcome(action_id).into());
+        }
+        if request.outcome.finished_at < request.outcome.started_at {
+            return Err(ValidationError::OutcomeFinishedBeforeStarted {
+                action: action_id,
+                started_at: request.outcome.started_at,
+                finished_at: request.outcome.finished_at,
+            }
+            .into());
         }
 
         let status = request.outcome.status;
@@ -599,6 +620,11 @@ impl TaskService {
         self.guard_transition(from, to, &record, request.external_side_effect_confirmed)?;
         record.state = to;
         record.revision += 1;
+        // Only the `Ready -> Running` gate consumes the confirmation, so only
+        // that edge stamps it on the audit event; every other edge records
+        // `None` to keep the signal precise.
+        let external_side_effect_confirmed = ((from, to) == (TaskState::Ready, TaskState::Running))
+            .then_some(request.external_side_effect_confirmed);
         record.events.push(TaskEvent {
             id: Uuid::new_v4(),
             occurred_at: Utc::now(),
@@ -606,7 +632,7 @@ impl TaskService {
             kind: TaskEventKind::StateChanged {
                 from,
                 to: request.to,
-                external_side_effect_confirmed: request.external_side_effect_confirmed,
+                external_side_effect_confirmed,
             },
         });
         self.store.save(&record, request.expected_revision)?;
@@ -693,15 +719,16 @@ impl TaskService {
     /// have a recorded outcome, that outcome must be compatible with overall
     /// success, and it must carry at least one piece of evidence.
     fn guard_verifying_to_succeeded(record: &TaskRecord) -> Result<(), TransitionGuardError> {
+        let recorded: BTreeMap<ActionId, &ActionOutcome> = record
+            .outcomes
+            .iter()
+            .map(|outcome| (outcome.action_id, outcome))
+            .collect();
         let mut missing = Vec::new();
         let mut unsuccessful = Vec::new();
         let mut without_evidence = Vec::new();
         for action in &record.plan.actions {
-            let Some(outcome) = record
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.action_id == action.id)
-            else {
+            let Some(outcome) = recorded.get(&action.id) else {
                 missing.push(action.id);
                 continue;
             };
@@ -1394,7 +1421,28 @@ mod tests {
             TaskEventKind::StateChanged {
                 external_side_effect_confirmed,
                 ..
-            } => assert!(external_side_effect_confirmed),
+            } => assert_eq!(*external_side_effect_confirmed, Some(true)),
+            other => panic!("expected StateChanged, found {other:?}"),
+        }
+
+        // Edges whose gate does not consult the confirmation record `None`
+        // instead of stamping a meaningless value on the audit trail.
+        let verifying = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Verifying,
+                    actor: "runner".into(),
+                    expected_revision: running.revision,
+                    external_side_effect_confirmed: false,
+                },
+            )
+            .expect("verifying");
+        match &verifying.events.last().expect("state change event").kind {
+            TaskEventKind::StateChanged {
+                external_side_effect_confirmed,
+                ..
+            } => assert_eq!(*external_side_effect_confirmed, None),
             other => panic!("expected StateChanged, found {other:?}"),
         }
     }
@@ -1635,6 +1683,28 @@ mod tests {
         assert!(matches!(
             error,
             ServiceError::Validation(ValidationError::DuplicateOutcome(_))
+        ));
+    }
+
+    #[test]
+    fn outcome_that_finishes_before_it_starts_is_rejected() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, action_id, revision) = task_in_verifying(&temp);
+        let mut backwards = outcome(action_id, OutcomeStatus::Succeeded, evidence());
+        backwards.finished_at = backwards.started_at - chrono::TimeDelta::seconds(1);
+        let error = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: backwards,
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect_err("finished_at must not precede started_at");
+        assert!(matches!(
+            error,
+            ServiceError::Validation(ValidationError::OutcomeFinishedBeforeStarted { .. })
         ));
     }
 
