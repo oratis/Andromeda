@@ -11,22 +11,78 @@
 - 可追溯 CI evidence；
 - 安全更新责任人与支持期限。
 
-## 信任边界：`hardware check` 不是信任门控
+## 信任边界：真实性必须显式开启
 
-matcher 校验的是清单的**内部一致性与新鲜度**（selector 是否命中、requirement 是否满足、
-证据是否过期、supported 以上是否固定了制品），**不是真实性**。具体地：
+**默认不校验真实性。** 不带 `--trusted-keys` 时，matcher 只校验清单的**内部一致性与
+新鲜度**（selector 是否命中、requirement 是否满足、证据是否过期、supported 以上是否
+固定了制品）。此时清单的 `tier` 是**自我声明**的，任何人写一份文件都能声明
+`certified`；`sha256` 也被原样采信。这条路径的结果是**咨询性的，不是信任门控**。
 
-- 不带 `--artifact-root` 时，清单里声明的 `sha256` **被原样采信**，不做任何字节比对；
-- HCM 目前**没有 manifest 级签名字段**，`ArtifactPin.signing_key_id` 只用于比对可信 key id
-  集合，不验证真实的 detached 签名（见 `crates/andromeda-hardware/src/verify.rs` 的说明）。
+### 三档校验强度
 
-因此一份自造的清单可以让 `andromeda hardware check --require-tier certified` 返回
-`certified` 与退出码 0。**在离线根密钥签名落地前（见"下一步"），不得把 `hardware check`
-的退出码用于放行安装、启用驱动或提升支持等级。**
+| 调用方式 | 校验内容 | 可否作信任门控 |
+|---|---|---|
+| `hardware check m.json` | 一致性 + 新鲜度 | **否**（会打印两条 warning） |
+| `+ --artifact-root <dir>` | 追加：每个 pin 解析为 `<dir>/<name>`、重算 SHA-256 比对；不匹配或缺失即 `blocked` | 否（清单本身仍未认证） |
+| `+ --trusted-keys <file>` | 追加：清单必须携带 detached ed25519 签名，且解析到 keyring 中的可信 key 并在**规范化字节**上验签，否则 `effective_tier` 被打到 `blocked` | **是** |
 
-带 `--artifact-root <dir>` 时，每个 pin 会被解析为 `<dir>/<name>`、重算 SHA-256 并比对，
-不匹配或缺失即把 `effective_tier` 打到 `blocked`；再加 `--trusted-key <id>`（可重复）会
-要求每个 pin 声明可信 key id。这是当前可用的最强校验，仍不等于签名验证。
+`--trusted-keys` 接受 `{"key_id": "<64 位 hex 验证公钥>"}` 的 JSON 文件。空文件被拒绝
+（空 keyring 谁都不信，会静默阻断一切，属于易误用的配置）。
+
+`--artifact-signing-key <id>`（可重复，需配合 `--artifact-root`）另外要求每个**制品 pin**
+声明可信 key id；它认证的是制品，与 `--trusted-keys` 认证清单本身是两件事。
+
+### 高等级门控 fail-closed
+
+`--require-tier supported` 或 `certified` 表达的是对真实硬件的真实承诺，因此
+**不带 `--trusted-keys` 时会被直接拒绝**（非零退出，不产生判定结果），而不是打印一条
+没人看的警告。确实需要咨询性检查时，必须显式加 `--allow-unverified` 表示知情。
+
+`blocked`/`community`/`reference` 不作真实硬件承诺（`reference` 只代表虚拟证据），
+自我声明它们不会误导任何人，因此不受此限制。
+
+### 签发：`hardware keygen` 与 `hardware sign`
+
+验签只有在能签名时才有意义。两个子命令在**离线签名机**上运行，都不探测本机硬件：
+
+```bash
+andromeda hardware keygen --seed-file root.seed --key-id andromeda-hcm-root
+```
+
+从一个 **32 字节种子**（64 位 hex 或 32 原始字节）导出验证公钥，并直接打印可粘贴进
+keyring 文件的 `keyring_entry`。签名是**由种子确定性导出**的，不用 RNG，因此离线签名器
+可复现。
+
+> **本工具不生成密钥材料。** 种子的生成、离线保管（HSM/离线根）与轮换是部署职责；
+> 一个开发者 CLI 随手造出的密钥没人能对其负责。持有种子者即可签发任意清单。
+
+```bash
+andromeda hardware sign cohort.json --seed-file root.seed \
+  --key-id andromeda-hcm-root --output cohort-signed.json
+```
+
+规范化会剥离已有 `signature`，因此对已签名清单重新签名是安全的。
+
+完整闭环：`keygen` → 把 `keyring_entry` 写入 keyring 文件 → `sign` → `check --trusted-keys`。
+
+### 已验证的行为
+
+以一份 selector 命中本机、`requirements: []`、含任意 `sha256` 与 2099 年到期证据、
+**且不带签名**的伪造清单实测：
+
+- `--require-tier certified` → **拒绝执行**，提示需要 `--trusted-keys`；
+- `--require-tier certified --allow-unverified` → `certified`（这正是咨询模式的含义，
+  也是为什么它不能当门控）；
+- `--require-tier certified --trusted-keys keys.json` → `blocked`，原因为
+  `manifest is unsigned but a trusted keyring is configured; authenticity cannot be established`。
+
+对**已签名**清单的补充实测（同一 keyring）：
+
+| 场景 | 结果 |
+|---|---|
+| 用可信种子签名，但制品 pin 声明了 keyring 之外的 key id | `blocked` —— `artifact 'vmlinuz' names signing key 'totally-real-key', which is not in the trusted keyring`（纵深防御：清单真实性与制品真实性分别成立才放行） |
+| 内部一致、正确签名、制品哈希与 key id 均匹配 | **`certified`，`missing: []`，退出码 0**（正向路径确实可通过——一个永远 `blocked` 的门控没有价值） |
+| 在签名后篡改任一字段（如改 `name`） | `blocked` —— `manifest signature failed ed25519 verification ... Verification equation was not satisfied` |
 
 ## v1 报告与诊断
 
@@ -143,21 +199,22 @@ matcher 过去只校验清单的**内部一致性与新鲜度**，从不校验**
 
 ## `hardware check` 作为预检门禁
 
-> **重要：`andromeda hardware check` 目前是咨询性的，不可作信任决策。** 现有 CLI 走
-> 默认（无 keyring）路径，只校验一致性与新鲜度，**不验签清单真实性**；伪造清单仍可得到
-> 非 `blocked` 结果与退出码 0。要让退出码具备真实性保证，评估方必须经库 API 传入
-> `TrustedKeyring`（`evaluate_manifest_verified`）。为 `hardware check` 增加
-> `--trusted-keys <path>` 开关以在 CLI 层强制验签，是自然的后续项（见“下一步”）。
+> **真实性语义见上文[“信任边界：真实性必须显式开启”](#信任边界真实性必须显式开启)
+> 及其三档校验强度表。** 概括：不带 `--trusted-keys` 的调用是咨询性的，退出码不具备
+> 真实性保证；带 `--trusted-keys` 时验签 fail-closed，退出码可作信任门控；
+> `--require-tier supported|certified` 不带 keyring 会被直接拒绝执行，除非显式
+> `--allow-unverified`。
 
 `andromeda hardware check <manifest>` 可以直接用于脚本和 CI 门禁：
 
 - 退出码 `0`：selector 匹配、requirements 满足，且（如提供
   `--require-tier`）有效 tier 达标；
+- 退出码 `1`：**拒绝执行**——`--require-tier supported|certified` 既未带
+  `--trusted-keys` 也未带 `--allow-unverified`，不产生判定结果；probe 失败、
+  manifest 无法读取或 `schema_version` 未知等输入错误同样以 `1` 退出；
 - 退出码 `2`：`effective_tier` 为 `blocked`；
 - 退出码 `3`：`effective_tier` 低于 `--require-tier <tier>` 指定的最低
-  等级；
-- 其他非零退出码：probe 失败、manifest 无法读取或 `schema_version`
-  未知。
+  等级。
 
 Tier 阶梯从低到高为 `blocked < community < reference < supported <
 certified`（`reference` 只有虚拟 L0–L2 证据，因此低于要求实体认证的
@@ -181,9 +238,9 @@ andromeda hardware check examples/hcm/developer-x86_64-pc.json --require-tier co
 
 ## 下一步
 
-1. HCM detached ed25519 验签已在**库层**落地并 fail-closed（见“HCM 清单签名与真实性”）；
-   待办：为 `andromeda hardware check` 增加 `--trusted-keys <path>` 开关，把验签下沉到
-   CLI 层并使退出码具备真实性保证；同时建立离线根密钥的生成、分发与轮换流程；
+1. HCM detached ed25519 验签已在库层与 CLI 层（`hardware check --trusted-keys`，配套
+   `hardware keygen` / `hardware sign`）落地并 fail-closed；待办：建立离线根密钥的
+   生成、分发与轮换流程，并补充签名/密钥撤销机制；
 2. 对 HEP OCI digest 与签名身份进行在线/离线验证；
 3. 从 Windows/macOS source agent 导入更完整但经用户同意的设备 inventory；
 4. 建立 QEMU、参考 PC、Intel Mac、T2、M1/M2 分离的实验室队列；

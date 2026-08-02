@@ -453,7 +453,9 @@ stateDiagram-v2
 | `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | 带乐观并发的受检状态转换 |
 | `andromeda hardware probe` | 打印隐私友好的硬件报告 |
 | `andromeda hardware diagnose` | 诊断驱动绑定与支持相关的设备就绪度 |
-| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--artifact-root <DIR>] [--trusted-key <KEY_ID>]` | 探测本机并评估一份 HCM JSON |
+| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--trusted-keys <FILE>] [--allow-unverified] [--artifact-root <DIR>] [--artifact-signing-key <KEY_ID>]` | 探测本机并评估一份 HCM JSON |
+| `andromeda hardware keygen --seed-file <FILE> [--key-id <ID>]` | 从签名种子导出验证公钥，用于发布到 keyring |
+| `andromeda hardware sign <MANIFEST> --seed-file <FILE> [--key-id <ID>] [--output <FILE>]` | 签名一份 HCM 清单，输出带 `signature` 字段的清单 |
 
 `--isolation` 的取值为 `none` / `sandbox` / `micro-vm` / `brokered`。省略时，每个 action 按
 **自身声明风险**对应的最低隔离评估；显式给出时会**覆盖全部** action，主要用于整盘探查。
@@ -467,6 +469,7 @@ stateDiagram-v2
 | 退出码 | 含义 |
 |---|---|
 | `0` | 有效等级可用 |
+| `1` | 拒绝执行：`--require-tier supported\|certified` 既未带 `--trusted-keys` 也未带 `--allow-unverified`（manifest 无法读取等输入错误同样以 `1` 退出） |
 | `2` | 有效等级为 `blocked` |
 | `3` | 有效等级低于 `--require-tier` 给定的等级 |
 
@@ -680,8 +683,9 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
 - L3 确认是**调用方自报，而非 broker 证明**：它证明"确认这一步发生过并被归属"，
   不证明"确认来自真实的人"；
 - 证据由执行方自己记录，**没有独立 verifier**；
-- `andromeda hardware check` **不是信任门控**，见
-  [docs/development/hardware-compatibility.md](./docs/development/hardware-compatibility.md)；
+- `andromeda hardware check` 只有在传入 `--trusted-keys` 时才认证清单；不传时清单的
+  `tier` 是自我声明的。用未认证的检查去门控 `--require-tier supported|certified` 会被直接拒绝，
+  见 [docs/development/hardware-compatibility.md](./docs/development/hardware-compatibility.md)；
 - 当前没有真实 tool executor，不应把 API 暴露到不可信网络；
 - 以下均**未实现**，任何集成都不得暗示其存在：模型调用与 planner、
   bubblewrap/SELinux/microVM executor、credential broker、确认代理、

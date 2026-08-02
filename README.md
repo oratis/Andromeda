@@ -477,7 +477,9 @@ Global flag: `--state-dir <PATH>` (env `ANDROMEDA_STATE_DIR`, default `.andromed
 | `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | Apply a checked state transition with optimistic concurrency |
 | `andromeda hardware probe` | Print a privacy-conscious hardware report |
 | `andromeda hardware diagnose` | Diagnose driver binding and support-relevant device readiness |
-| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--artifact-root <DIR>] [--trusted-key <KEY_ID>]` | Probe this host and evaluate one HCM JSON document |
+| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--trusted-keys <FILE>] [--allow-unverified] [--artifact-root <DIR>] [--artifact-signing-key <KEY_ID>]` | Probe this host and evaluate one HCM JSON document |
+| `andromeda hardware keygen --seed-file <FILE> [--key-id <ID>]` | Derive the public half of a signing seed, for publishing into a keyring |
+| `andromeda hardware sign <MANIFEST> --seed-file <FILE> [--key-id <ID>] [--output <FILE>]` | Sign an HCM manifest, emitting the manifest with its `signature` set |
 
 `--isolation` accepts `none`, `sandbox`, `micro-vm`, and `brokered`. When omitted, each action
 is evaluated at the minimum isolation implied by **its own declared risk**; when given, it
@@ -493,6 +495,7 @@ Exit codes for `hardware check`:
 | Exit code | Meaning |
 |---|---|
 | `0` | The effective tier is usable |
+| `1` | Refused outright: `--require-tier supported\|certified` without `--trusted-keys` and without `--allow-unverified` (input errors such as an unreadable manifest also exit `1`) |
 | `2` | The effective tier is `blocked` |
 | `3` | The effective tier is below the tier given via `--require-tier` |
 
@@ -730,7 +733,9 @@ Detailed rules are in
 - the L3 confirmation is **caller-asserted, not broker-attested**: it proves a commit point was
   taken and by whom, not that a human took it;
 - evidence is recorded by the executing party; there is **no independent verifier**;
-- `andromeda hardware check` is **not a trust gate** — see
+- `andromeda hardware check` authenticates a manifest only when `--trusted-keys` is passed;
+  without it the manifest's declared tier is self-asserted. Gating `--require-tier
+  supported|certified` on an unverified check is refused outright — see
   [docs/development/hardware-compatibility.md](./docs/development/hardware-compatibility.md);
 - there is no real tool executor, so the API must not be exposed to untrusted networks;
 - the following are **not implemented**, and no integration may imply otherwise: model
