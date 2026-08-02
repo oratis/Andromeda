@@ -42,6 +42,110 @@ if [[ -n "${PODMAN_RUNTIME:-}" ]]; then
     engine+=(--runtime "${PODMAN_RUNTIME}")
 fi
 
+# ---------------------------------------------------------------------------
+# Cross-run payload layer cache (docs/reviews/e2e-pipeline-review.md P1 #6).
+#
+# Measured on run 30694919736: the 23 payload dnf layers cost 11.1 min and the
+# installer stage another 2.9 min, and BOTH are re-spent from zero on every CI
+# run. The 73 `Using cache` lines in a build log are all intra-run (v1 -> v2,
+# v1 -> installer); a fresh runner has an empty store, so the cross-run hit rate
+# is exactly zero. Pointing --cache-from/--cache-to at a registry repository
+# lets those layers survive between runs.
+#
+# Disabled unless ANDROMEDA_PAYLOAD_CACHE_REPO is set, so a developer build and
+# the GCP path behave exactly as before with no registry involved.
+#
+#   ANDROMEDA_PAYLOAD_CACHE_REPO  base repo, e.g. ghcr.io/oratis/andromeda-payload-cache
+#                                 payload-cache-key.sh appends the ISO week
+#   ANDROMEDA_PAYLOAD_CACHE_PUSH  1 to also publish cache (needs a write token)
+#   ANDROMEDA_PAYLOAD_CACHE_TTL   how stale a reusable layer may be (default 7d)
+#
+# The caller must have logged the ENGINE's identity in to the registry already
+# (`sudo podman login` when this script runs under sudo, since rootful podman
+# reads root's auth store, not the invoking user's).
+# ---------------------------------------------------------------------------
+readonly PAYLOAD_CACHE_BASE_REPO="${ANDROMEDA_PAYLOAD_CACHE_REPO:-}"
+readonly PAYLOAD_CACHE_PUSH="${ANDROMEDA_PAYLOAD_CACHE_PUSH:-0}"
+# 168h = 7 days. Second, finer-grained half of the mandatory time bound; the
+# other half is the ISO-week repository rotation performed by
+# payload-cache-key.sh. Both exist because the payload installs ~300 packages
+# from a rolling Fedora repo: a cache with no expiry would freeze that package
+# set and silently stop security updates from reaching the image. See the long
+# rationale at the top of payload-cache-key.sh.
+readonly PAYLOAD_CACHE_TTL="${ANDROMEDA_PAYLOAD_CACHE_TTL:-168h}"
+
+cache_build_args=()
+if [[ -n "${PAYLOAD_CACHE_BASE_REPO}" ]]; then
+    cache_identity="$(
+        ANDROMEDA_PAYLOAD_CACHE_REPO="${PAYLOAD_CACHE_BASE_REPO}" \
+            "${REPOSITORY_ROOT}/os/scripts/payload-cache-key.sh" \
+            --print repo,ref,content-hash
+    )"
+    read -r payload_cache_repo payload_cache_ref payload_cache_hash \
+        <<< "${cache_identity}"
+
+    # Probe the flags rather than assuming a podman version. --cache-from /
+    # --cache-to / --cache-ttl landed together in podman 4.5 (buildah 1.30) and
+    # ubuntu-latest is well past that, but this script also runs on Fedora hosts
+    # and on whatever ubuntu-latest becomes next; an unsupported flag must
+    # degrade to an uncached build, never to a hard failure.
+    build_help="$("${engine[@]}" build --help 2>&1 || true)"
+    if grep -q -- '--cache-to' <<< "${build_help}"; then
+        # A REPOSITORY, deliberately untagged: buildah trims any tag handed to
+        # --cache-from/--cache-to and applies its own per-layer cache-key tags.
+        cache_build_args+=(--cache-from "${payload_cache_repo}")
+        if [[ "${PAYLOAD_CACHE_PUSH}" == "1" ]]; then
+            cache_build_args+=(--cache-to "${payload_cache_repo}")
+        fi
+        if grep -q -- '--cache-ttl' <<< "${build_help}"; then
+            cache_build_args+=(--cache-ttl "${PAYLOAD_CACHE_TTL}")
+        fi
+        printf 'ANDROMEDA_PAYLOAD_CACHE mode=layers repo=%s ref=%s push=%s ttl=%s\n' \
+            "${payload_cache_repo}" "${payload_cache_ref}" \
+            "${PAYLOAD_CACHE_PUSH}" "${PAYLOAD_CACHE_TTL}"
+        printf 'ANDROMEDA_PAYLOAD_CACHE_CONTENT_HASH=%s\n' "${payload_cache_hash}"
+    else
+        printf 'ANDROMEDA_PAYLOAD_CACHE mode=disabled reason=no-cache-to-flag\n'
+        printf 'WARNING: this podman has no --cache-to; building without the cross-run layer cache.\n' >&2
+    fi
+else
+    printf 'ANDROMEDA_PAYLOAD_CACHE mode=disabled reason=no-repo-configured\n'
+fi
+
+# run_cached_build <description> <podman build args...>
+#
+# A cache problem must never be able to fail the build. If the cached attempt
+# fails for ANY reason -- unreachable registry, missing package, an auth token
+# that turned out to be read-only, a buildah cache bug -- the cache is disabled
+# for the remainder of this script and the identical build is retried once,
+# cold. That costs one extra build attempt on a genuinely broken build, but the
+# retry is also a clean cache-free reproduction, which is what a human wants to
+# look at anyway. The banner is deliberately loud so a failure that only the
+# retry survived is never mistaken for a healthy run.
+run_cached_build() {
+    local description="$1"
+    shift
+
+    if (( ${#cache_build_args[@]} == 0 )); then
+        "${engine[@]}" build "$@"
+        return
+    fi
+
+    if "${engine[@]}" build "${cache_build_args[@]}" "$@"; then
+        return 0
+    fi
+
+    printf '\n' >&2
+    printf '================================================================\n' >&2
+    printf 'PAYLOAD CACHE FALLBACK: %s failed with the cross-run layer cache attached.\n' \
+        "${description}" >&2
+    printf 'Retrying the identical build with no cache. If this retry succeeds the\n' >&2
+    printf 'cache was at fault; if it fails too, the build itself is broken.\n' >&2
+    printf '================================================================\n' >&2
+    cache_build_args=()
+    "${engine[@]}" build "$@"
+}
+
 mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
 readonly OUTPUT_DIR
@@ -53,7 +157,7 @@ rm -f \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.iso.sha256" \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.manifest.json"
 
-"${engine[@]}" build \
+run_cached_build 'payload v1' \
     --tag localhost/andromeda:v1 \
     --target payload \
     --build-arg IMAGE_REVISION=1 \
@@ -64,7 +168,7 @@ rm -f \
     --file "${REPOSITORY_ROOT}/os/Containerfile" \
     "${REPOSITORY_ROOT}"
 
-"${engine[@]}" build \
+run_cached_build 'payload v2' \
     --tag localhost/andromeda:v2 \
     --target payload \
     --build-arg IMAGE_REVISION=2 \
@@ -86,7 +190,7 @@ rm -f \
     --output "${OUTPUT_DIR}/andromeda-v2.tar" \
     localhost/andromeda:v2
 
-"${engine[@]}" build \
+run_cached_build 'installer stage' \
     --tag localhost/andromeda-installer:ci \
     --target installer \
     --build-arg IMAGE_REVISION=1 \
