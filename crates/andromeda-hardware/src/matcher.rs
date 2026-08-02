@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 
 use crate::model::id_matches;
+use crate::signing::{ManifestSignatureStatus, TrustedKeyring, verify_manifest_signature};
 use crate::{
     ArtifactPin, CapabilityRequirement, CompatibilityEvaluation, DeviceInfo, EvidenceResult,
     HardwareReport, HardwareSelector, HcmManifest, SupportTier,
@@ -81,11 +82,71 @@ pub fn evaluate_manifest_with_verifier(
 /// into verification by supplying an [`ArtifactVerifier`]. When a verifier is
 /// supplied, every pinned artifact must resolve and match, or `effective_tier`
 /// is driven to `Blocked`.
+///
+/// This entry point performs **no** authenticity check on the manifest itself;
+/// for that, supply a [`TrustedKeyring`] via [`evaluate_manifest_verified`].
 #[must_use]
 pub fn evaluate_manifest_at_with_verifier(
     report: &HardwareReport,
     manifest: &HcmManifest,
     now: DateTime<Utc>,
+    verifier: Option<&dyn ArtifactVerifier>,
+) -> CompatibilityEvaluation {
+    evaluate(report, manifest, now, None, verifier)
+}
+
+/// Evaluates a manifest against a report using the current wall clock while
+/// enforcing manifest authenticity against `keyring`. See
+/// [`evaluate_manifest_at_verified`].
+#[must_use]
+pub fn evaluate_manifest_verified(
+    report: &HardwareReport,
+    manifest: &HcmManifest,
+    keyring: &TrustedKeyring,
+    verifier: Option<&dyn ArtifactVerifier>,
+) -> CompatibilityEvaluation {
+    evaluate(report, manifest, Utc::now(), Some(keyring), verifier)
+}
+
+/// Evaluates a manifest against a report at an explicit instant, **fail-closed
+/// on authenticity**: the manifest must carry a detached ed25519 signature that
+/// resolves to a trusted key in `keyring` and verifies over the manifest's
+/// canonical bytes, or `effective_tier` is driven to `Blocked`.
+///
+/// This is the gate that closes security review finding #1. With a keyring:
+///
+/// - an unsigned manifest, an unknown `key_id`, a malformed signature, or a
+///   signature that does not verify all fail closed;
+/// - additionally, every pinned [`ArtifactPin`] must name a `signing_key_id`
+///   that is itself in the keyring — the manifest signature authenticates the
+///   pinned digests, and the keyring is the single set of trusted signing
+///   identities for both the manifest and its artifacts.
+///
+/// The optional `verifier` is orthogonal: it confirms that the *local* artifact
+/// bytes hash to the (now authenticated) pinned `sha256`.
+///
+/// Passing the keyring-less entry points (e.g. [`evaluate_manifest`]) keeps the
+/// historical advisory behavior: no signature is required or checked.
+#[must_use]
+pub fn evaluate_manifest_at_verified(
+    report: &HardwareReport,
+    manifest: &HcmManifest,
+    now: DateTime<Utc>,
+    keyring: &TrustedKeyring,
+    verifier: Option<&dyn ArtifactVerifier>,
+) -> CompatibilityEvaluation {
+    evaluate(report, manifest, now, Some(keyring), verifier)
+}
+
+/// The shared evaluation core. `keyring` is `Some` only on the authenticity-
+/// enforcing entry points; when `None`, no signature is required or checked and
+/// behavior is identical to the historical matcher.
+#[must_use]
+fn evaluate(
+    report: &HardwareReport,
+    manifest: &HcmManifest,
+    now: DateTime<Utc>,
+    keyring: Option<&TrustedKeyring>,
     verifier: Option<&dyn ArtifactVerifier>,
 ) -> CompatibilityEvaluation {
     let selector_matched = !manifest.selectors.is_empty()
@@ -124,7 +185,10 @@ pub fn evaluate_manifest_at_with_verifier(
         evaluate_requirement(report, requirement, &mut evidence, &mut missing);
     }
     evaluate_manifest_evidence(manifest, now, &mut evidence, &mut missing);
-    evaluate_artifacts(manifest, verifier, &mut evidence, &mut missing);
+    if let Some(keyring) = keyring {
+        evaluate_signature(manifest, keyring, &mut evidence, &mut missing);
+    }
+    evaluate_artifacts(manifest, keyring, verifier, &mut evidence, &mut missing);
 
     let requirements_met = missing.is_empty();
     CompatibilityEvaluation {
@@ -143,18 +207,77 @@ pub fn evaluate_manifest_at_with_verifier(
     }
 }
 
-/// Verifies pinned artifacts when a verifier is configured.
+/// Turns the manifest signature verdict into evidence or a fail-closed reason.
 ///
-/// Without a verifier the declared hashes are accepted on trust; the trust
-/// boundary is explicit in the API because callers opt into verification. With
-/// a verifier, any rejected or unresolvable pin is fail-closed (recorded in
-/// `missing`, which drives `effective_tier` to `Blocked`).
+/// Only ever called when a [`TrustedKeyring`] is supplied. Any status other
+/// than `Verified` lands in `missing`, which drives `effective_tier` to
+/// `Blocked` — an unsigned, unknown-key, malformed, or invalid signature can
+/// never retain a declared tier.
+fn evaluate_signature(
+    manifest: &HcmManifest,
+    keyring: &TrustedKeyring,
+    evidence: &mut Vec<String>,
+    missing: &mut Vec<String>,
+) {
+    match verify_manifest_signature(manifest, keyring) {
+        ManifestSignatureStatus::Verified { key_id } => evidence.push(format!(
+            "manifest signature verified against trusted key '{key_id}'"
+        )),
+        ManifestSignatureStatus::Unsigned => missing.push(
+            "manifest is unsigned but a trusted keyring is configured; authenticity cannot be established"
+                .to_owned(),
+        ),
+        ManifestSignatureStatus::UnknownKey { key_id } => missing.push(format!(
+            "manifest signature names key '{key_id}', which is not in the trusted keyring"
+        )),
+        ManifestSignatureStatus::Malformed { reason } => {
+            missing.push(format!("manifest signature is malformed: {reason}"));
+        }
+        ManifestSignatureStatus::Invalid { key_id, reason } => missing.push(format!(
+            "manifest signature failed ed25519 verification for key '{key_id}': {reason}"
+        )),
+    }
+}
+
+/// Verifies pinned artifacts.
+///
+/// Two independent checks, both fail-closed into `missing`:
+///
+/// 1. **Identity** — when a `keyring` is supplied, every pin must name a
+///    `signing_key_id` that is in the keyring. The verified manifest signature
+///    authenticates the pinned digests; this ensures the manifest only vouches
+///    for artifacts under keys the operator trusts.
+/// 2. **Bytes** — when a `verifier` is supplied, each pin's local bytes must
+///    resolve and hash to its `sha256`.
+///
+/// With neither a keyring nor a verifier the declared hashes are accepted on
+/// trust (the historical advisory behavior); the trust boundary is explicit in
+/// the API because callers opt into each check.
 fn evaluate_artifacts(
     manifest: &HcmManifest,
+    keyring: Option<&TrustedKeyring>,
     verifier: Option<&dyn ArtifactVerifier>,
     evidence: &mut Vec<String>,
     missing: &mut Vec<String>,
 ) {
+    if let Some(keyring) = keyring {
+        for artifact in &manifest.artifacts {
+            match artifact.signing_key_id.as_deref() {
+                Some(key_id) if keyring.contains(key_id) => evidence.push(format!(
+                    "artifact '{}' {} names trusted signing key '{key_id}'",
+                    artifact.name, artifact.version
+                )),
+                Some(key_id) => missing.push(format!(
+                    "artifact '{}' {} names signing key '{key_id}', which is not in the trusted keyring",
+                    artifact.name, artifact.version
+                )),
+                None => missing.push(format!(
+                    "artifact '{}' {} is unsigned but a trusted keyring is configured",
+                    artifact.name, artifact.version
+                )),
+            }
+        }
+    }
     let Some(verifier) = verifier else {
         if !manifest.artifacts.is_empty() {
             evidence.push(format!(
@@ -558,6 +681,7 @@ mod tests {
             }],
             expires_at: Some(Utc::now() + Duration::days(1)),
             notes: Vec::new(),
+            signature: None,
         }
     }
 
@@ -961,6 +1085,187 @@ mod tests {
                 .missing
                 .iter()
                 .any(|reason| reason.contains("could not be resolved"))
+        );
+    }
+
+    /// A fixed seed keeps manifest-signing tests reproducible without an RNG
+    /// (which the CI environment forbids in some contexts). Any 32 bytes work.
+    const TEST_SEED: [u8; 32] = [42u8; 32];
+
+    /// Signs `manifest` under `key_id`, aligning every pin's `signing_key_id`
+    /// to the same key first (the operator key that signs the manifest also
+    /// vouches for its artifacts), and returns a keyring that trusts it.
+    fn sign_with_key(manifest: &mut HcmManifest, key_id: &str) -> crate::TrustedKeyring {
+        let key = crate::ManifestSigningKey::from_seed(&TEST_SEED);
+        for artifact in &mut manifest.artifacts {
+            artifact.signing_key_id = Some(key_id.to_owned());
+        }
+        manifest.signature = Some(key.sign_manifest(manifest, key_id).expect("sign manifest"));
+        let mut keyring = crate::TrustedKeyring::new();
+        keyring
+            .insert_hex(key_id.to_owned(), &key.verifying_key_hex())
+            .expect("insert verifying key");
+        keyring
+    }
+
+    #[test]
+    fn signed_manifest_with_trusted_key_retains_tier() {
+        let mut manifest = manifest();
+        let keyring = sign_with_key(&mut manifest, "prod-key");
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest, Utc::now(), &keyring, None);
+        assert_eq!(
+            evaluation.effective_tier,
+            SupportTier::Reference,
+            "{:?}",
+            evaluation.missing
+        );
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|item| item.contains("manifest signature verified against trusted key"))
+        );
+    }
+
+    #[test]
+    fn tampered_manifest_is_blocked() {
+        let mut manifest = manifest();
+        let keyring = sign_with_key(&mut manifest, "prod-key");
+        // Flip a field after signing: the canonical bytes no longer match.
+        manifest.name = "Forged PC".into();
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest, Utc::now(), &keyring, None);
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("failed ed25519 verification"))
+        );
+    }
+
+    #[test]
+    fn unknown_signing_key_is_blocked() {
+        let mut manifest = manifest();
+        // Signed by a key the operator's keyring has never heard of.
+        let _ = sign_with_key(&mut manifest, "attacker-key");
+        let mut keyring = crate::TrustedKeyring::new();
+        keyring
+            .insert_hex(
+                "prod-key".to_owned(),
+                &crate::ManifestSigningKey::from_seed(&[7u8; 32]).verifying_key_hex(),
+            )
+            .expect("insert verifying key");
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest, Utc::now(), &keyring, None);
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("not in the trusted keyring"))
+        );
+    }
+
+    #[test]
+    fn unsigned_manifest_with_keyring_is_blocked() {
+        // Default fixture is unsigned; a configured keyring makes that fatal.
+        let manifest = manifest();
+        let mut keyring = crate::TrustedKeyring::new();
+        keyring
+            .insert_hex(
+                "prod-key".to_owned(),
+                &crate::ManifestSigningKey::from_seed(&TEST_SEED).verifying_key_hex(),
+            )
+            .expect("insert verifying key");
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest, Utc::now(), &keyring, None);
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("manifest is unsigned"))
+        );
+    }
+
+    #[test]
+    fn no_keyring_keeps_advisory_behavior_for_unsigned_manifests() {
+        // Back-compat: without a keyring an unsigned manifest still retains its
+        // declared tier and grows no signature-related reasons.
+        let manifest = manifest();
+        let evaluation = evaluate_manifest(&report(), &manifest);
+        assert_eq!(evaluation.effective_tier, SupportTier::Reference);
+        assert!(
+            !evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("signature") || reason.contains("unsigned"))
+        );
+    }
+
+    #[test]
+    fn artifact_key_outside_keyring_blocks_even_with_valid_manifest_signature() {
+        // The manifest signature itself is valid, but a pin names a key the
+        // operator does not trust: the artifact-identity gate fails closed.
+        let mut manifest = manifest();
+        let key = crate::ManifestSigningKey::from_seed(&TEST_SEED);
+        manifest.artifacts[0].signing_key_id = Some("rogue-key".into());
+        manifest.signature = Some(key.sign_manifest(&manifest, "prod-key").expect("sign"));
+        let mut keyring = crate::TrustedKeyring::new();
+        keyring
+            .insert_hex("prod-key".to_owned(), &key.verifying_key_hex())
+            .expect("insert verifying key");
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest, Utc::now(), &keyring, None);
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|item| item.contains("manifest signature verified against trusted key")),
+            "manifest signature should still verify: {:?}",
+            evaluation.missing
+        );
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("rogue-key")
+                    && reason.contains("not in the trusted keyring"))
+        );
+    }
+
+    #[test]
+    fn keyring_and_artifact_verifier_engage_together() {
+        let mut manifest = manifest();
+        let keyring = sign_with_key(&mut manifest, "prod-key");
+        let verifier = FixedVerifier(ArtifactVerdict::Trusted);
+        let evaluation = evaluate_manifest_at_verified(
+            &report(),
+            &manifest,
+            Utc::now(),
+            &keyring,
+            Some(&verifier),
+        );
+        assert_eq!(
+            evaluation.effective_tier,
+            SupportTier::Reference,
+            "{:?}",
+            evaluation.missing
+        );
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|item| item.contains("verified against its pinned sha256"))
+        );
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|item| item.contains("manifest signature verified against trusted key"))
         );
     }
 

@@ -9,6 +9,16 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+# Declared here (not in `[workspace.dependencies]`) because only this crate
+# needs ed25519, for detached HCM manifest signature verification. Pure-Rust,
+# no default `rand_core`/key-generation feature is enabled: the matcher only
+# loads a fixed verifying key and verifies a detached signature, so no runtime
+# RNG is ever invoked. `zeroize` keeps signing-key material from lingering in
+# memory (used by the signing helper and future offline signing tooling).
+ed25519-dalek = { version = "2.2.0", default-features = false, features = [
+    "std",
+    "zeroize",
+] }
 serde.workspace = true
 serde_json.workspace = true
 # Declared here (not in `[workspace.dependencies]`) because only this crate
