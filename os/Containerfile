@@ -3,14 +3,15 @@
 # Supply-chain (security-review.md finding #4): pin base images by @sha256 so a
 # retagged or compromised upstream tag cannot silently change the build inputs.
 #
+# Full strategy, per-input status and the re-pin runbook live in
+# docs/development/supply-chain.md. `os/scripts/check-pin-freshness.sh` reports
+# on every reference below and is wired into ci.yml as a non-blocking step.
+#
 # The rust builder is pinned by digest (Docker Hub retains historical digests,
 # so the pin stays resolvable). The fedora-bootc payload base, however, is a
 # frequently-rebuilt rolling tag whose OLD digests Fedora garbage-collects from
 # quay.io within days ("manifest unknown"); pinning it by digest WITHOUT an
 # automated refresh therefore breaks the build as soon as upstream republishes.
-# Until digest-refresh automation (Renovate/Dependabot) is wired up, the payload
-# base intentionally tracks the :44 tag. Adding that automation and re-pinning
-# fedora-bootc by digest is the tracked follow-up.
 ARG RUST_VERSION=1.85
 FROM docker.io/library/rust:${RUST_VERSION}-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 AS rust-builder
 
@@ -19,9 +20,22 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates ./crates
 RUN cargo build --release --locked --bin andromeda --bin andromeda-taskd
 
-# Rolling tag on purpose: fedora-bootc:44 digests are pruned upstream within
-# days, so a digest pin here breaks the build without refresh automation (see
-# the supply-chain note above). Re-pin by digest once Renovate/Dependabot lands.
+# ---------------------------------------------------------------------------
+# TIER A / RE-PIN PENDING: this reference is intentionally NOT digest-pinned.
+#
+# quay.io prunes superseded fedora-bootc digests within days, so a digest here
+# rots into `manifest unknown` and breaks every build (Actions run
+# 30702410393 -> emergency un-pin in d27cefa). The pin is only safe once
+# something refreshes it automatically. `.github/renovate.json` is that
+# automation, but Renovate is a GitHub App: the config does nothing until a
+# human installs the App on this repository.
+#
+# DO NOT hand-edit a digest onto this line. Follow the re-pin runbook in
+# docs/development/supply-chain.md -- once Renovate is installed it raises the
+# pinning PR itself, which is also the proof that refresh automation works.
+# `os/scripts/check-pin-freshness.sh` prints the exact reference to use and
+# warns before any pin here goes unresolvable.
+# ---------------------------------------------------------------------------
 FROM quay.io/fedora/fedora-bootc:44 AS payload
 
 ARG PLATFORM_VARIANT=pc_x86_64
