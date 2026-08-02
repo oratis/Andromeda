@@ -5,9 +5,20 @@ on:
     branches:
       - main
   pull_request:
+  # Nightly pin-freshness probe. The check's pre-rot age warning is the one
+  # signal that fires from time passing, not from commits: between PRs nothing
+  # runs it, so a pin can cross its age budget in silence. Scheduled runs
+  # execute ONLY the supply-chain job -- every other job carries an
+  # `if: github.event_name != 'schedule'` guard. 03:30 is offset from
+  # os-e2e.yml's 03:00 nightly so the two do not compete for runners.
+  schedule:
+    - cron: "30 3 * * *"
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # github.event_name is part of the key (same reasoning as os-e2e.yml): the
+  # nightly schedule run and a push to main share github.ref and must not
+  # cancel each other.
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -19,6 +30,9 @@ env:
 jobs:
   quality:
     name: Format, lint, and test
+    # Scheduled runs are for the supply-chain job only; nothing here changes
+    # overnight without a commit.
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       # Pinning policy (matches os-e2e.yml): first-party actions/* are pinned to
@@ -44,27 +58,41 @@ jobs:
 
   supply-chain:
     name: Container image pin freshness
+    # This job also runs on the nightly schedule (see `on:` above) so the age
+    # warning fires between PRs, not only when someone happens to push.
     runs-on: ubuntu-latest
+    # The script bounds every registry lookup (--max-time + bounded retries),
+    # so 10 minutes is generous; anything longer is a hang worth surfacing.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      # Deliberately NON-BLOCKING (continue-on-error). This step reports on the
-      # world outside the repository: whether upstream registries still serve the
-      # digests os/Containerfile pins, and how old that content is. Both answers
-      # can change without anybody touching this repo, so gating merges on it
-      # would turn an unrelated PR red for a problem its author did not cause and
-      # cannot fix in that PR -- which is precisely how the fedora-bootc pin rot
-      # (Actions run 30702410393) was experienced. The signal belongs on a
-      # dashboard, not in the merge gate. Run it with --strict to make it a gate.
+      # Deliberately ADVISORY, but NOT continue-on-error. This step reports on
+      # the world outside the repository: whether upstream registries still
+      # serve the digests os/Containerfile pins, and how old that content is.
+      # Both answers can change without anybody touching this repo, so gating
+      # merges on them would turn an unrelated PR red for a problem its author
+      # did not cause and cannot fix in that PR -- which is precisely how the
+      # fedora-bootc pin rot (Actions run 30702410393) was experienced. The
+      # script's default mode therefore already exits 0 on findings; the signal
+      # belongs on a dashboard, not in the merge gate.
+      #
+      # continue-on-error added nothing to that and was removed on purpose:
+      # since advisory mode never fails on findings, the only thing it could
+      # swallow was exit 2 -- usage/infrastructure breakage, i.e. "the check
+      # itself is broken". Evidence that this matters: the run where the age
+      # signal was silently dead (commit 1921496) was green. Gate-seeking
+      # callers use --fail-on unresolvable (or --fail-on any).
       #
       # No apt step: ubuntu-latest ships skopeo, which the script prefers. Where
       # it is absent (a slimmer runner, or a macOS dev box) the script falls
       # back to the registry HTTP API over curl + jq. Both paths are exercised;
       # keep them that way, because the backends disagree on timestamp format.
       - run: os/scripts/check-pin-freshness.sh
-        continue-on-error: true
 
   platform:
     name: Platform probe (${{ matrix.os }})
+    # Scheduled runs are for the supply-chain job only.
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
