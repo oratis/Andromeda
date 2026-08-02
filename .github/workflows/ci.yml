@@ -34,6 +34,13 @@ jobs:
       - run: cargo test --workspace --locked
       - run: os/scripts/test-installer-platform-guard.sh
       - run: os/scripts/test-containerfile-layer-budget.sh
+      # Static, needs no VM and no built image, so it belongs with the other
+      # guards here rather than in os-e2e.yml: the invariant it checks is about
+      # os-e2e.yml itself, and learning it is violated after waiting for the
+      # E2E runner would be learning it from the very timeout it prevents.
+      # ci.yml also has no `paths:` filter, so a change to os-e2e.yml alone
+      # still gets checked. Deliberately NOT duplicated into os-e2e.yml.
+      - run: os/scripts/test-ci-timeout-budget.sh
 
   supply-chain:
     name: Container image pin freshness
