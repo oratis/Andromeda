@@ -43,10 +43,13 @@ qemu-img --version > "${MATRIX_DIR}/qemu-img-version.txt"
 
 accel=tcg
 cpu=max
-# TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4).
+# TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4,
+# re-derived for the P1 #7 job split).
 # This is the matrix stage budget: 3 profiles x 600 s = 30 min, one term of
-# `sum of stage budgets + build < os-e2e.yml timeout-minutes`. The full
-# arithmetic lives next to the 2700 s boot deadline in test-install.sh.
+# `sum of the lifecycle job's stage budgets < its timeout-minutes: 140` in
+# os-e2e.yml (the image build has had its own job budget since the split).
+# The full arithmetic lives next to the 2700 s boot deadline in
+# test-install.sh.
 #
 # NOTE: this 600 s host cap deliberately sits BELOW the guest's
 # andromeda-ci-verify.service TimeoutStartSec=12min (720 s). The verifier does
@@ -59,8 +62,8 @@ cpu=max
 #     ~40 s each, 2.0-2.5 min for all three profiles together), so 600 s is
 #     already ~15x headroom;
 #   - raising this to 840 s (12 min unit + ~2 min firmware/kernel/sddm/plasma
-#     boot) would grow the matrix stage to 42 min and push the os-e2e stage
-#     sum past `timeout-minutes: 180`;
+#     boot) would grow the matrix stage to 42 min and push the lifecycle job's
+#     stage sum past its `timeout-minutes: 140`;
 #   - a genuinely hung profile is diagnosed by THIS host-side timeout plus the
 #     normalized serial log it dumps, not by waiting out the unit timeout.
 profile_timeout_seconds=600
@@ -69,12 +72,13 @@ if [[ -c /dev/kvm ]]; then
     cpu=host
 elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
     # Mirror test-gcp-nested.sh's `test -c /dev/kvm` precheck. Full-system TCG
-    # emulation is ~10x slower; the TCG per-profile budget (3600s x 3 profiles)
-    # can exceed the os-e2e job `timeout-minutes: 180`, turning a missing
-    # /dev/kvm into confusing timeouts rather than a clear failure. Fail fast;
-    # set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.
+    # emulation is ~10x slower; the TCG matrix budget (3600s x 3 profiles =
+    # 180 min) alone exceeds the os-e2e lifecycle job `timeout-minutes: 140`,
+    # turning a missing /dev/kvm into confusing timeouts rather than a clear
+    # failure. Fail fast; set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path
+    # for local debugging.
     printf 'test-hardware-matrix.sh: /dev/kvm is unavailable.\n' >&2
-    printf 'Full-system TCG emulation is ~10x slower and its per-profile budget (3 x 3600s) exceeds the os-e2e job timeout (180m).\n' >&2
+    printf 'Full-system TCG emulation is ~10x slower and its per-profile budget (3 x 3600s = 180m) exceeds the os-e2e lifecycle job timeout (140m).\n' >&2
     printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
     exit 1
 else
