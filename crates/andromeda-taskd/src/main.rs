@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use andromeda_policy::PolicyEngine;
-use andromeda_runtime::{FileTaskStore, TaskService};
+use andromeda_runtime::{CapabilityAdmission, FileTaskStore, TaskService};
 use clap::Parser;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -49,7 +49,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let store = FileTaskStore::open(&args.state_dir)?;
-    let service = TaskService::new(store, PolicyEngine::default());
+    let service = TaskService::new(
+        store,
+        PolicyEngine::default(),
+        CapabilityAdmission::unsigned_for_development(),
+    );
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     info!(listen = %args.listen, state_dir = %args.state_dir.display(), "task service ready");
     axum::serve(listener, andromeda_taskd::app(service))

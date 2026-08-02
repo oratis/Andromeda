@@ -14,7 +14,7 @@ use andromeda_hardware::{
 };
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{
-    CreateTaskRequest, EvaluationRequest, FileTaskStore, RecordOutcomeRequest,
+    CapabilityAdmission, CreateTaskRequest, EvaluationRequest, FileTaskStore, RecordOutcomeRequest,
     StateTransitionRequest, TaskService,
 };
 use chrono::Utc;
@@ -386,8 +386,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Command::Task { command } => {
-            let service =
-                TaskService::new(FileTaskStore::open(cli.state_dir)?, PolicyEngine::default());
+            // The developer CLI drives a local store directly, with no daemon,
+            // no network, and no caller to authenticate: whoever runs it can
+            // already write the state directory. Requiring issuer signatures
+            // here would protect nothing the filesystem does not already
+            // decide, so it names the permissive posture explicitly rather
+            // than pretending to a guarantee it cannot make.
+            let service = TaskService::new(
+                FileTaskStore::open(cli.state_dir)?,
+                PolicyEngine::default(),
+                CapabilityAdmission::unsigned_for_development(),
+            );
             handle_task(&service, command)?;
         }
         Command::Hardware { command } => handle_hardware(command)?,

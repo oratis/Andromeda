@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::admission::{AdmissionError, CapabilityAdmission};
 use crate::store::TaskListing;
 use crate::{FileTaskStore, StoreError};
 
@@ -308,18 +309,42 @@ pub enum ServiceError {
     Transition(#[from] andromeda_core::TaskTransitionError),
     #[error(transparent)]
     Guard(#[from] TransitionGuardError),
+    /// A capability was refused by the configured [`CapabilityAdmission`].
+    #[error(transparent)]
+    Admission(#[from] AdmissionError),
 }
 
 #[derive(Debug, Clone)]
 pub struct TaskService {
     store: FileTaskStore,
     policy: PolicyEngine,
+    admission: CapabilityAdmission,
 }
 
 impl TaskService {
+    /// Builds a service.
+    ///
+    /// `admission` is a required argument on purpose: whether the control
+    /// plane accepts self-minted capabilities is a security posture, and a
+    /// posture that can be reached by leaving an argument off is one nobody
+    /// chose. [`CapabilityAdmission`] has no `Default` for the same reason.
     #[must_use]
-    pub const fn new(store: FileTaskStore, policy: PolicyEngine) -> Self {
-        Self { store, policy }
+    pub const fn new(
+        store: FileTaskStore,
+        policy: PolicyEngine,
+        admission: CapabilityAdmission,
+    ) -> Self {
+        Self {
+            store,
+            policy,
+            admission,
+        }
+    }
+
+    /// The capability admission policy in force, for `/healthz` and logs.
+    #[must_use]
+    pub const fn admission(&self) -> &CapabilityAdmission {
+        &self.admission
     }
 
     /// Validates and durably creates a task.
@@ -329,7 +354,13 @@ impl TaskService {
     /// Returns validation errors for malformed/untrusted plans and store errors
     /// for persistence failures.
     pub fn create(&self, request: CreateTaskRequest) -> Result<TaskRecord, ServiceError> {
+        // Order matters and is load-bearing: `validate_plan` enforces
+        // MAX_TASK_CAPABILITIES, so by the time `admit` runs the vector it
+        // verifies is already bounded. Signature verification must never be
+        // reachable with an unbounded input.
         validate_plan(&request.plan, &request.capabilities)?;
+        self.admission
+            .admit(&request.capabilities, MAX_TASK_CAPABILITIES)?;
         let state = if self.plan_fully_granted(&request.plan, &request.capabilities) {
             TaskState::Ready
         } else {
@@ -490,6 +521,11 @@ impl TaskService {
             }
             .into());
         }
+        // The bound above covers this request too: `total` includes
+        // `request.capabilities.len()`, so a request over the limit is rejected
+        // before any signature is verified. Same ordering rule as `create`.
+        self.admission
+            .admit(&request.capabilities, MAX_TASK_CAPABILITIES)?;
         let now = Utc::now();
         let expected_subject = record.plan.task_id.to_string();
         for capability in &request.capabilities {
@@ -889,9 +925,14 @@ mod tests {
     }
 
     fn service(temp: &TempDir) -> TaskService {
+        service_with(temp, CapabilityAdmission::unsigned_for_development())
+    }
+
+    fn service_with(temp: &TempDir, admission: CapabilityAdmission) -> TaskService {
         TaskService::new(
             FileTaskStore::open(temp.path()).expect("store"),
             PolicyEngine::new(PolicySet::default()),
+            admission,
         )
     }
 
@@ -1095,6 +1136,131 @@ mod tests {
         let capabilities: Vec<Capability> =
             std::iter::repeat_n(capability, MAX_TASK_CAPABILITIES).collect();
         assert_eq!(validate_plan(&request.plan, &capabilities), Ok(()));
+    }
+
+    /// Fixed seed: the runtime's admission tests must be reproducible, so no
+    /// key material comes from an RNG.
+    const ISSUER_SEED: [u8; 32] = [5u8; 32];
+    const ISSUER_KEY_ID: &str = "issuer-2026";
+
+    fn issuer() -> andromeda_core::CapabilitySigningKey {
+        andromeda_core::CapabilitySigningKey::from_seed(&ISSUER_SEED)
+    }
+
+    fn signing_admission() -> CapabilityAdmission {
+        let mut keyring = andromeda_core::CapabilityKeyring::new();
+        keyring
+            .insert_hex(ISSUER_KEY_ID, &issuer().verifying_key_hex())
+            .expect("valid key");
+        CapabilityAdmission::require_signed(keyring).expect("non-empty keyring")
+    }
+
+    #[test]
+    fn create_accepts_a_capability_the_trusted_issuer_signed() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service_with(&temp, signing_admission());
+        let mut request = inspection_request(workspace_path());
+        issuer()
+            .sign_in_place(&mut request.capabilities[0], ISSUER_KEY_ID)
+            .expect("sign");
+        let record = service.create(request).expect("signed capability admitted");
+        assert_eq!(record.state, TaskState::Ready);
+    }
+
+    #[test]
+    fn create_refuses_an_unsigned_capability_when_signatures_are_required() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service_with(&temp, signing_admission());
+        let error = service
+            .create(inspection_request(workspace_path()))
+            .expect_err("unsigned capability must be refused");
+        assert!(
+            matches!(
+                error,
+                ServiceError::Admission(AdmissionError::Rejected { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn create_refuses_a_capability_tampered_with_after_signing() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service_with(&temp, signing_admission());
+        let mut request = inspection_request(workspace_path());
+        issuer()
+            .sign_in_place(&mut request.capabilities[0], ISSUER_KEY_ID)
+            .expect("sign");
+        // Widen the grant to the filesystem root after the issuer vouched for
+        // a single directory — the exact escalation the signature exists to
+        // stop.
+        request.capabilities[0].resource = CapabilityResource::Files {
+            root: PathBuf::from(outside_path()),
+            access: FileAccess::ReadWrite,
+        };
+        let error = service
+            .create(request)
+            .expect_err("tampering must be caught");
+        assert!(
+            matches!(
+                error,
+                ServiceError::Admission(AdmissionError::Rejected { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn grant_refuses_an_unsigned_capability_when_signatures_are_required() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service_with(&temp, signing_admission());
+        let mut request = inspection_request(workspace_path());
+        let unsigned = request.capabilities[0].clone();
+        issuer()
+            .sign_in_place(&mut request.capabilities[0], ISSUER_KEY_ID)
+            .expect("sign");
+        let created = service.create(request).expect("create");
+        let error = service
+            .grant_capabilities(
+                created.plan.task_id,
+                GrantCapabilitiesRequest {
+                    capabilities: vec![unsigned],
+                    actor: "caller".into(),
+                    expected_revision: created.revision,
+                },
+            )
+            .expect_err("the grant path must enforce the same rule as create");
+        assert!(
+            matches!(
+                error,
+                ServiceError::Admission(AdmissionError::Rejected { .. })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// The bound must be enforced *before* any signature is verified, or an
+    /// unauthenticated-shaped request could force unbounded ed25519 work. The
+    /// capabilities here are both over the limit and individually inadmissible,
+    /// so the error names whichever check ran first — and it must be the bound.
+    #[test]
+    fn the_capability_bound_is_enforced_before_signature_verification() {
+        let temp = TempDir::new().expect("tempdir");
+        let service = service_with(&temp, signing_admission());
+        let mut request = inspection_request(workspace_path());
+        let capability = request.capabilities[0].clone();
+        request.capabilities = std::iter::repeat_n(capability, MAX_TASK_CAPABILITIES + 1).collect();
+        let error = service.create(request).expect_err("must be rejected");
+        assert!(
+            matches!(
+                error,
+                ServiceError::Validation(ValidationError::TooManyCapabilities {
+                    capabilities: c,
+                    limit: MAX_TASK_CAPABILITIES,
+                }) if c == MAX_TASK_CAPABILITIES + 1
+            ),
+            "the length bound must reject before verification, got {error:?}"
+        );
     }
 
     #[test]

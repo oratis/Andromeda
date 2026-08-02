@@ -330,7 +330,7 @@ mod tests {
         FileAccess, Intent, IsolationLevel, RecoverySemantics, RiskLevel, TaskState,
     };
     use andromeda_policy::PolicyEngine;
-    use andromeda_runtime::FileTaskStore;
+    use andromeda_runtime::{CapabilityAdmission, FileTaskStore};
     use axum::body::Body;
     use axum::http::Request;
     use chrono::Utc;
@@ -346,6 +346,7 @@ mod tests {
         let service = TaskService::new(
             FileTaskStore::open(temp.path()).expect("store"),
             PolicyEngine::default(),
+            CapabilityAdmission::unsigned_for_development(),
         );
         app(service)
     }
