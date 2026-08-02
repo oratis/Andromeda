@@ -58,14 +58,14 @@ jobs:
     #   3 boots x 14 min                             42 min
     #     < test-install.sh boot deadline            45 min (2700 s)
     #
-    #   build payloads + ISO                         <= 50 min (observed max 42.25)
+    #   build payloads + ISO: BUDGET_BUILD_MINUTES=50 ceiling (observed max 42.25)
     #   + test-install.sh install timeout             45 min
     #   + test-install.sh boot deadline               45 min
     #   + test-hardware-matrix.sh (3 x 600 s)         30 min
     #     (a host-side cap deliberately BELOW the 12 min andromeda-ci-verify
     #      unit timeout; test-hardware-matrix.sh explains why raising it to
     #      840 s would push this sum past the job timeout)
-    #   + free-disk/apt/validate/upload               ~6 min
+    #   + free-disk/apt/validate/upload: BUDGET_PREP_MINUTES=6
     #     (run 30732275955 measured 5.59 min, free-disk alone 4.50 min)
     #   = 176 min                                     < 180 min (here)
     #
