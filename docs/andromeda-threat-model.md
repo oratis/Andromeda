@@ -96,7 +96,11 @@ append-only ledger（compaction 会主动删除被取代的 revision 快照，�
 - `ActionPlan::validate`（去重、悬挂依赖、迭代 Kahn 环检测，抗栈溢出）；
 - `ActionKind::minimum_risk` 风险地板：模型可以把动作声明得**更**危险，不能更安全；
 - `MAX_PLAN_ACTIONS = 10_000` 上限；
-- 所有不可信输入结构启用 `#[serde(deny_unknown_fields)]`（防"字段拼错被静默忽略"的 fail-open）。
+- 任务面请求信封（`CreateTaskRequest`/`StateTransitionRequest`/`GrantCapabilitiesRequest`/
+  `RecordOutcomeRequest`/`EvaluationRequest`）与 `ActionSpec`/`ActionPlan`/`Intent`/
+  `Capability` 均启用 `#[serde(deny_unknown_fields)]`（防"字段拼错被静默忽略"的
+  fail-open）；但 `Evidence` 与 `ActionOutcome` **未启用**，而这两个结构正是 §4.4
+  成功门的输入。
 
 **已知弱点（未修）**：**`ActionKind` 本身由模型选择**。把一个不可信压缩包声明为
 `ReadFile`(L1) 而非 `ParseUntrustedContent`(L2) 是一个**合法且会被放行**的计划。
@@ -114,7 +118,8 @@ quarantine/下载/外部挂载）、文件类型嗅探与污点标记，独立�
 - deny 规则优先于 capability，且不被匹配的 capability 推翻；
 - 路径先经 `normalized_absolute` 词法归一，`/tmp/../etc/passwd` 命中 `/etc`；不可归一或
   相对路径一律拒绝（fail-closed）；
-- capability 生效窗口 `issued_at <= now < expires_at`；
+- capability 生效窗口 `issued_at <= now < expires_at`；注意 `expires_at` 是 `Option`，
+  为 `None` 时**永不过期**——叠加 §6.2 的自签发，攻击者可以铸造一个永不过期的 capability；
 - scope 必须实际覆盖 target（文件前缀 + 读写、网络 host、系统设置 key、外部服务 operation）；
 - `issued_to` 必须等于 `plan.task_id`。
 
@@ -126,7 +131,9 @@ quarantine/下载/外部挂载）、文件类型嗅探与污点标记，独立�
 **落地前必须成立**（executor 的阻塞前置项）：
 1. capability 由**受信签发方**产出并带签名，`taskd` 拒绝无签名的裸能力；
 2. `taskd` 具备**本地主体认证**，请求方身份不再自报；
-3. `EvaluationContext::subject` 接入数据面，与签发绑定。
+3. `EvaluationContext::subject` 已接入 `evaluate` 路径，但其值由请求方自报，
+   且安全相关的 `Ready → Running` 守卫并不应用它；它必须改为绑定认证后的主体，
+   并在该守卫上生效。
 
 ### 4.3 边界 B3：授权 → 执行（隔离与确认）
 
@@ -140,9 +147,14 @@ quarantine/下载/外部挂载）、文件类型嗅探与污点标记，独立�
   刻意不用 `Ord` 做安全判定。
 
 **已知弱点（未修）**：
-- **隔离是被断言的，不是被证明的**。仓库中不存在任何沙箱/microVM/broker 实现；
-  `IsolationLevel` 只是一个 serde 枚举。L1/L2/L3 → Sandbox/MicroVm/Brokered 的映射
-  目前是文档，不是强制。
+- **隔离是被断言的，不是被证明的**。L1/L2/L3 → Sandbox/MicroVm/Brokered 的映射本身
+  是代码（`RiskLevel::minimum_isolation`）且被策略引擎强制——隔离不满足要求即拒绝；
+  不成立的是这个检查的**输入**：`IsolationLevel` 由请求方声明，仓库中不存在任何
+  沙箱/microVM/broker 实现，也没有任何 attestation。
+- **两条内部路径按构造弱化了上述检查**：`guard_ready_to_running` 以
+  `action.risk.minimum_isolation()` 作为"当前隔离"构造上下文，因此在
+  `Ready → Running` 这条边上隔离检查自我满足；`plan_fully_granted` 则按设计以
+  `confirmed = true` 评估（未确认的 L3 由 `Ready → Running` 守卫真正拦截）。
 - **L3 确认由调用方自报**。它证明"确认这一步发生过并被归属留痕"，不证明
   "确认来自真实的人"，也不防"批准后调包参数"。
 
@@ -160,7 +172,9 @@ quarantine/下载/外部挂载）、文件类型嗅探与污点标记，独立�
 append-only，不可被后续"成功"覆盖。
 
 **已知弱点（未修）**：**证据由执行方自己记录**，尚无独立断言器复核。
-"验证不能由执行模型自证"仍是未兑现的设计目标。
+"验证不能由执行模型自证"仍是未兑现的设计目标。此外，`Evidence` 与 `ActionOutcome`
+未启用 `#[serde(deny_unknown_fields)]`（见 §4.1），未知字段会被静默丢弃，
+而这两个结构正是本节成功门的输入。
 
 **落地前必须成立**：verifier 必须（a）独立于执行者，（b）**不得扩大**原始 capability，
 （c）失败时自动回滚本地变更、并把外部动作转入人工恢复队列。
@@ -181,8 +195,12 @@ append-only，不可被后续"成功"覆盖。
 安装器 preflight 交叉校验平台 manifest 与镜像 OCI label；破坏性安装多重门控
 （非默认启动项 + `ci` 模式要求 VM + `andromeda.ci=1`）。
 
-**已知弱点（未修）**：基础镜像按滚动 tag 而非 digest；`--target-imgref` 指向**可变、
-未签名**的 `:edge`；无 sigstore/`containers-policy.json`；**无健康门控自动回滚**——
+**已知弱点（未修）**：rust builder 基础镜像已按 digest 固定，但 fedora-bootc
+载荷基础镜像仍按滚动 tag（`quay.io/fedora/fedora-bootc:44`，上游会回收旧 digest，
+待 digest 刷新自动化落地后再固定）；`--target-imgref` 指向**可变、未签名**的 `:edge`；
+sigstore 验签与 §6.1 同型——**能力在、接线缺**：`containers-policy.json` 的
+sigstoreSigned 模板已存在（`os/signing/policy.json.example`），但未安装、无签名密钥、
+刻意未启用 fail-closed（启用会打断未签名 `:edge` 的更新流）；**无健康门控自动回滚**——
 能引导进坏桌面的更新会永久留下。
 
 ## 5. 主要威胁的具体分析
@@ -268,7 +286,10 @@ fail-closed 的 ed25519 detached 签名验证：`TrustedKeyring` 是信任锚，
 
 **当前缓解**：`--artifact-root` 可挡住制品哈希造假；不带时**强制打印警告**；
 [hardware-compatibility.md](./development/hardware-compatibility.md) 明确声明
-**退出码不得用于放行安装或提升支持等级**。
+**退出码不得用于放行安装或提升支持等级**。注意 `--trusted-key` 只检查制品 pin
+是否**声明了**一个受信 key id，并不验证任何真实签名
+（`crates/andromeda-hardware/src/verify.rs` 中是显式标注的 stub），
+**不得当作真实性来源**。
 
 **根治**：CLI 接到 verified 路径；要求 supported 以上时"无签名"即 fail-closed；
 再补离线根密钥管理、密钥轮换与撤销对象。
@@ -285,11 +306,11 @@ fail-closed 的 ed25519 detached 签名验证：`TrustedKeyring` 是信任锚，
 - macOS 上 `/private/etc/sudoers` 不在 `/etc` 之内；
 - `~/.ssh`、`/var/lib`、`/proc/sys/*`、`/dev/*`、`C:\ProgramData` 全在圈外。
 
-大小写：Windows 已按分量做大小写不敏感比较，**macOS（默认 APFS 大小写不敏感）未做**。
+大小写：Windows 与 macOS 均已按分量做 ASCII 大小写不敏感比较（含 macOS 回归测试）；
+其他 Unix 目标保持敏感比较，与其文件系统语义一致。
 
-**根治**：执行层必须以 `realpath`/`openat`（`O_NOFOLLOW` + 逐级校验）复核，
-且在大小写不敏感文件系统上做不敏感比较。词法检查只是纵深防御的第一层，
-**永远不能作为唯一强制点**。
+**根治**：执行层必须以 `realpath`/`openat`（`O_NOFOLLOW` + 逐级校验）复核。
+词法检查只是纵深防御的第一层，**永远不能作为唯一强制点**。
 
 ### 6.4 网络 deny 可被不可解析端口后缀绕过
 
@@ -362,5 +383,6 @@ fail-closed 的 ed25519 detached 签名验证：`TrustedKeyring` 是信任锚，
 - [任务控制面](./development/task-control-plane.md) —— 当前强制点的实现说明
 - [HCM 开发说明](./development/hardware-compatibility.md) —— B5 的信任边界
 - [三大产品目标对齐评审](./reviews/ai-native-goals-review.md) —— §6 多数条目的发现出处
-- [安全评审](./reviews/security-review.md) —— §6.1/§6.4 的原始复现
+- [安全评审](./reviews/security-review.md) —— §6.1 的原始复现（§6.4 的
+  不可解析端口后缀绕过为本文首次记录）
 - [SECURITY.md](../SECURITY.md) —— 漏洞报告流程与对外安全声明

@@ -473,10 +473,11 @@ Global flag: `--state-dir <PATH>` (env `ANDROMEDA_STATE_DIR`, default `.andromed
 | `andromeda task list` | List all durable task records |
 | `andromeda task show <TASK_ID>` | Show one task record |
 | `andromeda task evaluate <TASK_ID> [--isolation <LEVEL>] [--confirm-external]` | Evaluate policy without executing any action |
-| `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>]` | Apply a checked state transition with optimistic concurrency |
+| `andromeda task record-outcome <TASK_ID> --action-id <ID> --status <STATUS> --evidence <TEXT> --expected-revision <N>` | Record one action's execution outcome and evidence (repeat `--evidence` for multiple items) |
+| `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | Apply a checked state transition with optimistic concurrency |
 | `andromeda hardware probe` | Print a privacy-conscious hardware report |
 | `andromeda hardware diagnose` | Diagnose driver binding and support-relevant device readiness |
-| `andromeda hardware check <MANIFEST> [--require-tier <TIER>]` | Probe this host and evaluate one HCM JSON document |
+| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--artifact-root <DIR>] [--trusted-key <KEY_ID>]` | Probe this host and evaluate one HCM JSON document |
 
 `--isolation` accepts `none`, `sandbox`, `micro-vm`, and `brokered`. When omitted, each action
 is evaluated at the minimum isolation implied by **its own declared risk**; when given, it
@@ -522,7 +523,9 @@ Errors are uniformly `{"error": <code>, "message": <text>}`:
 | 404 | `not_found` | No such task |
 | 409 | `already_exists` | Duplicate `task_id` |
 | 409 | `revision_conflict` | Stale `expected_revision` |
-| 422 | `invalid_task` | Plan validation failure, illegal state transition, or a policy-gated refusal |
+| 422 | `external_confirmation_required` | `Ready -> Running` was attempted without confirmation while the plan contains L3 external side effects |
+| 422 | `missing_evidence` | `Verifying -> Succeeded` was attempted while some action lacks a recorded outcome, has an unsuccessful outcome, or has an outcome without evidence |
+| 422 | `invalid_task` | Plan validation failure, illegal state transition, or another policy-gated refusal (ungranted plan, policy-denied action) |
 | 500 | `internal_error` | Serialization or internal failure |
 
 Request bodies use `deny_unknown_fields`: a camelCase typo such as `expiresAt` is **rejected**
@@ -533,9 +536,10 @@ Request bodies use `deny_unknown_fields`: a camelCase typo such as `expiresAt` i
 ### Host validation (DNS rebinding defense)
 
 `taskd` validates the `Host` header of every request (falling back to `:authority` under
-HTTP/2), accepting only `localhost`, `127.0.0.1`, and `[::1]` with an optional port; everything
-else gets a 403. Even if a malicious page uses DNS rebinding to resolve its own name to
-127.0.0.1, the request still carries the attacker's Host and is rejected.
+HTTP/2), accepting only `localhost` and literal loopback IPs (any of 127.0.0.0/8, `[::1]`, and
+their IPv4-mapped forms) with an optional port; everything else gets a 403. Even if a malicious
+page uses DNS rebinding to resolve its own name to 127.0.0.1, the request still carries the
+attacker's Host and is rejected.
 
 > [!CAUTION]
 > Host validation **only defends against browser-originated DNS rebinding; it is not
@@ -728,7 +732,8 @@ Detailed rules are in
 - evidence is recorded by the executing party; there is **no independent verifier**;
 - `andromeda hardware check` authenticates a manifest only when `--trusted-keys` is passed;
   without it the manifest's declared tier is self-asserted. Gating `--require-tier
-  supported|certified` on an unverified check is refused outright;
+  supported|certified` on an unverified check is refused outright — see
+  [docs/development/hardware-compatibility.md](./docs/development/hardware-compatibility.md);
 - there is no real tool executor, so the API must not be exposed to untrusted networks;
 - the following are **not implemented**, and no integration may imply otherwise: model
   invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, confirmation
@@ -738,7 +743,8 @@ Detailed rules are in
 
 
 The full trust-boundary analysis, including the known-unfixed attack surface, is in
-[docs/andromeda-threat-model.md](./docs/andromeda-threat-model.md).
+[docs/andromeda-threat-model.md](./docs/andromeda-threat-model.md) (written in Chinese,
+matching the docs/ convention).
 
 For security issues, read [SECURITY.md](./SECURITY.md). **Do not open a public issue** for an
 unpatched vulnerability involving privilege boundaries, credential exposure, filesystem escape,
