@@ -165,6 +165,17 @@ Schema 位于 [`schemas/hardware-compatibility-manifest.schema.json`](../../sche
 `degraded` 通过时，评估输出的 `evidence` 中会显式带上"限制必须公开披露"，
 避免降级被静默接受。
 
+> **注：两处已知设计张力，均只作记录、不改变当前行为，留待后续决定。**
+>
+> 1. `certified` 清单携带 `degraded` 证据时，整机直接 `effective_tier =
+>    blocked`，而**不是**降级为 `supported`。诚实登记降级的作者比谎报
+>    `passed` 的作者拿到更差的结果——这一激励问题没有消失，只是从
+>    "passed/failed 二值"上移到了 certified 这一个 tier；是否引入降级式回退
+>    是尚未定案的后续设计。
+> 2. 在 `community` 这一证据可选的 tier 上，登记 `unknown` 会被评估为
+>    `blocked`，而**完全删掉该条目**则保持 `community`——fail-closed 在唯一
+>    允许不带证据的 tier 上奖励了删除记录。同样标记为后续决定。
+
 ## HCM 清单签名与真实性（fail-closed）
 
 matcher 过去只校验清单的**内部一致性与新鲜度**，从不校验**真实性**：伪造一份

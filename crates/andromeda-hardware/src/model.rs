@@ -208,7 +208,13 @@ impl EvidenceResult {
     pub const fn blocks(self, tier: SupportTier) -> bool {
         match self {
             Self::Passed => false,
-            Self::Degraded => matches!(tier, SupportTier::Certified),
+            Self::Degraded => match tier {
+                SupportTier::Certified => true,
+                SupportTier::Blocked
+                | SupportTier::Community
+                | SupportTier::Reference
+                | SupportTier::Supported => false,
+            },
             Self::Failed | Self::Unknown => true,
         }
     }

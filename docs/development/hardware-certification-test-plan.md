@@ -282,7 +282,7 @@ os/scripts/test-install.sh output
 1. 校验 evidence 包签名和所有 digest；
 2. 校验 HCM selector 精确匹配；
 3. 校验 artifact pins 与被测镜像一致；
-4. 校验全部必需 capability evidence 为 `passed` 且未过期；
+4. 校验全部必需 capability evidence 的判定不阻断目标 tier（见 §7 映射表）且未过期；
 5. 由第二位审核者批准 Tier 变化；
 6. 保存撤销入口，以便发现回归时立即阻断该 cohort。
 
