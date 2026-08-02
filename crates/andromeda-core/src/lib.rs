@@ -6,6 +6,8 @@
 
 mod action;
 mod capability;
+pub mod capability_signing;
+pub mod encoding;
 mod task;
 
 pub use action::{
@@ -13,6 +15,11 @@ pub use action::{
     PlanValidationError, RecoverySemantics, RiskLevel,
 };
 pub use capability::{
-    Capability, CapabilityId, CapabilityResource, FileAccess, IsolationLevel, normalized_absolute,
+    Capability, CapabilityId, CapabilityResource, CapabilitySignature, FileAccess, IsolationLevel,
+    normalized_absolute,
+};
+pub use capability_signing::{
+    CapabilityKeyring, CapabilitySignatureStatus, CapabilitySigningKey, SignatureError,
+    verify_capability_signature,
 };
 pub use task::{Intent, TaskId, TaskState, TaskTransitionError};

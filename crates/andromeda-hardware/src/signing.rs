@@ -21,8 +21,8 @@
 //! used by tests and by any future offline signing tool.
 
 use std::collections::BTreeMap;
-use std::fmt::Write as _;
 
+use andromeda_core::encoding::{canonical_json, hex};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use crate::model::{HcmManifest, ManifestSignature};
@@ -265,11 +265,14 @@ pub fn verify_manifest_signature(
 /// - Serialize the *typed* manifest, not the raw file, so omitted vs explicit
 ///   `null` and source formatting never change the bytes.
 /// - Remove the `signature` field (a signature cannot cover itself).
-/// - Emit compact JSON with **every object's keys sorted** by Unicode scalar
-///   value; arrays keep their order (arrays are semantically ordered).
-/// - Scalars use `serde_json`'s own encoding (correct string escaping;
-///   integers and booleans are already deterministic — the manifest has no
-///   floats).
+/// - Emit [canonical JSON](andromeda_core::encoding::canonical_json): compact,
+///   with every object's keys sorted; arrays keep their (semantic) order.
+///
+/// The JSON writer and the hex codec live in `andromeda-core` because the
+/// capability signature scheme uses the same two encodings; keeping one
+/// implementation is what stops the two schemes from drifting apart. The bytes
+/// are unchanged from the local implementation this replaced, so signatures
+/// issued against earlier revisions still verify.
 ///
 /// # Errors
 /// Returns [`SignatureError::Canonicalize`] if the manifest cannot be turned
@@ -280,88 +283,17 @@ pub fn canonical_signing_bytes(manifest: &HcmManifest) -> Result<Vec<u8>, Signat
     if let Some(object) = value.as_object_mut() {
         object.remove("signature");
     }
-    let mut canonical = String::new();
-    write_canonical(&value, &mut canonical);
-    Ok(canonical.into_bytes())
-}
-
-/// Recursively writes `value` as canonical JSON with sorted object keys.
-fn write_canonical(value: &serde_json::Value, out: &mut String) {
-    match value {
-        serde_json::Value::Object(map) => {
-            out.push('{');
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort_unstable();
-            for (index, key) in keys.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_json_string(key, out);
-                out.push(':');
-                write_canonical(&map[key], out);
-            }
-            out.push('}');
-        }
-        serde_json::Value::Array(items) => {
-            out.push('[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                write_canonical(item, out);
-            }
-            out.push(']');
-        }
-        // Scalars: `Value`'s Display is compact JSON with correct escaping.
-        scalar => {
-            let _ = write!(out, "{scalar}");
-        }
-    }
-}
-
-/// Writes `text` as a JSON string literal (quoted and escaped).
-fn write_json_string(text: &str, out: &mut String) {
-    let _ = write!(out, "{}", serde_json::Value::String(text.to_owned()));
+    Ok(canonical_json::to_string(&value).into_bytes())
 }
 
 /// Lowercase-hex encodes `bytes`.
 fn hex_encode(bytes: &[u8]) -> String {
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // Writing to a String is infallible.
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    hex::encode(bytes)
 }
 
 /// Decodes an even-length hex string, ignoring surrounding whitespace.
 fn hex_decode(input: &str) -> Result<Vec<u8>, SignatureError> {
-    let input = input.trim();
-    if input.len() % 2 != 0 {
-        return Err(SignatureError::Hex("odd number of hex digits".to_owned()));
-    }
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len() / 2);
-    let mut index = 0;
-    while index < bytes.len() {
-        let high = hex_value(bytes[index])?;
-        let low = hex_value(bytes[index + 1])?;
-        out.push((high << 4) | low);
-        index += 2;
-    }
-    Ok(out)
-}
-
-fn hex_value(character: u8) -> Result<u8, SignatureError> {
-    match character {
-        b'0'..=b'9' => Ok(character - b'0'),
-        b'a'..=b'f' => Ok(character - b'a' + 10),
-        b'A'..=b'F' => Ok(character - b'A' + 10),
-        other => Err(SignatureError::Hex(format!(
-            "invalid hex digit '{}'",
-            char::from(other)
-        ))),
-    }
+    hex::decode(input).map_err(|error| SignatureError::Hex(error.to_string()))
 }
 
 #[cfg(test)]
@@ -406,6 +338,23 @@ mod tests {
             }"#,
         )
         .expect("manifest fixture")
+    }
+
+    /// Golden vector. The canonical encoder moved to `andromeda-core` so the
+    /// manifest and capability schemes share one implementation; any future
+    /// edit to it that changes a byte would silently invalidate every manifest
+    /// signature already issued. Pinning the signature a fixed seed produces
+    /// over a fixed manifest turns that into a loud test failure.
+    #[test]
+    fn golden_signature_locks_the_canonical_bytes() {
+        let signature = signing_key()
+            .sign_manifest(&manifest(), "prod-2026")
+            .unwrap();
+        assert_eq!(
+            signature.sig,
+            "85c8b42f0fc8306a6878be15515471f94b9ebdf89cd6ac6f5111bfc2a8ac3b86\
+             0bdb648ad5772fe9854ff4bcd80123bef2ad7ab77147329aee9aeab0708d4a01"
+        );
     }
 
     #[test]

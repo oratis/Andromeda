@@ -4,9 +4,11 @@
 //! deliberately does not execute model-proposed tools. Executors are added
 //! behind separately attested isolation and broker interfaces.
 
+mod admission;
 mod service;
 mod store;
 
+pub use admission::{AdmissionError, CapabilityAdmission};
 pub use service::{
     CreateTaskRequest, EvaluationReport, EvaluationRequest, GrantCapabilitiesRequest,
     MAX_PLAN_ACTIONS, MAX_TASK_CAPABILITIES, RecordOutcomeRequest, ServiceError,

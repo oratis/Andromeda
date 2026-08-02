@@ -15,9 +15,16 @@ axum.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+# For `Uuid::new_v4` as the CSPRNG behind the generated API token and the
+# temporary-file suffix used to install it atomically. Already the workspace's
+# randomness source (capability ids, event ids), so this adds no lockfile entry
+# — and specifically avoids a crate that would drag in a third major version of
+# `getrandom`.
+uuid.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

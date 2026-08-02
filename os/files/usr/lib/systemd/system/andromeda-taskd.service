@@ -4,17 +4,44 @@ After=local-fs.target
 
 [Service]
 Type=simple
+# The service's runtime identity is whatever systemd allocates. No file in this
+# repository names a uid or gid, so there is no owner to keep in sync with the
+# directories below -- systemd creates both StateDirectory= and
+# RuntimeDirectory= owned by this identity, and andromeda-taskd asserts at
+# startup that the token directory grants nothing beyond its owner. The
+# permission model is defined once, in crates/andromeda-taskd/src/auth.rs, and
+# a unit test asserts that the modes declared here match those constants.
 DynamicUser=yes
 StateDirectory=andromeda-taskd
+# 0700, matching auth::TOKEN_DIR_MODE and consistent with UMask=0077 below:
+# the owner is the service account, and no other account may read task records.
+StateDirectoryMode=0700
+# Holds the local API bearer token. andromeda-taskd generates it here on first
+# start (mode 0600) and refuses to serve if this directory is group- or
+# world-accessible. systemd is the only creator; taskd never mkdir's it.
+RuntimeDirectory=andromeda-taskd
+RuntimeDirectoryMode=0700
 Environment=ANDROMEDA_LISTEN=127.0.0.1:7777
 Environment=ANDROMEDA_STATE_DIR=/var/lib/andromeda-taskd/state
+# There is no directive here that can disable authentication, because there is
+# no such switch: andromeda_taskd::app requires an Authenticator by value and
+# the type has no anonymous variant. If the token cannot be established, the
+# unit fails to start rather than serving anonymously.
+#   Authorization: Bearer $(sudo cat /run/andromeda-taskd/token)
+Environment=ANDROMEDA_AUTH_TOKEN_FILE=/run/andromeda-taskd/token
+# ANDROMEDA_CAPABILITY_KEYRING is deliberately NOT set: nothing in this
+# repository issues signed capabilities yet, so requiring signatures here would
+# reject every request any current client can make. The daemon warns at startup
+# and reports "capability_admission" on /healthz, so the posture of a running
+# system is observable rather than assumed. See andromeda-threat-model.md 4.2.
 ExecStart=/usr/bin/andromeda-taskd
 Restart=on-failure
 RestartSec=2s
 # Kernel-level loopback enforcement (cgroup/BPF on packets): taskd can only ever
 # serve loopback regardless of ANDROMEDA_LISTEN, so a misconfigured non-loopback
-# bind cannot expose the unauthenticated API to the network. This is orthogonal
-# to RestrictAddressFamilies below (which filters socket() families, not routes)
+# bind cannot expose the API to the network even before the bearer token is
+# considered. Defence in depth, not the primary control. This is orthogonal to
+# RestrictAddressFamilies below (which filters socket() families, not routes)
 # and does not conflict with it. See security-review.md finding #2.
 IPAddressAllow=localhost
 IPAddressDeny=any
@@ -38,6 +65,9 @@ RestrictRealtime=yes
 RestrictSUIDSGID=yes
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
+# Consistent with the 0600 token file and the 0700 directories above: every
+# path this service creates is owner-only. Nothing here is expected to be read
+# by another account, so there is no group that this mask locks out.
 UMask=0077
 
 [Install]

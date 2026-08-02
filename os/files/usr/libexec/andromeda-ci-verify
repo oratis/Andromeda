@@ -7,6 +7,9 @@ readonly UPDATE_ARCHIVE=/var/tmp/andromeda-v2.tar
 readonly UPDATE_SHA256_FW_CFG=/sys/firmware/qemu_fw_cfg/by_name/opt/andromeda/update-sha256/raw
 readonly UPDATE_PORT_FW_CFG=/sys/firmware/qemu_fw_cfg/by_name/opt/andromeda/update-port/raw
 readonly UPDATE_PORT_FALLBACK=8080
+readonly TASKD_TOKEN_FILE=/run/andromeda-taskd/token
+readonly TASKD_TOKEN_ATTEMPTS=30
+readonly TASKD_TOKEN_DELAY=2
 
 # The host binds the update server on a kernel-assigned port (see
 # test-install.sh) and passes it through fw_cfg. Unlike the SHA-256 -- which is
@@ -40,6 +43,35 @@ emit() {
     systemd-cat -t andromeda-ci printf '%s\n' "${message}"
 }
 
+# Set by read_taskd_token. A global rather than stdout on purpose: on failure
+# that function calls emit(), and a caller's command substitution would swallow
+# emit()'s output instead of letting it reach the serial console the harness
+# reads.
+taskd_token=""
+
+# The task API authenticates every request, /healthz included, so this check
+# has to present the local token. andromeda-taskd generates it into systemd's
+# RuntimeDirectory at startup; because the unit is Type=simple it reports
+# active as soon as the process is exec'd, which can be marginally before the
+# file exists. Wait for it on the same budget as the HTTP retry below.
+#
+# This script runs as root (the unit sets no User=), which is exactly the
+# access a 0600 token in a 0700 directory is meant to require.
+read_taskd_token() {
+    local attempt
+    for ((attempt = 1; attempt <= TASKD_TOKEN_ATTEMPTS; attempt++)); do
+        if [[ -s "${TASKD_TOKEN_FILE}" ]]; then
+            taskd_token="$(tr -d '[:space:]' < "${TASKD_TOKEN_FILE}")"
+            if [[ -n "${taskd_token}" ]]; then
+                return 0
+            fi
+        fi
+        sleep "${TASKD_TOKEN_DELAY}"
+    done
+    emit "ANDROMEDA_TASKD_TOKEN_MISSING path=${TASKD_TOKEN_FILE}"
+    return 1
+}
+
 require_runtime_health() {
     test -d /sys/firmware/efi
     test -s /var/lib/andromeda/hardware.json
@@ -50,8 +82,19 @@ require_runtime_health() {
     test "$(getenforce)" = Enforcing
     systemctl is-active --quiet andromeda-taskd.service
     systemctl is-active --quiet sddm.service
+    read_taskd_token
+    # The token reaches curl through argv. That is acceptable *here* and only
+    # here: this unit is gated on andromeda.ci=1, runs on a throwaway CI VM
+    # with SSH disabled and no interactive users, and the token is already
+    # root-only on disk -- so there is no local reader for /proc to leak it to.
+    # Do not copy this pattern into anything a user runs.
+    #
+    # --retry only covers connection failures; a 401 fails immediately with
+    # curl's exit 22, so a wrong token surfaces as a hard error rather than
+    # sixty seconds of retries.
     curl --fail --silent --show-error --retry 30 --retry-delay 2 \
         --retry-connrefused \
+        --header "Authorization: Bearer ${taskd_token}" \
         http://127.0.0.1:7777/healthz >/dev/null
 }
 

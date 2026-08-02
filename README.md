@@ -354,11 +354,15 @@ RUST_LOG=info cargo run --locked --bin andromeda-taskd
 ```
 
 ```bash
-curl http://127.0.0.1:7777/healthz
+curl -H "Authorization: Bearer $(cat .andromeda/taskd-token)" http://127.0.0.1:7777/healthz
 ```
 
-It listens on `127.0.0.1:7777` with state directory `.andromeda/state` by default.
-**The API currently has no authentication of any kind; it must not be rebound off loopback.**
+It listens on `127.0.0.1:7777` with state directory `.andromeda/state` by default, and
+generates a `0600` API token at `.andromeda/taskd-token` on first start.
+**Every request needs that token, `/healthz` included; there is no way to turn it off.**
+The token only distinguishes "this host's service account or root" from other local users —
+there is still no remote authentication and no user identity, so it must not be rebound off
+loopback.
 
 ---
 
@@ -503,12 +507,17 @@ Exit codes for `hardware check`:
 
 ## HTTP API reference
 
-`andromeda-taskd` flags: `--listen` (`ANDROMEDA_LISTEN`, default `127.0.0.1:7777`) and
-`--state-dir` (`ANDROMEDA_STATE_DIR`, default `.andromeda/state`).
+`andromeda-taskd` flags: `--listen` (`ANDROMEDA_LISTEN`, default `127.0.0.1:7777`),
+`--state-dir` (`ANDROMEDA_STATE_DIR`, default `.andromeda/state`), `--auth-token-file`
+(`ANDROMEDA_AUTH_TOKEN_FILE`, default `.andromeda/taskd-token`), and `--capability-keyring`
+(`ANDROMEDA_CAPABILITY_KEYRING`, unset by default).
+
+**Every path below, including `/healthz`, requires `Authorization: Bearer <token>`** and
+returns 401 `unauthorized` otherwise. See [Local authentication](#local-authentication).
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/healthz` | Service status and API version |
+| `GET` | `/healthz` | Service status, API version, and the running security posture: `authentication` (always `bearer_token`) and `capability_admission` (`unsigned_allowed` or `require_signed`) |
 | `POST` | `/v1/tasks` | Validate and create a task |
 | `GET` | `/v1/tasks` | List tasks as `{"tasks": [...], "warnings": [...]}`; a corrupt record file is skipped and reported in `warnings` instead of failing the whole listing |
 | `GET` | `/v1/tasks/{id}` | Read one task |
@@ -522,12 +531,14 @@ Errors are uniformly `{"error": <code>, "message": <text>}`:
 | HTTP | `error` | Trigger |
 |---|---|---|
 | 400 | `bad_request` | Task id is not a valid UUID, etc. |
+| 401 | `unauthorized` | Missing, malformed, or wrong `Authorization: Bearer` token |
 | 403 | `forbidden_host` | `Host` is not loopback |
 | 404 | `not_found` | No such task |
 | 409 | `already_exists` | Duplicate `task_id` |
 | 409 | `revision_conflict` | Stale `expected_revision` |
 | 422 | `external_confirmation_required` | `Ready -> Running` was attempted without confirmation while the plan contains L3 external side effects |
 | 422 | `missing_evidence` | `Verifying -> Succeeded` was attempted while some action lacks a recorded outcome, has an unsuccessful outcome, or has an outcome without evidence |
+| 422 | `capability_not_admitted` | Under `require_signed`, a capability was unsigned, signed by an unknown key, malformed, or altered after issuance |
 | 422 | `invalid_task` | Plan validation failure, illegal state transition, or another policy-gated refusal (ungranted plan, policy-denied action) |
 | 500 | `internal_error` | Serialization or internal failure |
 
@@ -535,6 +546,66 @@ Request bodies use `deny_unknown_fields`: a camelCase typo such as `expiresAt` i
 (422) rather than silently dropped. Every `TaskService` call runs inside
 `tokio::task::spawn_blocking`, so blocking file locks and fsyncs never occupy async workers and
 `/healthz` stays responsive even while the store lock is contended.
+
+### Local authentication
+
+Every request must carry `Authorization: Bearer <token>`, `/healthz` included. A missing,
+malformed, or wrong token gets 401 `unauthorized` with `WWW-Authenticate: Bearer` and no
+explanation of which of the three it was. The comparison is constant-time.
+
+**The guarantee lives in the serve wiring, not in a config check.** `andromeda_taskd::app`
+takes an `Authenticator` by value; that type has no `Default`, no public fields, and no variant
+meaning "no authentication", and every constructor is fallible and rejects an empty or
+under-32-character secret. An unauthenticated listener is therefore **not representable** —
+there is no flag, environment variable, or unit directive that can produce one. Authentication
+is the outermost layer, so an unauthenticated request is rejected before the Host check, before
+body parsing, and before any store lock is taken.
+
+The token file (`--auth-token-file`) is generated on first start as 32 CSPRNG bytes in hex,
+written atomically at mode `0600`, and reused across restarts. `taskd` refuses to start if the
+containing directory grants anything to group or other. That protection model — directory
+`0700`, file `0600` — is defined once in `crates/andromeda-taskd/src/auth.rs`, asserted at
+startup, and a unit test asserts the shipped `andromeda-taskd.service` agrees with it. No file
+in the repository hardcodes a uid or gid: the service identity is systemd's `DynamicUser`, and
+systemd is the only creator of the directory.
+
+Operationally this narrows the caller set from "any local process or user" to "the service
+account and root":
+
+```bash
+curl -H "Authorization: Bearer $(sudo cat /run/andromeda-taskd/token)" \
+  http://127.0.0.1:7777/healthz
+```
+
+> [!IMPORTANT]
+> This does **not** defend against an attacker who already has root or the service account, and
+> it is **not** remote authentication or user identity. The token is a single shared secret, so
+> it cannot distinguish one caller from another and is not yet usable as a policy `subject`.
+
+### Capability admission (signatures)
+
+A `Capability` may carry a detached ed25519 signature from a trusted issuer. `/healthz` reports
+which mode is in force:
+
+- `unsigned_allowed` (default, and the mode the shipped image runs in) — unsigned capabilities
+  are accepted. **Not a security boundary**: an authenticated caller still mints its own grants.
+- `require_signed` — enabled by `--capability-keyring`, a JSON file of
+  `{"key_id": "<64 hex chars>"}`. Both the create and grant paths then reject any capability
+  that is unsigned, signed by an unknown key, malformed, or altered after issuance, with 422
+  `capability_not_admitted`. An empty keyring fails startup rather than silently rejecting
+  everything while looking hardened.
+
+> [!IMPORTANT]
+> Signatures do **not** by themselves close the self-issuance gap: whoever holds the private key
+> is the issuer, and no component in this repository issues capabilities yet — which is why the
+> shipped image deliberately configures no keyring. The gap closes when a trusted host component
+> owns the key and the requesting process cannot reach it. See
+> [threat model](docs/andromeda-threat-model.md) §4.2 and §6.2.
+
+The signature field is optional, so an unsigned capability serializes byte-identically to
+earlier versions and existing task records keep parsing after an upgrade. Verification always
+runs **after** the `MAX_TASK_CAPABILITIES` length bound, so an unbounded caller-supplied vector
+can never force unbounded ed25519 work.
 
 ### Host validation (DNS rebinding defense)
 
@@ -547,10 +618,10 @@ attacker's Host and is rejected.
 > [!CAUTION]
 > Host validation **only defends against browser-originated DNS rebinding; it is not
 > authentication**, and it does not protect a non-loopback binding. Any non-browser client can
-> simply send `Host: localhost` and pass. If `ANDROMEDA_LISTEN` is changed to a non-loopback
-> address, the API is exposed **without authentication** to that network. Separately, any local
-> process or user can reach the API over loopback without authentication.
-> **Do not bind `taskd` off loopback.**
+> simply send `Host: localhost` and pass — it still needs the bearer token, but the two checks
+> are independent and neither substitutes for the other. If `ANDROMEDA_LISTEN` is changed to a
+> non-loopback address, the whole API sits on that network behind a single shared secret
+> designed for same-host callers. **Do not bind `taskd` off loopback.**
 
 ---
 
@@ -721,13 +792,21 @@ Detailed rules are in
   succeeded or was skipped and carries at least one piece of evidence;
 - task writes use atomic replacement, cross-process locking, and optimistic revision checks;
 - `taskd` refuses to bind to a non-loopback address at startup unless explicitly overridden;
+- **every `taskd` request is authenticated**: an unauthenticated listener is not representable
+  in the type system, so no flag, environment variable, or unit directive can produce one;
+- a capability signature, when a keyring is configured, is verified fail-closed — and always
+  after a length bound, so mandatory verification can never be handed an unbounded input;
 - hardware reports omit serial numbers and do not themselves grant a support tier.
 
 ### What does not hold yet
 
-- `taskd` has **no authentication of any kind**: any local process reaching loopback can drive
-  the full API and mint its own capabilities. The `Host` header check defends browsers against
-  DNS rebinding only;
+- **capabilities are still self-issued**: the signing and verification mechanism exists, but no
+  component issues capabilities, so the shipped image runs `unsigned_allowed` and an
+  authenticated caller still mints its own grants. Whoever holds the private key is the issuer;
+- `taskd`'s local token is **not user identity**: it is a single shared secret that separates
+  the service account and root from other local users. There is no remote authentication, no
+  multi-tenancy, and the token cannot serve as a policy `subject`. The `Host` header check
+  defends browsers against DNS rebinding only and is not authentication;
 - isolation levels are **asserted by the caller, not attested** by an execution environment —
   the CLI's `--isolation` is a policy simulation, not a sandbox proof, and no sandbox exists;
 - the L3 confirmation is **caller-asserted, not broker-attested**: it proves a commit point was
@@ -741,8 +820,8 @@ Detailed rules are in
 - the following are **not implemented**, and no integration may imply otherwise: model
   invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, confirmation
   broker, external connector/MCP broker, signed policy bundles, independent verifier and
-  rollback/compensation executors, local caller authentication, user identity and remote
-  authentication, multi-tenancy, and the Task Center GUI.
+  rollback/compensation executors, **a trusted capability issuer** (verification exists; nothing
+  issues), user identity and remote authentication, multi-tenancy, and the Task Center GUI.
 
 
 The full trust-boundary analysis, including the known-unfixed attack surface, is in

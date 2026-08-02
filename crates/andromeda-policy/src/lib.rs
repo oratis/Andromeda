@@ -449,6 +449,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         }
     }
 
@@ -534,6 +535,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: true,
+            signature: None,
         };
         let action = action(
             ActionKind::ExternalCall,
@@ -560,6 +562,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         }
     }
 
@@ -875,6 +878,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         };
         let action = action(
             ActionKind::ExternalCall,
@@ -905,6 +909,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         };
         let action = action(
             ActionKind::ExternalCall,
