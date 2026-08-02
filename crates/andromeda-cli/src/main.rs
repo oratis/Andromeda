@@ -8,8 +8,9 @@ use andromeda_core::{
     RecoverySemantics, RiskLevel, TaskId, TaskState,
 };
 use andromeda_hardware::{
-    ArtifactVerifier, DirectoryArtifactVerifier, HcmManifest, SupportTier, TrustedKeyring,
-    diagnose_report, evaluate_manifest_verified, evaluate_manifest_with_verifier, probe_host,
+    ArtifactVerifier, DirectoryArtifactVerifier, HcmManifest, ManifestSigningKey, SupportTier,
+    TrustedKeyring, diagnose_report, evaluate_manifest_verified, evaluate_manifest_with_verifier,
+    probe_host,
 };
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{
@@ -176,6 +177,66 @@ enum HardwareCommand {
         #[arg(long)]
         allow_unverified: bool,
     },
+    /// Derive the public half of a signing seed, for publishing into a keyring.
+    ///
+    /// Signing is deterministic from a 32-byte seed rather than an RNG, so an
+    /// offline signer is reproducible. Generating and protecting that seed is a
+    /// deployment concern this tool deliberately does not perform: it will not
+    /// invent key material, only read a seed you already manage.
+    Keygen {
+        /// File holding the 32-byte seed, either 64 hex characters or 32 raw
+        /// bytes. Keep it offline; anyone holding it can sign manifests.
+        #[arg(long)]
+        seed_file: PathBuf,
+        /// Key id to print alongside the verifying key.
+        #[arg(long, default_value = "andromeda-hcm-root")]
+        key_id: String,
+    },
+    /// Sign an HCM manifest, emitting the manifest with its `signature` set.
+    ///
+    /// Canonicalization strips any existing signature, so re-signing an
+    /// already-signed manifest is safe.
+    Sign {
+        manifest: PathBuf,
+        /// File holding the 32-byte seed (64 hex characters or 32 raw bytes).
+        #[arg(long)]
+        seed_file: PathBuf,
+        /// Key id recorded in the signature; must match the keyring entry that
+        /// verifiers will use.
+        #[arg(long, default_value = "andromeda-hcm-root")]
+        key_id: String,
+        /// Write the signed manifest here instead of stdout.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+}
+
+/// Reads a 32-byte signing seed from `path`, accepting either 64 hex
+/// characters (optionally whitespace-terminated) or 32 raw bytes.
+///
+/// Seeds are read, never generated: inventing key material in a developer CLI
+/// would produce keys nobody can account for.
+fn load_seed(path: &Path) -> Result<[u8; 32], String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("cannot read seed {}: {error}", path.display()))?;
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        let trimmed = text.trim();
+        if trimmed.len() == 64 && trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            let mut seed = [0u8; 32];
+            for (index, slot) in seed.iter_mut().enumerate() {
+                *slot = u8::from_str_radix(&trimmed[index * 2..index * 2 + 2], 16)
+                    .map_err(|error| format!("invalid hex in seed: {error}"))?;
+            }
+            return Ok(seed);
+        }
+    }
+    <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| {
+        format!(
+            "seed {} must be 64 hex characters or exactly 32 raw bytes, found {} bytes",
+            path.display(),
+            bytes.len()
+        )
+    })
 }
 
 /// Tiers whose evaluation must not be gated on an unauthenticated manifest.
@@ -294,9 +355,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Signing operations describe a manifest, not this machine, and are meant to
+/// run on an offline signer that may not even be the target platform. Probing
+/// there would be pointless and could fail for unrelated reasons, so these are
+/// handled before any probe happens.
+fn handle_signing(command: HardwareCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        HardwareCommand::Keygen { seed_file, key_id } => {
+            let key = ManifestSigningKey::from_seed(&load_seed(&seed_file)?);
+            print_json(&serde_json::json!({
+                "key_id": key_id,
+                "verifying_key_hex": key.verifying_key_hex(),
+                "keyring_entry": { key_id.clone(): key.verifying_key_hex() },
+            }))?;
+        }
+        HardwareCommand::Sign {
+            manifest,
+            seed_file,
+            key_id,
+            output,
+        } => {
+            let key = ManifestSigningKey::from_seed(&load_seed(&seed_file)?);
+            let mut manifest = load_manifest(&manifest)?;
+            manifest.signature = Some(key.sign_manifest(&manifest, key_id)?);
+            let json = serde_json::to_string_pretty(&manifest)?;
+            match output {
+                Some(path) => {
+                    std::fs::write(&path, format!("{json}\n"))?;
+                    eprintln!("signed manifest written to {}", path.display());
+                }
+                None => println!("{json}"),
+            }
+        }
+        _ => unreachable!("handle_signing only accepts Keygen and Sign"),
+    }
+    Ok(())
+}
+
 fn handle_hardware(command: HardwareCommand) -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(
+        command,
+        HardwareCommand::Keygen { .. } | HardwareCommand::Sign { .. }
+    ) {
+        return handle_signing(command);
+    }
+
     let report = probe_host()?;
     match command {
+        HardwareCommand::Keygen { .. } | HardwareCommand::Sign { .. } => unreachable!(),
         HardwareCommand::Probe => print_json(&report)?,
         HardwareCommand::Diagnose => print_json(&diagnose_report(&report))?,
         HardwareCommand::Check {

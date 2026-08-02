@@ -41,6 +41,30 @@
 `blocked`/`community`/`reference` 不作真实硬件承诺（`reference` 只代表虚拟证据），
 自我声明它们不会误导任何人，因此不受此限制。
 
+### 签发：`hardware keygen` 与 `hardware sign`
+
+验签只有在能签名时才有意义。两个子命令在**离线签名机**上运行，都不探测本机硬件：
+
+```bash
+andromeda hardware keygen --seed-file root.seed --key-id andromeda-hcm-root
+```
+
+从一个 **32 字节种子**（64 位 hex 或 32 原始字节）导出验证公钥，并直接打印可粘贴进
+keyring 文件的 `keyring_entry`。签名是**由种子确定性导出**的，不用 RNG，因此离线签名器
+可复现。
+
+> **本工具不生成密钥材料。** 种子的生成、离线保管（HSM/离线根）与轮换是部署职责；
+> 一个开发者 CLI 随手造出的密钥没人能对其负责。持有种子者即可签发任意清单。
+
+```bash
+andromeda hardware sign cohort.json --seed-file root.seed \
+  --key-id andromeda-hcm-root --output cohort-signed.json
+```
+
+规范化会剥离已有 `signature`，因此对已签名清单重新签名是安全的。
+
+完整闭环：`keygen` → 把 `keyring_entry` 写入 keyring 文件 → `sign` → `check --trusted-keys`。
+
 ### 已验证的行为
 
 以一份 selector 命中本机、`requirements: []`、含任意 `sha256` 与 2099 年到期证据、
@@ -51,6 +75,14 @@
   也是为什么它不能当门控）；
 - `--require-tier certified --trusted-keys keys.json` → `blocked`，原因为
   `manifest is unsigned but a trusted keyring is configured; authenticity cannot be established`。
+
+对**已签名**清单的补充实测（同一 keyring）：
+
+| 场景 | 结果 |
+|---|---|
+| 用可信种子签名，但制品 pin 声明了 keyring 之外的 key id | `blocked` —— `artifact 'vmlinuz' names signing key 'totally-real-key', which is not in the trusted keyring`（纵深防御：清单真实性与制品真实性分别成立才放行） |
+| 内部一致、正确签名、制品哈希与 key id 均匹配 | **`certified`，`missing: []`，退出码 0**（正向路径确实可通过——一个永远 `blocked` 的门控没有价值） |
+| 在签名后篡改任一字段（如改 `name`） | `blocked` —— `manifest signature failed ed25519 verification ... Verification equation was not satisfied` |
 
 ## v1 报告与诊断
 
