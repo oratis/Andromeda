@@ -11,22 +11,46 @@
 - 可追溯 CI evidence；
 - 安全更新责任人与支持期限。
 
-## 信任边界：`hardware check` 不是信任门控
+## 信任边界：真实性必须显式开启
 
-matcher 校验的是清单的**内部一致性与新鲜度**（selector 是否命中、requirement 是否满足、
-证据是否过期、supported 以上是否固定了制品），**不是真实性**。具体地：
+**默认不校验真实性。** 不带 `--trusted-keys` 时，matcher 只校验清单的**内部一致性与
+新鲜度**（selector 是否命中、requirement 是否满足、证据是否过期、supported 以上是否
+固定了制品）。此时清单的 `tier` 是**自我声明**的，任何人写一份文件都能声明
+`certified`；`sha256` 也被原样采信。这条路径的结果是**咨询性的，不是信任门控**。
 
-- 不带 `--artifact-root` 时，清单里声明的 `sha256` **被原样采信**，不做任何字节比对；
-- HCM 目前**没有 manifest 级签名字段**，`ArtifactPin.signing_key_id` 只用于比对可信 key id
-  集合，不验证真实的 detached 签名（见 `crates/andromeda-hardware/src/verify.rs` 的说明）。
+### 三档校验强度
 
-因此一份自造的清单可以让 `andromeda hardware check --require-tier certified` 返回
-`certified` 与退出码 0。**在离线根密钥签名落地前（见"下一步"），不得把 `hardware check`
-的退出码用于放行安装、启用驱动或提升支持等级。**
+| 调用方式 | 校验内容 | 可否作信任门控 |
+|---|---|---|
+| `hardware check m.json` | 一致性 + 新鲜度 | **否**（会打印两条 warning） |
+| `+ --artifact-root <dir>` | 追加：每个 pin 解析为 `<dir>/<name>`、重算 SHA-256 比对；不匹配或缺失即 `blocked` | 否（清单本身仍未认证） |
+| `+ --trusted-keys <file>` | 追加：清单必须携带 detached ed25519 签名，且解析到 keyring 中的可信 key 并在**规范化字节**上验签，否则 `effective_tier` 被打到 `blocked` | **是** |
 
-带 `--artifact-root <dir>` 时，每个 pin 会被解析为 `<dir>/<name>`、重算 SHA-256 并比对，
-不匹配或缺失即把 `effective_tier` 打到 `blocked`；再加 `--trusted-key <id>`（可重复）会
-要求每个 pin 声明可信 key id。这是当前可用的最强校验，仍不等于签名验证。
+`--trusted-keys` 接受 `{"key_id": "<64 位 hex 验证公钥>"}` 的 JSON 文件。空文件被拒绝
+（空 keyring 谁都不信，会静默阻断一切，属于易误用的配置）。
+
+`--artifact-signing-key <id>`（可重复，需配合 `--artifact-root`）另外要求每个**制品 pin**
+声明可信 key id；它认证的是制品，与 `--trusted-keys` 认证清单本身是两件事。
+
+### 高等级门控 fail-closed
+
+`--require-tier supported` 或 `certified` 表达的是对真实硬件的真实承诺，因此
+**不带 `--trusted-keys` 时会被直接拒绝**（非零退出，不产生判定结果），而不是打印一条
+没人看的警告。确实需要咨询性检查时，必须显式加 `--allow-unverified` 表示知情。
+
+`blocked`/`community`/`reference` 不作真实硬件承诺（`reference` 只代表虚拟证据），
+自我声明它们不会误导任何人，因此不受此限制。
+
+### 已验证的行为
+
+以一份 selector 命中本机、`requirements: []`、含任意 `sha256` 与 2099 年到期证据、
+**且不带签名**的伪造清单实测：
+
+- `--require-tier certified` → **拒绝执行**，提示需要 `--trusted-keys`；
+- `--require-tier certified --allow-unverified` → `certified`（这正是咨询模式的含义，
+  也是为什么它不能当门控）；
+- `--require-tier certified --trusted-keys keys.json` → `blocked`，原因为
+  `manifest is unsigned but a trusted keyring is configured; authenticity cannot be established`。
 
 ## v1 报告与诊断
 

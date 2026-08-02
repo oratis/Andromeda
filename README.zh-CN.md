@@ -677,7 +677,8 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
 - L3 确认是**调用方自报，而非 broker 证明**：它证明"确认这一步发生过并被归属"，
   不证明"确认来自真实的人"；
 - 证据由执行方自己记录，**没有独立 verifier**；
-- `andromeda hardware check` **不是信任门控**，见 [SECURITY.md](./SECURITY.md)；
+- `andromeda hardware check` 只有在传入 `--trusted-keys` 时才认证清单；不传时清单的
+  `tier` 是自我声明的。用未认证的检查去门控 `--require-tier supported|certified` 会被直接拒绝；
 - 当前没有真实 tool executor，不应把 API 暴露到不可信网络；
 - 以下均**未实现**，任何集成都不得暗示其存在：模型调用与 planner、
   bubblewrap/SELinux/microVM executor、credential broker、确认代理、

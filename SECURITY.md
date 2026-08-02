@@ -23,7 +23,7 @@ Do not open a public issue for an unpatched vulnerability involving privilege bo
 Two boundaries are called out here because integrations get them wrong:
 
 - **Malicious root and physical administrators are explicitly out of scope for v0.** Task records are not a tamper-evident ledger.
-- **`andromeda hardware check` is not a trust gate.** A forged manifest reaches `certified` without `--artifact-root`, because HCM has no manifest-level signature yet.
+- **`andromeda hardware check` authenticates a manifest only when `--trusted-keys` is passed.** Without a keyring the manifest's declared tier is self-asserted and a forged file reaches `certified`; gating `--require-tier supported|certified` on such a check is refused outright.
 
 ## Current security invariants
 

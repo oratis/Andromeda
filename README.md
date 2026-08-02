@@ -726,7 +726,9 @@ Detailed rules are in
 - the L3 confirmation is **caller-asserted, not broker-attested**: it proves a commit point was
   taken and by whom, not that a human took it;
 - evidence is recorded by the executing party; there is **no independent verifier**;
-- `andromeda hardware check` is **not a trust gate** — see [SECURITY.md](./SECURITY.md);
+- `andromeda hardware check` authenticates a manifest only when `--trusted-keys` is passed;
+  without it the manifest's declared tier is self-asserted. Gating `--require-tier
+  supported|certified` on an unverified check is refused outright;
 - there is no real tool executor, so the API must not be exposed to untrusted networks;
 - the following are **not implemented**, and no integration may imply otherwise: model
   invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, confirmation
