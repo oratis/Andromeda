@@ -11,8 +11,7 @@
   ],
   "extends": [
     "config:recommended",
-    "docker:pinDigests",
-    "helpers:pinGitHubActionDigests"
+    "docker:pinDigests"
   ],
   "timezone": "Etc/UTC",
   "schedule": ["before 6am on monday"],
@@ -20,7 +19,27 @@
   "dependencyDashboard": true,
   "prConcurrentLimit": 5,
   "prHourlyLimit": 2,
-  "enabledManagers": ["dockerfile", "github-actions"],
+  "enabledManagers": ["dockerfile", "github-actions", "custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": [
+        "os/scripts/build-iso.sh pins ghcr.io/osbuild/image-builder-cli by digest",
+        "inside a plain shell parameter default that no built-in manager parses.",
+        "Without this entry that pin has NO refresh path: it crosses the 90-day",
+        "age budget and stays permanently STALE in check-pin-freshness.sh with",
+        "nothing ever opening the refresh PR. The digest tracks :latest",
+        "(currentValueTemplate); Renovate rewrites only the sha256 capture group",
+        "in place, leaving the surrounding shell syntax untouched."
+      ],
+      "managerFilePatterns": ["/^os/scripts/build-iso\\.sh$/"],
+      "matchStrings": [
+        "IMAGE_BUILDER_IMAGE:-(?<depName>ghcr\\.io/osbuild/image-builder-cli)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "currentValueTemplate": "latest",
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "description": [
@@ -41,20 +60,29 @@
         "on Tuesday but only files on Monday can rot in between. Run these at any",
         "time and give them priority over everything else in the queue.",
         "Cooling-off (minimumReleaseAge) is deliberately NOT applied here: for a",
-        "digest refresh, delay is the failure mode, not the mitigation."
+        "digest refresh, delay is the failure mode, not the mitigation.",
+        "The dedicated groupName matters: packageRules merge per-field with later",
+        "rules winning, so without it digest updates would inherit 'container base",
+        "images' from the rule above and land on the WEEKLY version-bump branch --",
+        "silently defeating the at-any-time schedule and prPriority set here.",
+        "custom.regex is included so the build-iso.sh image-builder-cli digest",
+        "(see customManagers) refreshes on the same no-wait terms."
       ],
-      "matchManagers": ["dockerfile"],
+      "matchManagers": ["dockerfile", "custom.regex"],
       "matchUpdateTypes": ["digest", "pin", "pinDigest"],
       "schedule": ["at any time"],
-      "prPriority": 10
+      "prPriority": 10,
+      "groupName": "container base image digests"
     },
     {
       "description": [
-        "GitHub Actions stay pinned to a full commit SHA with the version as a",
-        "trailing comment, which is the policy already documented in ci.yml and",
-        "os-e2e.yml. Renovate updates the SHA and rewrites that comment in step.",
-        "Grouped into one PR because action bumps are low-risk and reviewing five",
-        "separate SHA diffs a week is how pin hygiene gets abandoned."
+        "THIRD-PARTY GitHub Actions stay pinned to a full commit SHA with the",
+        "version as a trailing comment, which is the policy already documented in",
+        "ci.yml and os-e2e.yml. Renovate updates the SHA and rewrites that comment",
+        "in step. Grouped into one PR because action bumps are low-risk and",
+        "reviewing five separate SHA diffs a week is how pin hygiene gets",
+        "abandoned. First-party actions/* are exempted by the NEXT rule (later",
+        "rules win per-field), keeping them on major tags per the same policy."
       ],
       "matchManagers": ["github-actions"],
       "pinDigests": true,
@@ -63,12 +91,22 @@
     },
     {
       "description": [
-        "First-party actions/* are currently pinned to major tags by repository",
-        "policy. Group them separately so that a deliberate move to SHA pinning is",
-        "one reviewable PR rather than noise mixed into third-party bumps."
+        "First-party actions/* are pinned to major tags by repository policy",
+        "(ci.yml: 'first-party actions/* are pinned to major tags; third-party",
+        "actions are pinned to a full commit SHA'). pinDigests: false is",
+        "load-bearing: the previous rule sets pinDigests: true for ALL",
+        "github-actions deps, and without this per-field override Renovate's",
+        "first run would propose rewriting actions/checkout@v4 to a SHA --",
+        "directly against the documented policy. This is also why the",
+        "helpers:pinGitHubActionDigests preset is NOT in extends: the explicit",
+        "rule above already covers third-party pinning, and the preset would",
+        "only restate the blanket pin this rule exists to carve out.",
+        "Grouped separately so a deliberate future move to SHA pinning is one",
+        "reviewable PR rather than noise mixed into third-party bumps."
       ],
       "matchManagers": ["github-actions"],
       "matchPackageNames": ["actions/**"],
+      "pinDigests": false,
       "groupName": "github actions (first-party)"
     }
   ],

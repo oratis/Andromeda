@@ -37,7 +37,7 @@
 
 | 输入 | 位置 | Tier | 当前状态 | 备注 |
 |---|---|---|---|---|
-| `docker.io/library/rust` | `os/Containerfile:15` | A | ✅ digest pin | Docker Hub 永久保留历史 digest，pin 不会失效。但**内容已 501 天**，见下方新鲜度检查输出 |
+| `docker.io/library/rust` | `os/Containerfile:16` | A | ✅ digest pin | Docker Hub 永久保留历史 digest，pin 不会失效。但**内容已 501 天**，见下方新鲜度检查输出 |
 | `quay.io/fedora/fedora-bootc:44` | `os/Containerfile` payload stage | A | ⚠️ **tag 跟踪，待重新 pin** | 阻塞项：Renovate App 未安装。见下方运行手册 |
 | `ghcr.io/osbuild/image-builder-cli` | `os/scripts/build-iso.sh:7` | A | ✅ digest pin | **风险已排除**，见「ghcr.io 保留策略调查」 |
 | dnf 包（23 事务，~300 包） | `os/Containerfile` payload stage | B | ❌ 完全不固定 | **可复现性最大黑洞**。见「Tier B：dnf 快照评估」 |
@@ -51,14 +51,32 @@
 
 - `docker:pinDigests` + `matchManagers: ["dockerfile"]` 的 `pinDigests: true`
   —— 基础镜像保持 digest 固定，上游重新发布时开 PR。
-- `helpers:pinGitHubActionDigests` —— Actions 保持 SHA 固定，Renovate
-  更新 SHA 的同时重写尾部版本注释（与 `ci.yml` 既有 pin 策略一致）。
-- `enabledManagers` 限定为 `dockerfile` + `github-actions` —— 刻意不接管
-  Cargo，避免把供应链 PR 和 Rust 依赖 PR 混在一起。
+- **三方** Actions 保持 SHA 固定（`matchManagers: ["github-actions"]` 的
+  `pinDigests: true`），Renovate 更新 SHA 的同时重写尾部版本注释；
+  **first-party `actions/**` 由后置规则以 `pinDigests: false` 显式豁免**，
+  维持 major tag（与 `ci.yml` 注释的既有策略一致：first-party major tag、
+  三方全量 SHA）。packageRules 按序合并、后者逐字段覆盖，这个豁免是
+  载荷所在 —— 没有它，Renovate 首次运行就会提议把 `actions/checkout@v4`
+  改写成 SHA。也因此 `helpers:pinGitHubActionDigests` 预设**不在** extends
+  里：显式规则已覆盖三方 pin，预设只会重述这条豁免要削掉的全量 pin。
+- digest/pin 刷新有**自己的** `groupName`（`container base image digests`），
+  与每周版本升级分支分开 —— 否则 digest 更新会继承上一条规则的组名、
+  被并进每周分支，`at any time` + `prPriority` 就被静默架空了。
+- `customManagers` 的 regex 条目覆盖 `os/scripts/build-iso.sh` 里
+  `IMAGE_BUILDER_IMAGE="...ghcr.io/osbuild/image-builder-cli@sha256:..."`
+  的 shell 赋值 —— 没有任何内置 manager 解析这种形态，这个 pin 原本
+  没有刷新路径，到第 91 天起会永久 STALE。
+- `enabledManagers` 限定为 `dockerfile` + `github-actions` + `custom.regex`
+  —— 刻意不接管 Cargo，避免把供应链 PR 和 Rust 依赖 PR 混在一起。
 - 常规更新走每周窗口；**digest 刷新不排队**（`schedule: ["at any time"]` +
   `prPriority: 10`）。因为 quay 是按天回收的，「周一才提交周二发现的刷新」
   这段延迟本身就是故障窗口。
 - 安全更新（`vulnerabilityAlerts`）完全绕过窗口与冷却期。
+- `osvVulnerabilityAlerts: true` 目前是**前瞻性配置，实际不起作用**：
+  OSV 告警覆盖的是语言生态（如 Cargo/npm），而本仓库只启用了
+  dockerfile / github-actions / custom.regex 三个 manager，没有任何
+  受 OSV 覆盖的依赖归 Renovate 管。要让它生效需启用 cargo manager
+  （届时应保持 automerge 关闭）；在那之前不要把它当作已有的防线。
 
 ### ⚠️ 这份配置在 Renovate App 安装之前完全不起作用
 
@@ -83,12 +101,17 @@
 
 - [ ] Renovate App 已安装在 `oratis/Andromeda`；
 - [ ] Renovate 已经实际开过至少一个 PR（证明它能写这个仓库，而不只是被安装）；
-- [ ] `os/scripts/check-pin-freshness.sh` 当前无 `UNRESOLVABLE` 发现。
+- [ ] `os/scripts/check-pin-freshness.sh --fail-on unresolvable` 通过（退出码 0）。
 
 **首选路径：让 Renovate 自己 pin。**
 `pinDigests: true` 会让 Renovate 首次运行时就开一个 "Pin dependencies" PR。
 合并它即可 —— 这条路径的价值在于：**开 PR 这个动作本身就证明了刷新机制是活的**，
 而手工 pin 得不到这个证明。
+
+> **合并该 Pin PR 时必须同步删除 `os/Containerfile` 中标注
+> “TIER A / RE-PIN PENDING …… intentionally NOT digest-pinned” 的注释块**
+> （与下方手工路径第 3 步是同一个动作）。Renovate 只改写镜像引用那一行，
+> 不会替你删注释；留着它，注释就变成与事实相反的误导。
 
 **回退路径：手工 pin（仅当 Renovate 因故不能改写该文件时）**
 
@@ -106,7 +129,10 @@
 2. 把 `os/Containerfile` 的 payload stage 改为该引用（**保留 `:44` tag**，
    digest 只是追加；tag 提供可读性，digest 提供不可变性）。
 3. 删除该行上方标注 “TIER A / RE-PIN PENDING” 的注释块。
-4. 验证：`os/scripts/check-pin-freshness.sh --strict` 必须通过。
+4. 验证：`os/scripts/check-pin-freshness.sh --fail-on unresolvable` 必须通过。
+   （不要用 `--strict` / `--fail-on any` 做这一步的门禁：rust pin 的 501 天
+   STALE 是已知的**咨询级**发现，会让门禁永远无法通过 —— 而这一步要验证的
+   只是「刚写入的 pin 现在解析得到」。）
 5. 合并后**盯住第一个 Renovate digest 刷新 PR**。如果两周内一个都没出现，
    说明自动化没生效 —— 此时应当立刻解绑回 tag，而不是等它烂掉。
 
@@ -118,34 +144,60 @@
 `os/scripts/check-pin-freshness.sh` 是 Tier A 的兜底：它在 pin 烂掉**之前**报警，
 而不是等构建炸了才发现。
 
-对扫到的每个镜像引用回答两个问题：
+对扫到的每个镜像引用给出**四类**结论，类别之间的区分是有意为之：
 
-1. **RESOLVABLE?** registry 是否还提供这个 digest —— 这就是 fedora-bootc 那次故障；
-2. **HOW OLD?** pin 的内容有多旧 —— 既是回收风险的代理指标，也是「漏了多少上游修复」的信号。
+| 类别 | 含义 | 严重性 |
+|---|---|---|
+| **UNRESOLVABLE** | registry **明确**报告 digest 已不存在（HTTP 404/410）—— 这就是 fedora-bootc 那次故障，pin **现在**就是坏的 | 阻断级 |
+| **STALE** | 仍可解析，但超过年龄预算 —— 回收风险的代理指标 + 漏掉的上游修复 | 咨询级 |
+| **INDETERMINATE** | registry 没有给出干净的答案：限流（429）、故障（5xx）、超时、或没有暴露构建时间戳。**不是** digest 被删的证据，但也**不再被静默吞掉** —— 静默降级正是 1921496 那次「时间戳信号半死、CI 却全绿」的成因 | 咨询级 |
+| OK | 可解析且在预算内 | —— |
 
 未固定的引用也会报告，并打印它当前解析到的 digest，让上面的运行手册变成复制粘贴。
 
 ```console
-$ os/scripts/check-pin-freshness.sh          # 咨询模式，永远退出 0
-$ os/scripts/check-pin-freshness.sh --strict # 有发现即退出 1
+$ os/scripts/check-pin-freshness.sh                        # 咨询模式，发现只警告
+$ os/scripts/check-pin-freshness.sh --fail-on unresolvable # 仅 pin 已坏才失败
+$ os/scripts/check-pin-freshness.sh --fail-on any          # 任何发现都失败（--strict 是别名）
 $ os/scripts/check-pin-freshness.sh --max-age-days 30
 ```
 
+退出码：
+
+- `0` —— 通过，或发现未被 `--fail-on` 门禁覆盖（咨询模式恒为 0，除非基础设施故障）；
+- `1` —— 门禁命中且含至少一个 UNRESOLVABLE（构建阻断级）；
+- `3` —— 门禁命中但全部是 STALE / INDETERMINATE（咨询级被提升）；
+- `2` —— 用法错误、没有可用的 registry 客户端、或**扫描到 0 个引用**
+  （「什么都没查」不允许被当作通过 —— 那说明扫描列表或提取逻辑坏了）。
+
+`--fail-on stale` 门禁的是超集 {unresolvable, stale}：staleness 门禁放过一个
+registry 已删除的 pin 是荒谬的。
+
 - 后端：优先 `skopeo`；缺失时回退到 `curl` + `jq` 走 Docker Registry v2 HTTP API
   （ubuntu-latest 预装两者，因此不需要 apt 步骤，也能在 macOS 开发机上跑）。
+  两条路径的 registry 访问都有界（`--max-time` + 有限重试），瞬时 429/5xx 会
+  重试几次后归入 INDETERMINATE，而不是被误报成「digest 已被删除」。
 - 默认年龄预算 90 天，可用 `ANDROMEDA_PIN_MAX_AGE_DAYS` 覆盖。
 - 默认扫描 `os/Containerfile` 与 `os/scripts/build-iso.sh`（**只读**）。
+- 末尾输出一行机器可读摘要，CI 日志里可直接 grep：
+  `ANDROMEDA_PIN_FRESHNESS unresolvable=N stale=N indeterminate=N checked=N`；
+  设置了 `$GITHUB_STEP_SUMMARY` 时同时追加人类可读摘要。
 
-### 为什么 CI 里是非阻塞的
-
-`.github/workflows/ci.yml` 的 `supply-chain` job 用 `continue-on-error: true`。
+### 为什么 CI 里是非阻塞的（以及为什么不再用 continue-on-error）
 
 这一步报告的是**仓库之外的世界**：上游 registry 现在是否还提供某个 digest。
 这个答案可以在没有任何人改动本仓库的情况下变化。如果把它设成合并门禁，
 一个完全无关的 PR 会因为它作者既没造成、也无法在该 PR 里修复的问题而变红 ——
 **这恰恰就是 run 30702410393 的体验**。这个信号属于仪表盘，不属于合并门禁。
 
-需要门禁语义的调用方（例如 release 前检查）显式加 `--strict`。
+非阻塞由脚本自身的**咨询模式**提供（默认不加 `--fail-on`，有发现也退出 0）。
+`ci.yml` 里**不再**叠加 `continue-on-error: true`：咨询模式下它唯一能吞掉的
+就是退出码 2 —— 也就是「检查自身坏了」（用法错误、抓不到任何引用、没有可用
+客户端）。证据：时间戳信号半死的那次首跑（commit 1921496）是绿的。现在这类
+故障会把 job 变红，这是有意的。job 另设 `timeout-minutes: 10` 兜底。
+
+需要门禁语义的调用方（例如 release 前检查、重新 pin 运行手册第 4 步）显式加
+`--fail-on unresolvable`；想连 STALE / INDETERMINATE 一起拦的用 `--fail-on any`。
 
 ### 当前输出（2026-08-02）
 
@@ -277,4 +329,9 @@ RUN printf '%s\n' \
 上游漂移应该由定时任务先撞上，而不是由下一个倒霉的 PR 作者撞上
 （fedora-bootc 那次正是被一个无关 PR 撞上的）。对应评审 P0 #5 的
 `schedule:` 触发器，由 `opt/e2e-p0-hardening` 系列负责，不在本文范围内。
-新鲜度检查每个 PR 都会跑，已经提供了一部分同样的早期信号。
+
+新鲜度检查除了每个 PR 都跑之外，`ci.yml` 自身还有 03:30 UTC 的 nightly
+调度（与 os-e2e 的 03:00 错开），届时**只运行** `supply-chain` job（其余 job
+带 `if: github.event_name != 'schedule'` 守卫）。这补上了检查里唯一依赖
+时间流逝而非提交的信号：pin 的**预烂年龄告警**在两个 PR 之间也能触发，
+而不是等下一个 PR 恰好出现才有机会报警。
