@@ -56,7 +56,10 @@ jobs:
         run: |
           shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
           os/scripts/test-installer-platform-guard.sh
-          os/scripts/test-containerfile-layer-budget.sh
+          # Static Containerfile layer-COUNT floor only; no image exists yet.
+          # The layer-SIZE budget runs post-build below against real history.
+          ANDROMEDA_LAYER_BUDGET_MODE=count \
+            os/scripts/test-containerfile-layer-budget.sh
 
       - name: Build payloads and installer ISO
         # INSTALLER_DEFAULT=1 makes the destructive automated install the
@@ -68,6 +71,19 @@ jobs:
         run: |
           sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME,INSTALLER_DEFAULT \
             os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
+
+      - name: Enforce payload layer-size budget against real history
+        # The count-only floor ran pre-build; now build-iso.sh has produced
+        # andromeda-v1-history.json, so assert the largest real OCI layer fits
+        # the installer /var/tmp overlay budget before the long install. `size`
+        # mode FAILS (does not skip) if the history JSON is missing and always
+        # prints ANDROMEDA_MAX_PAYLOAD_LAYER_BYTES_OBSERVED, so the real baseline
+        # can be read from these logs and the 3 GiB headroom default tightened.
+        # build-iso.sh ran under sudo; the history JSON is world-readable
+        # (root umask 022), so this read-only check needs no privileges.
+        env:
+          ANDROMEDA_LAYER_BUDGET_MODE: size
+        run: os/scripts/test-containerfile-layer-budget.sh "$GITHUB_WORKSPACE/output"
 
       - name: Install to a blank disk and verify lifecycle
         run: sudo os/scripts/test-install.sh "$GITHUB_WORKSPACE/output"
