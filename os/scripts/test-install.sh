@@ -104,11 +104,12 @@ if [[ -c /dev/kvm ]]; then
 elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
     # Mirror test-gcp-nested.sh's `test -c /dev/kvm` precheck. Without KVM the
     # TCG software fallback runs ~10x slower: the 45m install timeout plus the
-    # 2700s boot deadline can exceed the os-e2e job `timeout-minutes: 180`, so a
-    # missing /dev/kvm would surface as a confusing timeout instead of a clear
-    # failure. Fail fast; set ANDROMEDA_ALLOW_TCG=1 to force TCG for local debug.
+    # 2700s boot deadline can exceed the os-e2e lifecycle job
+    # `timeout-minutes: 140`, so a missing /dev/kvm would surface as a
+    # confusing timeout instead of a clear failure. Fail fast; set
+    # ANDROMEDA_ALLOW_TCG=1 to force TCG for local debug.
     printf 'test-install.sh: /dev/kvm is unavailable.\n' >&2
-    printf 'The TCG software fallback can exceed the os-e2e job timeout (180m) and surface as a confusing timeout rather than a clear failure.\n' >&2
+    printf 'The TCG software fallback can exceed the os-e2e lifecycle job timeout (140m) and surface as a confusing timeout rather than a clear failure.\n' >&2
     printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
     exit 1
 else
@@ -411,7 +412,8 @@ qemu-system-x86_64 \
     -serial "file:${BOOT_LOG}" &
 qemu_pid="$!"
 
-# TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4).
+# TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4,
+# re-derived for the P1 #7 job split).
 # The budgets must nest, or a genuinely slow run surfaces as an unattributable
 # cancellation instead of a named timeout:
 #
@@ -424,9 +426,11 @@ qemu_pid="$!"
 #                           + matrix 3 x 10 min (a HOST-side cap that
 #                             deliberately sits below the 12 min verify unit
 #                             timeout; test-hardware-matrix.sh explains why)
-#                           + build (<=50 min; observed max 42.25 min)
-#                           + prep/upload ~6 min = ~176 min
-#     <  job timeout        os-e2e.yml timeout-minutes: 180
+#                           + free-disk/apt/download/upload ~15 min = ~135 min
+#     <  job timeout        os-e2e.yml `lifecycle` job timeout-minutes: 140
+#
+# The image build no longer appears in this sum: since the split it runs in
+# the separate `build` job, whose own budget derivation lives in os-e2e.yml.
 #
 # Changing any budget here means re-checking the two sites above and below it.
 deadline="$((SECONDS + 2700))"

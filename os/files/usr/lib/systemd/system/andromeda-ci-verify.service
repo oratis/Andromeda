@@ -33,7 +33,9 @@ ExecStart=/usr/libexec/andromeda-ci-verify
 # healthy guest would be killed by the host with no unit-level diagnostic.
 # Observed full lifecycle including all three boots is 10-15min, so 12min per
 # boot is roughly 4x headroom. Raising this REQUIRES raising the boot deadline in
-# test-install.sh and re-checking os-e2e.yml timeout-minutes.
+# test-install.sh and re-checking the `lifecycle` job's timeout-minutes in
+# os-e2e.yml (the innermost budgets above are unchanged by the P1 #7 job split;
+# only that outermost job number moved).
 TimeoutStartSec=12min
 
 [Install]

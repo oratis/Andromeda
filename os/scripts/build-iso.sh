@@ -74,45 +74,74 @@ readonly PAYLOAD_CACHE_PUSH="${ANDROMEDA_PAYLOAD_CACHE_PUSH:-0}"
 # rationale at the top of payload-cache-key.sh.
 readonly PAYLOAD_CACHE_TTL="${ANDROMEDA_PAYLOAD_CACHE_TTL:-168h}"
 
-cache_build_args=()
+# cache_pull_args reuse cached layers (--cache-from, plus the TTL bound);
+# cache_push_args additionally publish them (--cache-to). They are separate so
+# a stage can opt out of publishing without giving up reuse -- see
+# run_cached_build below.
+cache_pull_args=()
+cache_push_args=()
 if [[ -n "${PAYLOAD_CACHE_BASE_REPO}" ]]; then
+    # `|| true` because run_cached_build's invariant -- a cache problem must
+    # never fail the build -- has to start here: under `set -euo pipefail` an
+    # unguarded $(...) would turn a key-script failure into a build failure
+    # before the first build even starts.
     cache_identity="$(
         ANDROMEDA_PAYLOAD_CACHE_REPO="${PAYLOAD_CACHE_BASE_REPO}" \
             "${REPOSITORY_ROOT}/os/scripts/payload-cache-key.sh" \
-            --print repo,ref,content-hash
+            --print repo,ref,content-hash || true
     )"
-    read -r payload_cache_repo payload_cache_ref payload_cache_hash \
-        <<< "${cache_identity}"
+    payload_cache_repo=""
+    payload_cache_ref=""
+    payload_cache_hash=""
+    if [[ -n "${cache_identity}" ]]; then
+        read -r payload_cache_repo payload_cache_ref payload_cache_hash \
+            <<< "${cache_identity}"
+    fi
 
-    # Probe the flags rather than assuming a podman version. --cache-from /
-    # --cache-to / --cache-ttl landed together in podman 4.5 (buildah 1.30) and
-    # ubuntu-latest is well past that, but this script also runs on Fedora hosts
-    # and on whatever ubuntu-latest becomes next; an unsupported flag must
-    # degrade to an uncached build, never to a hard failure.
-    build_help="$("${engine[@]}" build --help 2>&1 || true)"
-    if grep -q -- '--cache-to' <<< "${build_help}"; then
-        # A REPOSITORY, deliberately untagged: buildah trims any tag handed to
-        # --cache-from/--cache-to and applies its own per-layer cache-key tags.
-        cache_build_args+=(--cache-from "${payload_cache_repo}")
-        if [[ "${PAYLOAD_CACHE_PUSH}" == "1" ]]; then
-            cache_build_args+=(--cache-to "${payload_cache_repo}")
-        fi
-        if grep -q -- '--cache-ttl' <<< "${build_help}"; then
-            cache_build_args+=(--cache-ttl "${PAYLOAD_CACHE_TTL}")
-        fi
-        printf 'ANDROMEDA_PAYLOAD_CACHE mode=layers repo=%s ref=%s push=%s ttl=%s\n' \
-            "${payload_cache_repo}" "${payload_cache_ref}" \
-            "${PAYLOAD_CACHE_PUSH}" "${PAYLOAD_CACHE_TTL}"
-        printf 'ANDROMEDA_PAYLOAD_CACHE_CONTENT_HASH=%s\n' "${payload_cache_hash}"
+    if [[ -z "${payload_cache_repo}" || -z "${payload_cache_ref}" ||
+        -z "${payload_cache_hash}" ]]; then
+        # Any missing field means the script failed or printed something
+        # unexpected; either way the identity cannot be trusted as a cache key.
+        printf 'ANDROMEDA_PAYLOAD_CACHE mode=disabled reason=key-script-failed\n'
+        printf 'WARNING: payload cache disabled: key script failed; building cold.\n' >&2
     else
-        printf 'ANDROMEDA_PAYLOAD_CACHE mode=disabled reason=no-cache-to-flag\n'
-        printf 'WARNING: this podman has no --cache-to; building without the cross-run layer cache.\n' >&2
+        # Probe the flags rather than assuming a podman version. --cache-from /
+        # --cache-to / --cache-ttl landed together in podman 4.5 (buildah 1.30)
+        # and ubuntu-latest is well past that, but this script also runs on
+        # Fedora hosts and on whatever ubuntu-latest becomes next; an
+        # unsupported flag must degrade to an uncached build, never to a hard
+        # failure.
+        build_help="$("${engine[@]}" build --help 2>&1 || true)"
+        if grep -q -- '--cache-to' <<< "${build_help}"; then
+            # A REPOSITORY, deliberately untagged: buildah trims any tag handed
+            # to --cache-from/--cache-to and applies its own per-layer
+            # cache-key tags.
+            cache_pull_args+=(--cache-from "${payload_cache_repo}")
+            if [[ "${PAYLOAD_CACHE_PUSH}" == "1" ]]; then
+                cache_push_args+=(--cache-to "${payload_cache_repo}")
+            fi
+            if grep -q -- '--cache-ttl' <<< "${build_help}"; then
+                cache_pull_args+=(--cache-ttl "${PAYLOAD_CACHE_TTL}")
+            fi
+            printf 'ANDROMEDA_PAYLOAD_CACHE mode=layers repo=%s ref=%s push=%s ttl=%s\n' \
+                "${payload_cache_repo}" "${payload_cache_ref}" \
+                "${PAYLOAD_CACHE_PUSH}" "${PAYLOAD_CACHE_TTL}"
+            printf 'ANDROMEDA_PAYLOAD_CACHE_CONTENT_HASH=%s\n' "${payload_cache_hash}"
+        else
+            printf 'ANDROMEDA_PAYLOAD_CACHE mode=disabled reason=no-cache-to-flag\n'
+            printf 'WARNING: this podman has no --cache-to; building without the cross-run layer cache.\n' >&2
+        fi
     fi
 else
     printf 'ANDROMEDA_PAYLOAD_CACHE mode=disabled reason=no-repo-configured\n'
 fi
 
-# run_cached_build <description> <podman build args...>
+# run_cached_build <description> <cache-mode> <podman build args...>
+#
+# cache-mode is `push` for stages allowed to publish their layers to the
+# cross-run cache and `pull` for stages that only reuse them. The payload v2
+# build is pull-only: v1 has just built (or re-pulled) every layer v2 shares
+# in this same run, so a --cache-to there would only re-push identical blobs.
 #
 # A cache problem must never be able to fail the build. If the cached attempt
 # fails for ANY reason -- unreachable registry, missing package, an auth token
@@ -124,14 +153,31 @@ fi
 # retry survived is never mistaken for a healthy run.
 run_cached_build() {
     local description="$1"
-    shift
+    local cache_mode="$2"
+    shift 2
+    local -a cache_args=()
 
-    if (( ${#cache_build_args[@]} == 0 )); then
+    case "${cache_mode}" in
+        push | pull) ;;
+        *)
+            printf 'run_cached_build: cache-mode must be push or pull, got: %s\n' \
+                "${cache_mode}" >&2
+            return 2
+            ;;
+    esac
+    if (( ${#cache_pull_args[@]} > 0 )); then
+        cache_args+=("${cache_pull_args[@]}")
+    fi
+    if [[ "${cache_mode}" == push ]] && (( ${#cache_push_args[@]} > 0 )); then
+        cache_args+=("${cache_push_args[@]}")
+    fi
+
+    if (( ${#cache_args[@]} == 0 )); then
         "${engine[@]}" build "$@"
         return
     fi
 
-    if "${engine[@]}" build "${cache_build_args[@]}" "$@"; then
+    if "${engine[@]}" build "${cache_args[@]}" "$@"; then
         return 0
     fi
 
@@ -142,7 +188,8 @@ run_cached_build() {
     printf 'Retrying the identical build with no cache. If this retry succeeds the\n' >&2
     printf 'cache was at fault; if it fails too, the build itself is broken.\n' >&2
     printf '================================================================\n' >&2
-    cache_build_args=()
+    cache_pull_args=()
+    cache_push_args=()
     "${engine[@]}" build "$@"
 }
 
@@ -150,6 +197,7 @@ mkdir -p "${OUTPUT_DIR}"
 OUTPUT_DIR="$(cd "${OUTPUT_DIR}" && pwd)"
 readonly OUTPUT_DIR
 rm -f \
+    "${OUTPUT_DIR}/andromeda-v2.tar.sha256" \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso" \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.iso.sha256" \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64.manifest.json" \
@@ -157,7 +205,7 @@ rm -f \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.iso.sha256" \
     "${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.manifest.json"
 
-run_cached_build 'payload v1' \
+run_cached_build 'payload v1' push \
     --tag localhost/andromeda:v1 \
     --target payload \
     --build-arg IMAGE_REVISION=1 \
@@ -168,7 +216,7 @@ run_cached_build 'payload v1' \
     --file "${REPOSITORY_ROOT}/os/Containerfile" \
     "${REPOSITORY_ROOT}"
 
-run_cached_build 'payload v2' \
+run_cached_build 'payload v2' pull \
     --tag localhost/andromeda:v2 \
     --target payload \
     --build-arg IMAGE_REVISION=2 \
@@ -189,8 +237,18 @@ run_cached_build 'payload v2' \
     --format oci-archive \
     --output "${OUTPUT_DIR}/andromeda-v2.tar" \
     localhost/andromeda:v2
+# Checksum for the build -> lifecycle artifact round trip (same pattern as the
+# ISO checksum below). The lifecycle job verifies the tar against this before
+# booting anything: a non-empty test cannot catch truncation, and
+# test-install.sh derives the guest's fw_cfg digest by hashing this same file,
+# so a truncated transfer would otherwise pass the guest check too.
+(
+    cd "${OUTPUT_DIR}"
+    sha256sum andromeda-v2.tar \
+        | tee andromeda-v2.tar.sha256
+)
 
-run_cached_build 'installer stage' \
+run_cached_build 'installer stage' push \
     --tag localhost/andromeda-installer:ci \
     --target installer \
     --build-arg IMAGE_REVISION=1 \

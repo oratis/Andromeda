@@ -63,9 +63,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # The cross-run payload layer cache (P1 #6) lives in GHCR. Fork PRs never
-      # receive this scope regardless of what is declared here; the cache-login
-      # step below turns that into a silent cache miss rather than a failure.
+      # The cross-run payload layer cache (P1 #6) lives in GHCR. Only push and
+      # schedule runs ever publish to it (see the cache-publishing step below);
+      # every pull_request run consumes it read-only, so this scope is inert
+      # there -- and fork PRs never receive it regardless of what is declared
+      # here.
       packages: write
     # TIMEOUT BUDGET INVARIANT, build half
     # (docs/reviews/e2e-pipeline-review.md P0 #4, re-derived for P1 #7).
@@ -120,6 +122,13 @@ jobs:
         with:
           tool-cache: true
           docker-images: true
+          # The large-packages pass is the slow half of this action: a
+          # multi-minute `apt-get remove` of dotnet/llvm/php/mongodb/mysql/
+          # azure-cli/chrome/firefox/powershell/mono/gcloud. This job uses none
+          # of those -- everything it needs is apt-installed explicitly below
+          # -- and the android/haskell/dotnet/tool-cache/docker prunes already
+          # free the bulk of the space, so skip it.
+          large-packages: false
 
       - name: Install host dependencies
         # Build-side deps only. qemu/ovmf/binutils moved to the lifecycle job,
@@ -155,36 +164,58 @@ jobs:
         # os/scripts/payload-cache-key.sh.
         env:
           CACHE_OWNER: ${{ github.repository_owner }}
+        # Explicit `shell: bash` so this step runs with pipefail: under the
+        # default shell, `payload-cache-key.sh | tee` would report tee's exit
+        # status and mask a key-script failure.
+        shell: bash
         run: |
           # GHCR paths must be lowercase; repository_owner preserves case.
           owner="$(printf '%s' "${CACHE_OWNER}" | tr '[:upper:]' '[:lower:]')"
           base="ghcr.io/${owner}/andromeda-payload-cache"
           printf 'ANDROMEDA_PAYLOAD_CACHE_REPO=%s\n' "${base}" \
             >> "$GITHUB_ENV"
-          ANDROMEDA_PAYLOAD_CACHE_REPO="${base}" \
-            os/scripts/payload-cache-key.sh | tee -a "$GITHUB_ENV"
-          read -r cache_hash cache_week cache_ref <<< "$(
+          # One invocation only; the summary fields below are derived from the
+          # same NAME=value lines rather than asking the script a second time,
+          # which could disagree with what was just exported.
+          key_output="$(
             ANDROMEDA_PAYLOAD_CACHE_REPO="${base}" \
-              os/scripts/payload-cache-key.sh --print content-hash,week,ref
+              os/scripts/payload-cache-key.sh
           )"
+          printf '%s\n' "${key_output}" | tee -a "$GITHUB_ENV"
+          key_field() {
+            sed -n "s/^${1}=//p" <<< "${key_output}"
+          }
           {
             printf '### Payload layer cache\n\n'
-            printf -- '- content hash: `%s`\n' "${cache_hash}"
-            printf -- '- week (forced invalidation): `%s`\n' "${cache_week}"
-            printf -- '- cache ref: `%s`\n' "${cache_ref}"
+            printf -- '- content hash: `%s`\n' \
+              "$(key_field ANDROMEDA_PAYLOAD_CACHE_CONTENT_HASH)"
+            printf -- '- week (forced invalidation): `%s`\n' \
+              "$(key_field ANDROMEDA_PAYLOAD_CACHE_WEEK)"
+            printf -- '- cache ref: `%s`\n' \
+              "$(key_field ANDROMEDA_PAYLOAD_CACHE_RESOLVED_REF)"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Authenticate to the payload layer cache
-        # Fork PRs receive a read-only GITHUB_TOKEN: `packages: write` is not
-        # granted no matter what this workflow declares. A failed login must be
-        # an ordinary, silent cache miss and never a build failure, so this
-        # clears ANDROMEDA_PAYLOAD_CACHE_REPO, which puts build-iso.sh back on
-        # exactly the uncached path main runs today. The step itself always
-        # exits 0.
+      - name: Authenticate for cache publishing (push and schedule runs only)
+        # PUSH eligibility is decided by the EVENT, never by whether `podman
+        # login` succeeds: ghcr accepts a login with a fork PR's read-only
+        # GITHUB_TOKEN too, so a login-based probe misfires there -- every fork
+        # PR would attempt the cache push, fail it, eat the loud cache-fallback
+        # banner, and build twice. Only a push to main or the nightly schedule
+        # may publish cache layers; every pull_request run, fork or same-repo,
+        # is a read-only cache consumer. That is also the poisoning boundary:
+        # no PR-triggered run ever holds ANDROMEDA_PAYLOAD_CACHE_PUSH=1, so
+        # layers seeded from PR branches can no longer reach main's builds.
+        #
+        # Reads need no login: `--cache-from` pulls are best-effort inside
+        # podman, so an absent or unreadable cache repo degrades to an ordinary
+        # cache miss (at worst run_cached_build's cold retry), never a build
+        # failure. Hence this step exists only where pushing is enabled, and a
+        # failed login here downgrades the run to pull-only instead of failing.
         #
         # `sudo podman login` on purpose: build-iso.sh runs under sudo, and
         # rootful podman reads root's auth store, not the runner user's, so a
         # rootless login here would leave the build unauthenticated.
+        if: github.event_name == 'push' || github.event_name == 'schedule'
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_USER: ${{ github.actor }}
@@ -193,13 +224,12 @@ jobs:
             | sudo podman login ghcr.io \
                 --username "${GHCR_USER}" --password-stdin; then
             printf 'ANDROMEDA_PAYLOAD_CACHE_PUSH=1\n' >> "$GITHUB_ENV"
-            printf 'Payload layer cache: read-write.\n'
+            printf 'Payload layer cache: publishing enabled for this %s run.\n' \
+              "${GITHUB_EVENT_NAME}"
           else
-            printf 'ANDROMEDA_PAYLOAD_CACHE_REPO=\n' >> "$GITHUB_ENV"
-            printf 'ANDROMEDA_PAYLOAD_CACHE_PUSH=0\n' >> "$GITHUB_ENV"
-            printf 'Payload layer cache unavailable (no packages:write token).\n'
-            printf 'This is expected on fork pull requests; building cold.\n'
-            printf 'CACHE_UNAVAILABLE=1\n' >> "$GITHUB_STEP_SUMMARY"
+            printf 'ghcr login failed; not publishing cache layers this run.\n'
+            printf 'The ghcr login failed, so this run published no payload cache layers; the build still consumed the cache read-only.\n' \
+              >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Build payloads and installer ISO
@@ -211,10 +241,15 @@ jobs:
         # The cache variables are forwarded through sudo because build-iso.sh
         # runs rootful; an empty ANDROMEDA_PAYLOAD_CACHE_REPO disables the cache
         # entirely, and a cache miss always falls back to a full build.
+        # ANDROMEDA_PAYLOAD_CACHE_PUSH is set only by the push/schedule-gated
+        # login step above, so PR runs (which never set it) build pull-only.
+        # ANDROMEDA_PAYLOAD_CACHE_WEEK pins the week resolved once at the top
+        # of this job, so a run that straddles the ISO-week rollover cannot
+        # split its cache pulls and pushes across two week repos.
         env:
           INSTALLER_DEFAULT: "1"
         run: |
-          sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME,INSTALLER_DEFAULT,ANDROMEDA_PAYLOAD_CACHE_REPO,ANDROMEDA_PAYLOAD_CACHE_PUSH \
+          sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME,INSTALLER_DEFAULT,ANDROMEDA_PAYLOAD_CACHE_REPO,ANDROMEDA_PAYLOAD_CACHE_PUSH,ANDROMEDA_PAYLOAD_CACHE_WEEK \
             os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
 
       - name: Enforce payload layer-size budget against real history
@@ -258,15 +293,23 @@ jobs:
         # ~4 GiB OCI archive that test-install.sh serves to the guest over slirp
         # for the `bootc switch` half of the lifecycle. Separate from the
         # installer artifact because it is a pipeline-internal handoff, not
-        # something a human should ever download -- hence the 1-day retention
-        # and the success-only condition.
+        # something a human should ever download -- hence the success-only
+        # condition. Retention matches the installer artifact's 3 days: a
+        # lifecycle-only re-run inside that window needs BOTH halves of the
+        # transfer, and a shorter-lived tar would silently shrink it.
+        #
+        # The .sha256 rides along so the lifecycle job can verify the tar's
+        # CONTENT survived the artifact round trip, not merely that a file
+        # exists (see the verify step there).
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: Andromeda-update-payload-${{ github.sha }}
-          path: output/andromeda-v2.tar
+          path: |
+            output/andromeda-v2.tar
+            output/andromeda-v2.tar.sha256
           compression-level: 0
-          retention-days: 1
+          retention-days: 3
           if-no-files-found: error
 
   lifecycle:
@@ -300,10 +343,10 @@ jobs:
     #   + checkout                                    1 min
     #   = 135 min                                     < 140 min (here)
     #
-    # test-install.sh:302 and test-hardware-matrix.sh:46 both cite "the os-e2e
-    # job timeout (180m)" when refusing to run under TCG. 140 is still far above
-    # the 3 x 3600 s TCG matrix budget those guards reject, so their reasoning
-    # holds unchanged and they stay fail-fast.
+    # Both TCG fail-fast guards -- the "/dev/kvm is unavailable" messages in
+    # test-install.sh and test-hardware-matrix.sh -- cite this budget: the TCG
+    # matrix alone (3 x 3600 s = 180 min) exceeds these 140 minutes, so
+    # refusing to run under TCG stays correct after the split.
     timeout-minutes: 140
     steps:
       - uses: actions/checkout@v4
@@ -316,6 +359,10 @@ jobs:
         with:
           tool-cache: true
           docker-images: true
+          # Same rationale as the build job: the multi-minute apt-get remove
+          # pass frees the least space, and nothing it removes is used here --
+          # qemu/ovmf/binutils are apt-installed fresh in the next step.
+          large-packages: false
 
       - name: Install host dependencies
         # QEMU-side deps only; nothing here builds an image, so podman/runc and
@@ -343,16 +390,30 @@ jobs:
       - name: Verify the transferred build artifacts
         # The split introduces a failure mode the monolithic job did not have: a
         # 4.0 GiB ISO and a ~4 GiB OCI archive now make a round trip through
-        # artifact storage. build-iso.sh already wrote the ISO checksum, so
-        # verifying it costs seconds and turns a truncated transfer into a named
-        # failure here instead of an unexplained UEFI hang 45 minutes later.
+        # artifact storage. build-iso.sh wrote a checksum for each, so
+        # verifying them costs seconds and turns a truncated transfer into a
+        # named failure here instead of an unexplained UEFI hang 45 minutes
+        # later.
+        #
+        # The tar MUST be checked by content, not with a mere non-empty test: a
+        # truncated andromeda-v2.tar would pass `-s`, and test-install.sh then
+        # derives the fw_cfg digest by hashing that same truncated file, so the
+        # guest-side verification would pass too and the corruption would only
+        # surface as an opaque bootc failure deep inside the lifecycle.
+        #
+        # The globs are self-adjusting on purpose (no hardcoded ISO name), and
+        # the manifest's own iso.sha256 claim is checked against the digest the
+        # checksum file just proved, so a manifest that no longer describes the
+        # ISO next to it cannot ride through unnoticed.
         working-directory: output
         run: |
           ls -l
-          sha256sum --check Andromeda-Developer-Preview-x86_64-ci.iso.sha256
-          if [[ ! -s andromeda-v2.tar ]]; then
-            printf 'The rev2 update payload (andromeda-v2.tar) did not survive the build -> lifecycle transfer.\n' >&2
-            printf 'test-install.sh serves it to the guest over slirp and the guest verifies it against the fw_cfg SHA-256, so the lifecycle cannot run without it.\n' >&2
+          sha256sum --check ./*.iso.sha256 andromeda-v2.tar.sha256
+          manifest_sha256="$(jq --raw-output '.iso.sha256' ./*.manifest.json)"
+          iso_sha256="$(awk '{ print $1 }' ./*.iso.sha256)"
+          if [[ -z "${iso_sha256}" || "${manifest_sha256}" != "${iso_sha256}" ]]; then
+            printf 'Manifest iso.sha256 (%s) does not match the verified ISO digest (%s).\n' \
+              "${manifest_sha256}" "${iso_sha256}" >&2
             exit 1
           fi
 
