@@ -62,8 +62,12 @@ jobs:
     #   + test-install.sh install timeout             45 min
     #   + test-install.sh boot deadline               45 min
     #   + test-hardware-matrix.sh (3 x 600 s)         30 min
-    #   + free-disk/apt/validate/upload               ~5 min
-    #   = 175 min                                     < 180 min (here)
+    #     (a host-side cap deliberately BELOW the 12 min andromeda-ci-verify
+    #      unit timeout; test-hardware-matrix.sh explains why raising it to
+    #      840 s would push this sum past the job timeout)
+    #   + free-disk/apt/validate/upload               ~6 min
+    #     (run 30732275955 measured 5.59 min, free-disk alone 4.50 min)
+    #   = 176 min                                     < 180 min (here)
     #
     # It was 150, which the worst case already exceeded. Build is the one term
     # with no enforced ceiling; if it regresses past ~50 min, raise this number
@@ -136,6 +140,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Andromeda-serial-evidence-${{ github.sha }}
+          # hardware-matrix/ is globbed by extension, not with **: each profile
+          # directory also holds a disk.qcow2 overlay and an OVMF_VARS.fd that
+          # would bloat the evidence artifact. *.log and *.txt cover everything
+          # test-hardware-matrix.sh writes as text (qemu-version.txt,
+          # qemu-img-version.txt, and per profile serial.log,
+          # serial.normalized.log, qemu-argv.txt, qemu-img-check.txt,
+          # qemu-img-check-status.txt).
           path: |
             output/install-serial.log
             output/boot-serial.log
@@ -144,7 +155,8 @@ jobs:
             output/install-post.log
             output/ovmf-vars.txt
             output/diagnostics/**
-            output/hardware-matrix/**
+            output/hardware-matrix/**/*.log
+            output/hardware-matrix/**/*.txt
           retention-days: 14
           include-hidden-files: true
           if-no-files-found: warn
