@@ -463,14 +463,34 @@ fn evaluate_manifest_evidence(
     }
 
     for item in &manifest.evidence {
-        if item.result == EvidenceResult::Failed {
-            missing.push(format!(
-                "capability evidence '{}' records a failure",
-                item.capability
-            ));
+        if item.result.blocks(manifest.tier) {
+            missing.push(match item.result {
+                EvidenceResult::Failed => format!(
+                    "capability evidence '{}' records a failure",
+                    item.capability
+                ),
+                EvidenceResult::Unknown => format!(
+                    "capability evidence '{}' has no verdict; unknown cannot promote",
+                    item.capability
+                ),
+                EvidenceResult::Degraded => format!(
+                    "capability evidence '{}' is degraded, which {:?} does not allow",
+                    item.capability, manifest.tier
+                ),
+                EvidenceResult::Passed => unreachable!("passed never blocks"),
+            });
         } else if item.expires_at <= now {
+            // Expiry is checked after the verdict so a stale *failure* reports
+            // the failure rather than the staleness; both block, but the more
+            // actionable reason is the one worth surfacing.
             missing.push(format!(
                 "capability evidence '{}' has expired",
+                item.capability
+            ));
+        } else if item.result == EvidenceResult::Degraded {
+            evidence.push(format!(
+                "capability evidence '{}' is degraded and current; the limitation must be \
+                 publicly disclosed",
                 item.capability
             ));
         } else {
@@ -873,6 +893,114 @@ mod tests {
                 .missing
                 .iter()
                 .any(|reason| reason.contains("records a failure"))
+        );
+    }
+
+    #[test]
+    fn unknown_capability_evidence_blocks_every_tier() {
+        // "Not measured" is the state most easily mistaken for "measured
+        // fine", so it fails closed everywhere rather than being ignored.
+        for tier in [
+            SupportTier::Community,
+            SupportTier::Reference,
+            SupportTier::Supported,
+            SupportTier::Certified,
+        ] {
+            let mut manifest = manifest();
+            manifest.tier = tier;
+            manifest.evidence[0].result = crate::EvidenceResult::Unknown;
+            let evaluation = evaluate_manifest(&report(), &manifest);
+            assert_eq!(
+                evaluation.effective_tier,
+                SupportTier::Blocked,
+                "unknown evidence must block {tier:?}"
+            );
+            assert!(
+                evaluation
+                    .missing
+                    .iter()
+                    .any(|reason| reason.contains("unknown cannot promote"))
+            );
+        }
+    }
+
+    #[test]
+    fn degraded_evidence_is_usable_below_certified_and_blocks_certified() {
+        // A machine whose codec decodes but does not encode is genuinely
+        // usable; flattening that into Failed understates it, and into Passed
+        // overstates it. Certified is the tier that promises no known
+        // degradation, so that is where it stops.
+        let mut manifest = manifest();
+        manifest.tier = SupportTier::Reference;
+        manifest.evidence[0].result = crate::EvidenceResult::Degraded;
+        let evaluation = evaluate_manifest(&report(), &manifest);
+        assert_eq!(evaluation.effective_tier, SupportTier::Reference);
+        assert!(
+            evaluation
+                .evidence
+                .iter()
+                .any(|note| note.contains("degraded and current")
+                    && note.contains("publicly disclosed")),
+            "a degradation must be surfaced, not silently accepted: {:?}",
+            evaluation.evidence
+        );
+
+        let mut certified = manifest.clone();
+        certified.tier = SupportTier::Certified;
+        let evaluation = evaluate_manifest(&report(), &certified);
+        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+        assert!(
+            evaluation
+                .missing
+                .iter()
+                .any(|reason| reason.contains("is degraded"))
+        );
+    }
+
+    #[test]
+    fn existing_evidence_verdicts_keep_their_wire_encoding() {
+        // Adding variants must not change how the pre-existing ones
+        // canonicalize: canonical_signing_bytes re-serializes the typed model,
+        // so a renamed or reordered verdict would silently invalidate every
+        // manifest already signed.
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Passed).unwrap(),
+            "\"passed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Degraded).unwrap(),
+            "\"degraded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&crate::EvidenceResult::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn a_signature_over_pre_existing_verdicts_still_verifies() {
+        // The end-to-end form of the guarantee above: sign a manifest that
+        // uses only the verdicts that existed before this change, and confirm
+        // the signature still validates now that the enum has grown.
+        let key = crate::ManifestSigningKey::from_seed(&[3u8; 32]);
+        let mut manifest = manifest();
+        manifest.evidence[0].result = crate::EvidenceResult::Passed;
+        manifest.signature = Some(key.sign_manifest(&manifest, "growth-test").expect("sign"));
+
+        let mut keyring = crate::TrustedKeyring::new();
+        keyring
+            .insert_hex("growth-test", &key.verifying_key_hex())
+            .expect("insert");
+        assert!(
+            matches!(
+                crate::verify_manifest_signature(&manifest, &keyring),
+                crate::ManifestSignatureStatus::Verified { ref key_id } if key_id == "growth-test"
+            ),
+            "signature over pre-existing verdicts must still verify after the enum grew"
         );
     }
 
