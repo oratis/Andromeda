@@ -1,10 +1,13 @@
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use andromeda_core::CapabilityKeyring;
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{CapabilityAdmission, FileTaskStore, TaskService};
+use andromeda_taskd::Authenticator;
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -14,6 +17,32 @@ struct Args {
     listen: SocketAddr,
     #[arg(long, env = "ANDROMEDA_STATE_DIR", default_value = ".andromeda/state")]
     state_dir: PathBuf,
+    /// File holding the local API bearer token.
+    ///
+    /// Generated on first start if absent, with mode 0600 in a directory that
+    /// must already grant nothing to group or other. There is no flag to serve
+    /// without it: the API router cannot be built without an
+    /// [`Authenticator`], so a missing or unusable token file is a startup
+    /// failure, never a downgrade to anonymous access.
+    ///
+    /// The shipped unit points this at `/run/andromeda-taskd/token`, inside
+    /// systemd's `RuntimeDirectory=`.
+    #[arg(
+        long,
+        env = "ANDROMEDA_AUTH_TOKEN_FILE",
+        default_value = ".andromeda/taskd-token"
+    )]
+    auth_token_file: PathBuf,
+    /// JSON file mapping capability issuer key ids to ed25519 verifying keys
+    /// in hex: `{"issuer-2026": "<64 hex chars>"}`.
+    ///
+    /// When supplied, every capability offered at task creation or grant must
+    /// carry a signature that verifies against one of these keys. When absent,
+    /// unsigned capabilities are accepted — the v0 posture, which the daemon
+    /// warns about at startup and reports on `/healthz`, because no component
+    /// in this repository issues capabilities yet.
+    #[arg(long, env = "ANDROMEDA_CAPABILITY_KEYRING")]
+    capability_keyring: Option<PathBuf>,
     /// Permit binding to a non-loopback address. The API has no
     /// authentication, so this exposes every task, plan, and capability to
     /// that network; only meaningful inside an already-isolated network
@@ -42,24 +71,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     andromeda_taskd::ensure_loopback_bind(args.listen, args.allow_non_loopback)?;
     if !args.listen.ip().to_canonical().is_loopback() {
-        tracing::warn!(
+        warn!(
             listen = %args.listen,
             "binding beyond loopback with ANDROMEDA_ALLOW_NON_LOOPBACK; the task API is \
-             UNAUTHENTICATED and now reachable from this network"
+             reachable from this network and is protected only by the local bearer token"
         );
     }
+    // Built before the store and before the listener: if the token cannot be
+    // established, the daemon must not reach a state where it could serve.
+    let authenticator = Authenticator::from_token_file(&args.auth_token_file)?;
+    let admission = load_admission(args.capability_keyring.as_deref())?;
     let store = FileTaskStore::open(&args.state_dir)?;
-    let service = TaskService::new(
-        store,
-        PolicyEngine::default(),
-        CapabilityAdmission::unsigned_for_development(),
-    );
+    let service = TaskService::new(store, PolicyEngine::default(), admission);
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    info!(listen = %args.listen, state_dir = %args.state_dir.display(), "task service ready");
-    axum::serve(listener, andromeda_taskd::app(service))
+    info!(
+        listen = %args.listen,
+        state_dir = %args.state_dir.display(),
+        auth_token_file = %args.auth_token_file.display(),
+        capability_admission = service.admission().mode_name(),
+        "task service ready; every request requires Authorization: Bearer <token from \
+         auth_token_file>"
+    );
+    axum::serve(listener, andromeda_taskd::app(service, authenticator))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
+}
+
+/// Resolves the capability admission policy from an optional keyring file.
+///
+/// Absent file means the v0 posture: capabilities are accepted unsigned. That
+/// is warned about loudly rather than silently defaulted, because it is the
+/// posture in which a caller still mints its own grants (security review #3).
+fn load_admission(
+    keyring_path: Option<&std::path::Path>,
+) -> Result<CapabilityAdmission, Box<dyn std::error::Error>> {
+    let Some(path) = keyring_path else {
+        warn!(
+            "no capability keyring configured: capabilities are accepted UNSIGNED, so a caller \
+             still issues its own grants. Pass --capability-keyring once a trusted issuer exists."
+        );
+        return Ok(CapabilityAdmission::unsigned_for_development());
+    };
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        format!(
+            "could not read capability keyring {}: {error}",
+            path.display()
+        )
+    })?;
+    let entries: BTreeMap<String, String> = serde_json::from_str(&contents).map_err(|error| {
+        format!(
+            "capability keyring {} must be a JSON object of {{\"key_id\": \"<64 hex chars>\"}}: \
+             {error}",
+            path.display()
+        )
+    })?;
+    let keyring = CapabilityKeyring::from_hex_entries(entries)?;
+    let key_ids: Vec<String> = keyring.key_ids().map(str::to_owned).collect();
+    // `require_signed` rejects an empty keyring, so a typo that parses to `{}`
+    // is a startup failure rather than a daemon that refuses every request
+    // while looking hardened.
+    let admission = CapabilityAdmission::require_signed(keyring)?;
+    info!(
+        keyring = %path.display(),
+        trusted_key_ids = ?key_ids,
+        "capability signatures are REQUIRED; unsigned or untrusted grants are refused"
+    );
+    Ok(admission)
 }
 
 /// Completes when a shutdown signal (Ctrl+C, or SIGTERM on Unix) arrives.
