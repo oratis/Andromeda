@@ -35,6 +35,26 @@ jobs:
       - run: os/scripts/test-installer-platform-guard.sh
       - run: os/scripts/test-containerfile-layer-budget.sh
 
+  supply-chain:
+    name: Container image pin freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Deliberately NON-BLOCKING (continue-on-error). This step reports on the
+      # world outside the repository: whether upstream registries still serve the
+      # digests os/Containerfile pins, and how old that content is. Both answers
+      # can change without anybody touching this repo, so gating merges on it
+      # would turn an unrelated PR red for a problem its author did not cause and
+      # cannot fix in that PR -- which is precisely how the fedora-bootc pin rot
+      # (Actions run 30702410393) was experienced. The signal belongs on a
+      # dashboard, not in the merge gate. Run it with --strict to make it a gate.
+      #
+      # skopeo is not preinstalled on ubuntu-latest; the script falls back to the
+      # registry HTTP API over curl + jq (both preinstalled), so this job stays
+      # fast and needs no apt step.
+      - run: os/scripts/check-pin-freshness.sh
+        continue-on-error: true
+
   platform:
     name: Platform probe (${{ matrix.os }})
     strategy:
