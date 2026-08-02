@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use andromeda_core::{
     ActionId, ActionOutcome, ActionPlan, Capability, CapabilityId, IsolationLevel, OutcomeStatus,
@@ -31,8 +31,16 @@ pub const MAX_PLAN_ACTIONS: usize = 10_000;
 ///
 /// The limit is deliberately far above any real plan: a capability exists to
 /// scope one action's resource, so a plan at the action ceiling needs at most
-/// a comparable number of grants.
-pub const MAX_TASK_CAPABILITIES: usize = 10_000;
+/// a comparable number of grants — which is why this ceiling is *defined as*
+/// [`MAX_PLAN_ACTIONS`] rather than as an independent literal.
+///
+/// The two bounds compound: policy evaluation runs once per action, so the
+/// worst case grows with the product of per-action required-capability ids
+/// and held capabilities. The policy engine resolves required ids through a
+/// hash map of the held capabilities built once per evaluation, so that
+/// product costs O(1) lookups plus one O(held) map build per action — it no
+/// longer multiplies into per-id linear scans of the full capability list.
+pub const MAX_TASK_CAPABILITIES: usize = MAX_PLAN_ACTIONS;
 
 /// Actor recorded on events that the policy engine itself appends.
 const EVALUATION_ACTOR: &str = "policy-engine";
@@ -57,9 +65,10 @@ pub struct StateTransitionRequest {
     ///
     /// Defaults to `false`, so the `Ready -> Running` gate rejects a plan
     /// containing unconfirmed external side effects unless the caller states
-    /// otherwise. The value is recorded on the resulting
-    /// [`TaskEventKind::StateChanged`] event so the audit trail shows who
-    /// asserted the confirmation.
+    /// otherwise. On that edge — the only one whose gate consumes the value —
+    /// it is recorded on the resulting [`TaskEventKind::StateChanged`] event
+    /// so the audit trail shows who asserted the confirmation; other edges
+    /// record no confirmation.
     ///
     /// v0 boundary: the confirmation is *asserted* by the caller, not attested
     /// by a trusted broker. Until a host confirmation broker exists this gate
@@ -129,15 +138,20 @@ pub struct TaskEvent {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaskEventKind {
     Created,
-    /// A state transition was applied. `external_side_effect_confirmed`
-    /// records the confirmation the caller supplied with the transition, so
-    /// the audit trail preserves whether an L3 commit point was confirmed and
-    /// by which actor.
+    /// A state transition was applied. `external_side_effect_confirmed` is
+    /// `Some` only on the `Ready -> Running` edge — the one transition whose
+    /// gate consumes the confirmation — and records the value the caller
+    /// supplied there, so the audit trail preserves whether the L3 commit
+    /// point was confirmed and by which actor. Every other edge records
+    /// `None` rather than stamping a meaningless `false`/`true` on events
+    /// where no confirmation was consulted. Old records that persisted a
+    /// plain bool deserialize as `Some(bool)`; records without the field
+    /// deserialize as `None`.
     StateChanged {
         from: TaskState,
         to: TaskState,
         #[serde(default)]
-        external_side_effect_confirmed: bool,
+        external_side_effect_confirmed: Option<bool>,
     },
     /// Capabilities were granted to the task after creation. `capabilities`
     /// lists the newly added grants and `plan_fully_granted` records whether,
@@ -220,6 +234,14 @@ pub enum ValidationError {
     DuplicateOutcome(ActionId),
     #[error("outcomes may only be recorded while Running or Verifying, not in {0:?}")]
     OutcomeNotAllowedInState(TaskState),
+    #[error(
+        "outcome for action {action} finished at {finished_at}, before it started at {started_at}"
+    )]
+    OutcomeFinishedBeforeStarted {
+        action: ActionId,
+        started_at: DateTime<Utc>,
+        finished_at: DateTime<Utc>,
+    },
 }
 
 impl From<PlanValidationError> for ValidationError {
@@ -455,8 +477,12 @@ impl TaskService {
             .into());
         }
         // Bound the resulting total, not this request: otherwise repeated
-        // grants of an allowed size would walk past the limit.
-        let total = record.capabilities.len() + request.capabilities.len();
+        // grants of an allowed size would walk past the limit. Saturating so
+        // the security check itself has no debug-build overflow panic path.
+        let total = record
+            .capabilities
+            .len()
+            .saturating_add(request.capabilities.len());
         if total > MAX_TASK_CAPABILITIES {
             return Err(ValidationError::TooManyCapabilities {
                 capabilities: total,
@@ -505,9 +531,10 @@ impl TaskService {
     /// # Errors
     ///
     /// Returns a validation error when the outcome references an unknown
-    /// action, the action already has an outcome, or the task is in a state
-    /// that does not accept outcomes; a revision conflict on a stale
-    /// `expected_revision`; or a store error on persistence failure.
+    /// action, the action already has an outcome, the outcome claims to have
+    /// finished before it started, or the task is in a state that does not
+    /// accept outcomes; a revision conflict on a stale `expected_revision`;
+    /// or a store error on persistence failure.
     pub fn record_outcome(
         &self,
         task_id: TaskId,
@@ -526,20 +553,26 @@ impl TaskService {
             return Err(ValidationError::OutcomeNotAllowedInState(record.state).into());
         }
         let action_id = request.outcome.action_id;
-        if !record
-            .plan
-            .actions
-            .iter()
-            .any(|action| action.id == action_id)
-        {
+        let planned: BTreeSet<ActionId> =
+            record.plan.actions.iter().map(|action| action.id).collect();
+        if !planned.contains(&action_id) {
             return Err(ValidationError::UnknownOutcomeAction(action_id).into());
         }
-        if record
+        let recorded: BTreeSet<ActionId> = record
             .outcomes
             .iter()
-            .any(|outcome| outcome.action_id == action_id)
-        {
+            .map(|outcome| outcome.action_id)
+            .collect();
+        if recorded.contains(&action_id) {
             return Err(ValidationError::DuplicateOutcome(action_id).into());
+        }
+        if request.outcome.finished_at < request.outcome.started_at {
+            return Err(ValidationError::OutcomeFinishedBeforeStarted {
+                action: action_id,
+                started_at: request.outcome.started_at,
+                finished_at: request.outcome.finished_at,
+            }
+            .into());
         }
 
         let status = request.outcome.status;
@@ -599,6 +632,11 @@ impl TaskService {
         self.guard_transition(from, to, &record, request.external_side_effect_confirmed)?;
         record.state = to;
         record.revision += 1;
+        // Only the `Ready -> Running` gate consumes the confirmation, so only
+        // that edge stamps it on the audit event; every other edge records
+        // `None` to keep the signal precise.
+        let external_side_effect_confirmed = ((from, to) == (TaskState::Ready, TaskState::Running))
+            .then_some(request.external_side_effect_confirmed);
         record.events.push(TaskEvent {
             id: Uuid::new_v4(),
             occurred_at: Utc::now(),
@@ -606,7 +644,7 @@ impl TaskService {
             kind: TaskEventKind::StateChanged {
                 from,
                 to: request.to,
-                external_side_effect_confirmed: request.external_side_effect_confirmed,
+                external_side_effect_confirmed,
             },
         });
         self.store.save(&record, request.expected_revision)?;
@@ -693,15 +731,16 @@ impl TaskService {
     /// have a recorded outcome, that outcome must be compatible with overall
     /// success, and it must carry at least one piece of evidence.
     fn guard_verifying_to_succeeded(record: &TaskRecord) -> Result<(), TransitionGuardError> {
+        let recorded: BTreeMap<ActionId, &ActionOutcome> = record
+            .outcomes
+            .iter()
+            .map(|outcome| (outcome.action_id, outcome))
+            .collect();
         let mut missing = Vec::new();
         let mut unsuccessful = Vec::new();
         let mut without_evidence = Vec::new();
         for action in &record.plan.actions {
-            let Some(outcome) = record
-                .outcomes
-                .iter()
-                .find(|outcome| outcome.action_id == action.id)
-            else {
+            let Some(outcome) = recorded.get(&action.id) else {
                 missing.push(action.id);
                 continue;
             };
@@ -1018,15 +1057,24 @@ mod tests {
     }
 
     #[test]
+    fn plan_at_the_action_limit_is_accepted() {
+        // Pins the boundary from the acceptance side: exactly
+        // MAX_PLAN_ACTIONS is legal, so the rejection test above cannot be
+        // satisfied by an off-by-one `>=` in the bound check.
+        let mut request = inspection_request(workspace_path());
+        request.plan.actions = (0..MAX_PLAN_ACTIONS).map(|_| reason_action()).collect();
+        assert_eq!(validate_plan(&request.plan, &[]), Ok(()));
+    }
+
+    #[test]
     fn oversized_capability_list_is_rejected() {
         // Actions were capped but grants were not, so a caller could attach an
         // unbounded capability list that every evaluation scans and every
         // write persists.
         let request = inspection_request(workspace_path());
         let capability = request.capabilities[0].clone();
-        let capabilities: Vec<Capability> = (0..=MAX_TASK_CAPABILITIES)
-            .map(|_| capability.clone())
-            .collect();
+        let capabilities: Vec<Capability> =
+            std::iter::repeat_n(capability, MAX_TASK_CAPABILITIES + 1).collect();
         assert_eq!(
             validate_plan(&request.plan, &capabilities),
             Err(ValidationError::TooManyCapabilities {
@@ -1034,6 +1082,18 @@ mod tests {
                 limit: MAX_TASK_CAPABILITIES,
             })
         );
+    }
+
+    #[test]
+    fn capability_list_at_the_limit_is_accepted() {
+        // Pins the boundary from the acceptance side: exactly
+        // MAX_TASK_CAPABILITIES is legal, so the rejection test above cannot
+        // be satisfied by an off-by-one `>=` in the bound check.
+        let request = inspection_request(workspace_path());
+        let capability = request.capabilities[0].clone();
+        let capabilities: Vec<Capability> =
+            std::iter::repeat_n(capability, MAX_TASK_CAPABILITIES).collect();
+        assert_eq!(validate_plan(&request.plan, &capabilities), Ok(()));
     }
 
     #[test]
@@ -1047,12 +1107,11 @@ mod tests {
         request.capabilities.clear();
         let created = service.create(request).expect("create");
 
-        // Seed the record just under the ceiling without going through the
+        // Seed the record exactly at the ceiling without going through the
         // (deliberately bounded) grant path.
         let mut seeded = service.get(created.plan.task_id).expect("reload");
-        seeded.capabilities = (0..MAX_TASK_CAPABILITIES)
-            .map(|_| capability.clone())
-            .collect();
+        seeded.capabilities =
+            std::iter::repeat_n(capability.clone(), MAX_TASK_CAPABILITIES).collect();
         let expected = seeded.revision;
         seeded.revision += 1;
         service.store.save(&seeded, expected).expect("seed");
@@ -1067,10 +1126,53 @@ mod tests {
                 },
             )
             .expect_err("one more grant must exceed the ceiling");
-        assert!(matches!(
-            error,
-            ServiceError::Validation(ValidationError::TooManyCapabilities { .. })
-        ));
+        // Exact payload: the error must report the post-grant TOTAL, not the
+        // size of the rejected request.
+        match error {
+            ServiceError::Validation(ValidationError::TooManyCapabilities {
+                capabilities,
+                limit,
+            }) => {
+                assert_eq!(capabilities, MAX_TASK_CAPABILITIES + 1);
+                assert_eq!(limit, MAX_TASK_CAPABILITIES);
+            }
+            other => panic!("expected TooManyCapabilities, found {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grant_landing_exactly_on_the_capability_limit_is_accepted() {
+        // Pins the grant-path boundary from the acceptance side: a grant
+        // whose post-grant total is exactly MAX_TASK_CAPABILITIES must
+        // succeed, so the rejection test above cannot be satisfied by an
+        // off-by-one `>=` in the grant gate.
+        let temp = TempDir::new().expect("tempdir");
+        let service = service(&temp);
+        let mut request = inspection_request(workspace_path());
+        let capability = request.capabilities[0].clone();
+        request.capabilities.clear();
+        let created = service.create(request).expect("create");
+
+        // Seed the record one below the ceiling without going through the
+        // grant path, then traverse the real grant bound check at the limit.
+        let mut seeded = service.get(created.plan.task_id).expect("reload");
+        seeded.capabilities =
+            std::iter::repeat_n(capability.clone(), MAX_TASK_CAPABILITIES - 1).collect();
+        let expected = seeded.revision;
+        seeded.revision += 1;
+        service.store.save(&seeded, expected).expect("seed");
+
+        let granted = service
+            .grant_capabilities(
+                created.plan.task_id,
+                GrantCapabilitiesRequest {
+                    capabilities: vec![capability],
+                    actor: "approver".into(),
+                    expected_revision: seeded.revision,
+                },
+            )
+            .expect("a grant landing exactly on the limit must succeed");
+        assert_eq!(granted.capabilities.len(), MAX_TASK_CAPABILITIES);
     }
 
     #[test]
@@ -1394,7 +1496,28 @@ mod tests {
             TaskEventKind::StateChanged {
                 external_side_effect_confirmed,
                 ..
-            } => assert!(external_side_effect_confirmed),
+            } => assert_eq!(*external_side_effect_confirmed, Some(true)),
+            other => panic!("expected StateChanged, found {other:?}"),
+        }
+
+        // Edges whose gate does not consult the confirmation record `None`
+        // instead of stamping a meaningless value on the audit trail.
+        let verifying = service
+            .transition(
+                created.plan.task_id,
+                StateTransitionRequest {
+                    to: TaskState::Verifying,
+                    actor: "runner".into(),
+                    expected_revision: running.revision,
+                    external_side_effect_confirmed: false,
+                },
+            )
+            .expect("verifying");
+        match &verifying.events.last().expect("state change event").kind {
+            TaskEventKind::StateChanged {
+                external_side_effect_confirmed,
+                ..
+            } => assert_eq!(*external_side_effect_confirmed, None),
             other => panic!("expected StateChanged, found {other:?}"),
         }
     }
@@ -1635,6 +1758,28 @@ mod tests {
         assert!(matches!(
             error,
             ServiceError::Validation(ValidationError::DuplicateOutcome(_))
+        ));
+    }
+
+    #[test]
+    fn outcome_that_finishes_before_it_starts_is_rejected() {
+        let temp = TempDir::new().expect("tempdir");
+        let (service, task_id, action_id, revision) = task_in_verifying(&temp);
+        let mut backwards = outcome(action_id, OutcomeStatus::Succeeded, evidence());
+        backwards.finished_at = backwards.started_at - chrono::TimeDelta::seconds(1);
+        let error = service
+            .record_outcome(
+                task_id,
+                RecordOutcomeRequest {
+                    outcome: backwards,
+                    actor: "executor".into(),
+                    expected_revision: revision,
+                },
+            )
+            .expect_err("finished_at must not precede started_at");
+        assert!(matches!(
+            error,
+            ServiceError::Validation(ValidationError::OutcomeFinishedBeforeStarted { .. })
         ));
     }
 

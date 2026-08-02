@@ -45,7 +45,7 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 
 ### Host 校验（DNS rebinding 防护）
 
-`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost`、`127.0.0.1`、`[::1]`（可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
+`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost` 与字面回环 IP（127.0.0.0/8、`[::1]` 及其 IPv4-mapped 形式，可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
 
 注意：Host 校验**只防御浏览器发起的 DNS rebinding**，不是鉴权，也**不能保护非 loopback 绑定**。它只检查请求携带的 `Host` 头取值，不检查实际入站接口。任何非浏览器客户端（curl／脚本／攻击者）都可以自带 `Host: localhost` 通过校验。此外，本地任意进程/用户经 loopback 亦可无鉴权访问 API。远程鉴权在下述能力实现前不存在（参见 `getting-started.md`、`README.md` 的一致说明）。
 
@@ -91,7 +91,7 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - **`Ready → Running`**：对每个 action 以其逐 action 最低隔离重跑策略引擎，**使用请求体显式提供的 `external_side_effect_confirmed`（默认 `false`）**。任一 action 为 `Deny` 即拒绝并列出原因；任一 action 为 `Ask`（即未确认的 L3 外部副作用）则以 `external_confirmation_required` 拒绝，并列出待确认的 action。这使 `Running` 成为强制的重新授权点与 **L3 提交点**：capability 在 `Ready` 之后过期会在此被挡下，未确认的外部副作用也无法启动。确认值记入 `state_changed` 事件，与 actor 一起留痕。
 - **`Verifying → Succeeded`**：要求计划中**每个** action 都有已记录的 outcome；outcome 状态必须是 `succeeded` 或 `skipped`（`failed`/`rolled_back`/`compensated` 一律拒绝），且**每条 outcome 至少携带一条 evidence**。因此"成功"是被证明的，不是被断言的。
 
-被门控拒绝的转换返回 422 `invalid_task`。
+被门控拒绝的转换一律返回 422，`error` 码按需要的操作员动作区分：未确认 L3 外部副作用（`Ready → Running` 的 `Ask`）返回 `external_confirmation_required`；`Verifying → Succeeded` 的证据门控（缺 outcome、outcome 非成功、outcome 无 evidence）返回 `missing_evidence`；其余门控与结构性拒绝（计划未完全授权、action 被策略 Deny、非法状态转换、计划校验失败）返回 `invalid_task`。
 
 #### L3 确认的 v0 边界
 
@@ -111,7 +111,8 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - 每次受支持的状态变化、每次授权补授（`granted`）、每次结果记录（`outcome_recorded`）和每次策略评估都追加 event；
 - 执行结果与证据保存在 `TaskRecord.outcomes`（每个 action 至多一条，append-only：已记录的 outcome 不可被覆盖）；
 - store 打开时在独占锁内清理崩溃残留的 `.{uuid}.tmp` 孤儿文件；
-- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套。
+- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套；
+- 单个 task 累计最多 `MAX_TASK_CAPABILITIES`（10 000）个 capability——创建与补授（`grant_capabilities`）两条路径都强制，且按**授予后的总量**计而非单次请求的数量，因此重复补授无法越过上限；重复的 capability 按条目计数，而非按去重后的权限计数。
 
 ### Compaction 策略
 

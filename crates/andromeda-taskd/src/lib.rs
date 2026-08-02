@@ -7,7 +7,7 @@ use std::sync::Arc;
 use andromeda_core::TaskId;
 use andromeda_runtime::{
     CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, RecordOutcomeRequest,
-    ServiceError, StateTransitionRequest, StoreError, TaskService,
+    ServiceError, StateTransitionRequest, StoreError, TaskService, TransitionGuardError,
 };
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
@@ -42,8 +42,10 @@ pub fn app(service: TaskService) -> Router {
 /// `taskd` binds to loopback by default, but a malicious web page can reach
 /// "localhost" services through DNS rebinding, where the browser resolves an
 /// attacker-controlled name to 127.0.0.1. Such requests still carry the
-/// attacker's `Host` header, so only `localhost`, `127.0.0.1`, and `[::1]`
-/// (each with an optional port) are accepted.
+/// attacker's `Host` header, so only `localhost` and literal loopback IPs
+/// (any of 127.0.0.0/8, `[::1]`, and their IPv4-mapped forms, each with an
+/// optional port) are accepted — exactly the addresses `taskd` will bind
+/// without an override.
 async fn require_loopback_host(request: Request, next: Next) -> Response {
     let host = request
         .headers()
@@ -103,7 +105,9 @@ pub fn ensure_loopback_bind(
     address: SocketAddr,
     allow_override: bool,
 ) -> Result<(), NonLoopbackBind> {
-    if address.ip().is_loopback() || allow_override {
+    // `to_canonical` unwraps IPv4-mapped addresses so `[::ffff:127.0.0.1]`
+    // counts as the loopback it actually is.
+    if address.ip().to_canonical().is_loopback() || allow_override {
         Ok(())
     } else {
         Err(NonLoopbackBind { address })
@@ -135,7 +139,15 @@ fn is_loopback_host(value: &str) -> bool {
     if port.is_some_and(|port| port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit())) {
         return false;
     }
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // Accept exactly the addresses `ensure_loopback_bind` can be asked to
+    // bind: any literal loopback IP (all of 127.0.0.0/8, `::1`, and their
+    // IPv4-mapped forms). Anything that is not an IP literal — including
+    // `127.0.0.1.evil.example` — fails the parse and is rejected.
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
 /// Runs one synchronous [`TaskService`] operation on the blocking thread
@@ -270,6 +282,23 @@ impl IntoResponse for ApiError {
             Self::Service(ServiceError::Store(StoreError::RevisionConflict { .. })) => {
                 (StatusCode::CONFLICT, "revision_conflict")
             }
+            // An unconfirmed L3 external side effect is a distinct operator
+            // action (obtain the final confirmation) from fixing an invalid
+            // task, so it gets its own wire code.
+            Self::Service(ServiceError::Guard(
+                TransitionGuardError::ExternalConfirmationRequired { .. },
+            )) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "external_confirmation_required",
+            ),
+            // Likewise, the evidence gate on `Verifying -> Succeeded` asks the
+            // caller to record (evidenced, successful) outcomes, not to repair
+            // the plan or the transition.
+            Self::Service(ServiceError::Guard(
+                TransitionGuardError::MissingOutcomes { .. }
+                | TransitionGuardError::UnsuccessfulOutcomes { .. }
+                | TransitionGuardError::MissingEvidence { .. },
+            )) => (StatusCode::UNPROCESSABLE_ENTITY, "missing_evidence"),
             Self::Service(
                 ServiceError::Validation(_) | ServiceError::Transition(_) | ServiceError::Guard(_),
             ) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_task"),
@@ -415,7 +444,12 @@ mod tests {
 
     #[test]
     fn loopback_binds_are_accepted() {
-        for address in ["127.0.0.1:7777", "[::1]:7777", "127.0.0.5:1"] {
+        for address in [
+            "127.0.0.1:7777",
+            "[::1]:7777",
+            "127.0.0.5:1",
+            "[::ffff:127.0.0.1]:7777",
+        ] {
             let address: SocketAddr = address.parse().expect("addr");
             assert_eq!(ensure_loopback_bind(address, false), Ok(()));
         }
@@ -449,7 +483,8 @@ mod tests {
             revision = body["revision"].as_u64().expect("revision");
         }
 
-        // Without an outcome the verifier cannot declare success.
+        // Without an outcome the verifier cannot declare success; the wire
+        // code tells the caller evidence is what is missing.
         let (status, body) = send(
             &app,
             local_request(
@@ -464,7 +499,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        assert_eq!(body["error"], "invalid_task");
+        assert_eq!(body["error"], "missing_evidence");
 
         let now = chrono::Utc::now();
         let (status, body) = send(
@@ -707,6 +742,74 @@ mod tests {
         assert_eq!(error["error"], "invalid_task");
     }
 
+    /// Builds a create request whose single action is an L3 external side
+    /// effect, so `Ready -> Running` demands explicit confirmation.
+    fn l3_request() -> CreateTaskRequest {
+        let task_id = TaskId::new();
+        let capability = Capability {
+            id: CapabilityId::new(),
+            resource: CapabilityResource::Network {
+                host: "api.example.com".into(),
+                port: None,
+            },
+            issued_to: task_id.to_string(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            single_use: false,
+        };
+        let plan = ActionPlan {
+            schema_version: ActionPlan::CURRENT_SCHEMA_VERSION,
+            task_id,
+            intent: Intent::new("Send", "test"),
+            actions: vec![ActionSpec {
+                id: ActionId::new(),
+                name: "send result through broker".into(),
+                kind: ActionKind::NetworkRequest,
+                target: "api.example.com".into(),
+                arguments: BTreeMap::new(),
+                depends_on: Vec::new(),
+                required_capabilities: vec![capability.id],
+                risk: RiskLevel::L3ExternalSideEffect,
+                recovery: RecoverySemantics::None,
+            }],
+        };
+        CreateTaskRequest {
+            plan,
+            capabilities: vec![capability],
+            actor: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_l3_transition_reports_external_confirmation_required() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let request = l3_request();
+        let task_id = request.plan.task_id;
+        let (status, created) =
+            send(&app, local_request("POST", "/v1/tasks", Some(&request))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["state"], "ready");
+
+        let transition = StateTransitionRequest {
+            to: TaskState::Running,
+            actor: "runner".into(),
+            expected_revision: 0,
+            external_side_effect_confirmed: false,
+        };
+        let (status, error) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&transition),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error["error"], "external_confirmation_required");
+    }
+
     #[tokio::test]
     async fn list_reports_corrupt_records_as_warnings() {
         let temp = TempDir::new().expect("tempdir");
@@ -764,8 +867,13 @@ mod tests {
             "localhost:7777",
             "127.0.0.1",
             "127.0.0.1:7777",
+            // Any 127.0.0.0/8 address `taskd` can bind must also pass the
+            // Host check, or `--listen 127.0.0.5` would 403 every request.
+            "127.0.0.5",
+            "127.0.0.5:7777",
             "[::1]",
             "[::1]:7777",
+            "[::ffff:127.0.0.1]:7777",
         ] {
             assert!(is_loopback_host(allowed), "{allowed} must be allowed");
         }

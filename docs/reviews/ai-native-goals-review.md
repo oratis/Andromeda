@@ -74,8 +74,9 @@ source-sink 污点跟踪、`read(secret) + network(send)` 组合需二次数据�
 即可把任务标记成功。
 
 更根本的是：`TaskRecord` 原本**没有任何 outcome/evidence 字段**，而
-`andromeda-core` 的 `Evidence` / `ActionOutcome` / `OutcomeStatus` /
-`RecoverySemantics` 四个类型**在整个 workspace 里从未被构造过**。
+`andromeda-core` 的 `Evidence` / `ActionOutcome` / `OutcomeStatus`
+三个类型**在整个 workspace 里从未被构造过**（`RecoverySemantics` 除外：
+它在 CLI 的计划构造与多处测试夹具中一直有构造点）。
 
 因此 README 组件表里 `andromeda-core` 的"Evidence、恢复语义"在本轮修复前是
 **死类型**——这是 README 唯一的实质性过度声称。
@@ -288,6 +289,9 @@ harness 无 `/dev/kvm` 即硬失败，而仓库**没有任何 nightly/scheduled 
 | `product-development-plan.md` §6.4 vs §10.2 | suspend 循环 1000 次 vs 发布门 100/500 次，§6.4 无 stretch-goal 注 |
 
 ## 5. 建议的优先级
+
+> 后续进展：第 3、5、6、8、11 项已在后一轮综合为四个工作流并各产出落地设计，四份设计
+> **全部被对抗复核否决**——被否原因与重做约束见[整改设计对抗评审](./remediation-design-review.md)。
 
 ### 执行器落地前必须（越晚改越贵，且直接违背安全叙事）
 

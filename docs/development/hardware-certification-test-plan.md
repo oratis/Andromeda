@@ -298,9 +298,11 @@ os/scripts/test-install.sh output
 - 规范化规则、`signature` 字段格式、库 API 与签名流程见
   [HCM 开发说明](./hardware-compatibility.md) 的“HCM 清单签名与真实性”一节，
   唯一权威实现在 `crates/andromeda-hardware/src/signing.rs`。
-- **`andromeda hardware check` 默认咨询性、不可作信任决策**：现有 CLI 走无 keyring
-  路径，只校验一致性与新鲜度。把清单真实性纳入 CI/发布门禁前，必须让评估经库 API
-  传入 keyring（CLI `--trusted-keys` 开关为后续项）。
+- **`andromeda hardware check` 默认咨询性、不可作信任决策**：不带 keyring 的调用只
+  校验一致性与新鲜度。把清单真实性纳入 CI/发布门禁时必须传入 keyring：
+  `andromeda hardware check <manifest> --require-tier supported --trusted-keys keys.json`。
+  不带 `--trusted-keys` 时，该 `--require-tier` 组合会被直接拒绝执行（退出码 1，
+  除非显式 `--allow-unverified` 承认仅作咨询）。
 - 密钥生成、分发、轮换与**生产清单的实际签名**是部署/运维职责；代码提供验证路径、
   可复现的签名助手 `ManifestSigningKey` 与上述流程约定，不代替运维。
 
