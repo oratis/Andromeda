@@ -130,3 +130,35 @@ require_marker() {
     printf '\n' >&2
     exit 1
 }
+
+# require_marker_fixed <logfile> <fixed-string> <human description>
+#
+# Fixed-string variant of require_marker: matches with --fixed-strings, so use
+# it whenever the expected marker is a literal (especially one interpolating a
+# runtime value such as scenario=${scenario}) -- with --extended-regexp an
+# unescaped interpolated value could silently change what is asserted.
+require_marker_fixed() {
+    local logfile="$1"
+    local pattern="$2"
+    local description="${3:-marker ${pattern}}"
+
+    if [[ -f "${logfile}" ]] \
+        && LC_ALL=C grep --text --quiet --fixed-strings \
+            -- "${pattern}" "${logfile}"; then
+        return 0
+    fi
+
+    assert_banner "${description}"
+    printf '  expected fixed string: %s\n' "${pattern}" >&2
+    printf '  in log file:           %s\n' "${logfile}" >&2
+    if [[ -f "${logfile}" ]]; then
+        printf '  last %s lines of %s:\n' \
+            "${ANDROMEDA_ASSERT_LOG_TAIL}" "${logfile}" >&2
+        tail -n "${ANDROMEDA_ASSERT_LOG_TAIL}" "${logfile}" 2>&1 \
+            | sed 's/^/    /' >&2 || true
+    else
+        printf '  the log file does not exist.\n' >&2
+    fi
+    printf '\n' >&2
+    exit 1
+}

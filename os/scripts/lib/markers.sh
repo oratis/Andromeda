@@ -53,25 +53,18 @@ normalize_serial_log() {
     local output="${2:-}"
 
     if [[ -n "${output}" ]]; then
-        normalize_serial_stream <"${input}" >"${output}" 2>/dev/null \
-            || : >"${output}"
+        # Test readability BEFORE redirecting: `<"${input}" ... 2>/dev/null`
+        # opens the input redirection before stderr is redirected, so a
+        # missing log would leak "No such file or directory" to real stderr.
+        if [[ -r "${input}" ]]; then
+            normalize_serial_stream <"${input}" >"${output}" \
+                || : >"${output}"
+        else
+            : >"${output}"
+        fi
         return 0
     fi
     normalize_serial_stream <"${input}" 2>/dev/null || true
-}
-
-# serial_grep <extended-regexp> <raw-log> [extra grep args...]
-#
-# Convenience for one-shot checks: normalizes <raw-log> on the fly and greps the
-# result. Prefer normalize_serial_log into a file when the same log is grepped
-# repeatedly (polling loops) or has to be handed to another consumer.
-serial_grep() {
-    local pattern="$1"
-    local input="$2"
-    shift 2
-
-    normalize_serial_log "${input}" \
-        | LC_ALL=C grep --text --extended-regexp "$@" -- "${pattern}"
 }
 
 # dump_log_region <logfile> <extended-regexp> [before] [after]

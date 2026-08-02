@@ -47,10 +47,22 @@ cpu=max
 # This is the matrix stage budget: 3 profiles x 600 s = 30 min, one term of
 # `sum of stage budgets + build < os-e2e.yml timeout-minutes`. The full
 # arithmetic lives next to the 2700 s boot deadline in test-install.sh.
-# 600 s per profile is generous on purpose but does not need to cover the
-# 12-minute andromeda-ci-verify TimeoutStartSec: the matrix boots an overlay on
-# a disk already in state=complete, where the verifier short-circuits instead of
-# running the lifecycle. Observed: 2.0-2.5 min for all three profiles together.
+#
+# NOTE: this 600 s host cap deliberately sits BELOW the guest's
+# andromeda-ci-verify.service TimeoutStartSec=12min (720 s). The verifier does
+# NOT short-circuit on state=complete: os/files/usr/libexec/andromeda-ci-verify
+# runs andromeda-daily-driver-verify unconditionally BEFORE its state case, and
+# that runs inside the unit's 12 min timeout, so in principle the unit may
+# still be within budget when this host kill fires. The inversion is
+# intentional:
+#   - on a state=complete disk the whole per-profile pass is fast (observed
+#     ~40 s each, 2.0-2.5 min for all three profiles together), so 600 s is
+#     already ~15x headroom;
+#   - raising this to 840 s (12 min unit + ~2 min firmware/kernel/sddm/plasma
+#     boot) would grow the matrix stage to 42 min and push the os-e2e stage
+#     sum past `timeout-minutes: 180`;
+#   - a genuinely hung profile is diagnosed by THIS host-side timeout plus the
+#     normalized serial log it dumps, not by waiting out the unit timeout.
 profile_timeout_seconds=600
 if [[ -c /dev/kvm ]]; then
     accel=kvm
@@ -209,12 +221,14 @@ run_profile() {
         tail -200 "${serial_log_normalized}" >&2
         return 1
     fi
-    require_marker "${serial_log_normalized}" \
+    require_marker_fixed "${serial_log_normalized}" \
         "ANDROMEDA_HARDWARE_REPORT_OK readiness=ready boot_critical_missing=0 scenario=${scenario}" \
         "scenario ${scenario} booted but andromeda-hardware-report did not report readiness=ready with zero boot-critical drivers missing for this exact scenario (a scenario= mismatch means the fw_cfg tag did not reach the guest)"
+    # `grep -c` counts LINES, not occurrences: two markers collapsed onto one
+    # line by CR-stripping would count as 1. -o | wc -l counts occurrences.
     require "scenario ${scenario} must emit ANDROMEDA_E2E_OK exactly once; more than one occurrence means the guest rebooted into the verifier again instead of settling" \
-        test "$(LC_ALL=C grep --text -c 'ANDROMEDA_E2E_OK' \
-            "${serial_log_normalized}")" -eq 1
+        test "$(LC_ALL=C grep --text -o 'ANDROMEDA_E2E_OK' \
+            "${serial_log_normalized}" | wc -l)" -eq 1
 
     kill "${qemu_pid}"
     wait "${qemu_pid}" 2>/dev/null || true
