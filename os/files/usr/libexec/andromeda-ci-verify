@@ -4,8 +4,31 @@ set -Eeuo pipefail
 readonly STATE_DIR=/var/lib/andromeda-ci
 readonly STATE_FILE="${STATE_DIR}/state"
 readonly UPDATE_ARCHIVE=/var/tmp/andromeda-v2.tar
-readonly UPDATE_URL=http://10.0.2.2:8080/andromeda-v2.tar
 readonly UPDATE_SHA256_FW_CFG=/sys/firmware/qemu_fw_cfg/by_name/opt/andromeda/update-sha256/raw
+readonly UPDATE_PORT_FW_CFG=/sys/firmware/qemu_fw_cfg/by_name/opt/andromeda/update-port/raw
+readonly UPDATE_PORT_FALLBACK=8080
+
+# The host binds the update server on a kernel-assigned port (see
+# test-install.sh) and passes it through fw_cfg. Unlike the SHA-256 -- which is
+# a trust anchor and therefore a hard requirement -- the port is only routing:
+# fall back to the historical 8080 when the entry is absent, so an image built
+# from this tree still works with an older harness. Getting the port wrong
+# cannot weaken anything; it just fails the download, and the archive is
+# SHA-verified regardless of which port delivered it.
+resolve_update_url() {
+    local port="${UPDATE_PORT_FALLBACK}"
+    modprobe qemu_fw_cfg 2>/dev/null || true
+    if [[ -r "${UPDATE_PORT_FW_CFG}" ]]; then
+        local advertised
+        advertised="$(tr -cd '0-9' < "${UPDATE_PORT_FW_CFG}")"
+        if [[ -n "${advertised}" ]] && ((advertised > 0 && advertised < 65536)); then
+            port="${advertised}"
+        else
+            emit "ANDROMEDA_UPDATE_PORT_INVALID advertised=${advertised:-empty} falling-back=${UPDATE_PORT_FALLBACK}"
+        fi
+    fi
+    printf 'http://10.0.2.2:%s/andromeda-v2.tar' "${port}"
+}
 
 emit() {
     local message="$1"
@@ -77,9 +100,11 @@ require_runtime_health
 case "${state}:${revision}" in
     first-boot:1)
         emit "ANDROMEDA_FIRST_BOOT_OK revision=1"
+        update_url="$(resolve_update_url)"
+        emit "ANDROMEDA_UPDATE_FETCH_START url=${update_url}"
         curl --fail --location --show-error --retry 60 --retry-delay 2 \
             --retry-connrefused \
-            --output "${UPDATE_ARCHIVE}" "${UPDATE_URL}"
+            --output "${UPDATE_ARCHIVE}" "${update_url}"
         verify_update_archive
         skopeo copy --retry-times 5 \
             "oci-archive:${UPDATE_ARCHIVE}" \

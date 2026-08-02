@@ -92,6 +92,39 @@ mkdir -p \
     "${DIAGNOSTICS_DIR}/host" \
     "${DIAGNOSTICS_DIR}/nvram" \
     "${DIAGNOSTICS_DIR}/root"
+# Record the host toolchain BEFORE the long install, so the evidence bundle can
+# say what produced it. Firmware and emulator versions silently change UEFI and
+# device behaviour, and UEFI boot is precisely what is under test -- an artifact
+# that cannot name its own OVMF/QEMU is not reproducible evidence. The GCP path
+# already writes host-environment.txt; this is the CI equivalent. Written early
+# and best-effort so a missing optional tool never fails the run.
+{
+    printf 'collected           %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'uname               %s\n' "$(uname -a)"
+    printf 'qemu-system-x86_64  %s\n' \
+        "$(qemu-system-x86_64 --version 2>/dev/null | head -n 1)"
+    printf 'qemu-img            %s\n' \
+        "$(qemu-img --version 2>/dev/null | head -n 1)"
+    printf 'qemu-nbd            %s\n' \
+        "$(qemu-nbd --version 2>/dev/null | head -n 1)"
+    for optional in podman skopeo shellcheck; do
+        printf '%-19s %s\n' "${optional}" \
+            "$(command -v "${optional}" >/dev/null &&
+                "${optional}" --version 2>/dev/null | head -n 1 ||
+                printf 'absent')"
+    done
+    printf 'OVMF_CODE           %s\n' "${OVMF_CODE}"
+    printf 'OVMF_CODE sha256    %s\n' \
+        "$(sha256sum "${OVMF_CODE}" 2>/dev/null | cut -d' ' -f1)"
+    printf 'OVMF_VARS_TEMPLATE  %s\n' "${OVMF_VARS_TEMPLATE}"
+    printf 'OVMF_VARS sha256    %s\n' \
+        "$(sha256sum "${OVMF_VARS_TEMPLATE}" 2>/dev/null | cut -d' ' -f1)"
+    printf 'installer ISO       %s\n' "${ISO_PATH}"
+    printf 'ISO sha256          %s\n' \
+        "$(sha256sum "${ISO_PATH}" 2>/dev/null | cut -d' ' -f1)"
+    printf 'update payload sha256 %s\n' "${update_sha256}"
+} >"${DIAGNOSTICS_DIR}/host/versions.txt" 2>&1 || true
+
 rm -f "${DISK_PATH}" "${INSTALL_LOG}" "${BOOT_LOG}" "${OVMF_VARS}"
 qemu-img create -f qcow2 "${DISK_PATH}" 64G
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS}"
@@ -399,15 +432,42 @@ grep -F '\EFI\fedora\shimx64.efi' \
 
 # The guest reaches the host over slirp via 10.0.2.2, which forwards to the
 # host loopback; never expose the output directory on real interfaces.
-python3 -m http.server 8080 \
+#
+# Port 0 lets the kernel assign a free port instead of hardcoding 8080. A fixed
+# port is fine on an ephemeral GitHub runner but collides on any host that runs
+# two lifecycle tests at once or reuses one machine (the GCP path keeps a single
+# instance alive across runs), and the failure mode -- "Address already in use"
+# racing an unrelated server -- is not obviously about ports. The chosen port is
+# handed to the guest over the same fw_cfg channel that already carries the
+# update SHA-256.
+#
+# `-u` is load-bearing: without it Python buffers the "Serving HTTP on ... port
+# N" banner when stdout is a file, so the port cannot be read back here.
+python3 -u -m http.server 0 \
     --bind 127.0.0.1 \
     --directory "${OUTPUT_DIR}" \
     >"${OUTPUT_DIR}/update-server.log" 2>&1 &
 http_pid="$!"
 
+update_port=""
+for _ in $(seq 1 50); do
+    update_port="$(
+        sed -n 's/.*port \([0-9][0-9]*\).*/\1/p' \
+            "${OUTPUT_DIR}/update-server.log" 2>/dev/null | head -n 1
+    )"
+    [[ -n "${update_port}" ]] && break
+    sleep 0.1
+done
+require "the update server announced its listening port within 5s" \
+    test -n "${update_port}"
+readonly update_port
+printf 'update server listening on 127.0.0.1:%s (guest reaches it at 10.0.2.2:%s)\n' \
+    "${update_port}" "${update_port}"
+
 qemu-system-x86_64 \
     "${common_qemu[@]}" \
     -fw_cfg "name=opt/andromeda/update-sha256,string=${update_sha256}" \
+    -fw_cfg "name=opt/andromeda/update-port,string=${update_port}" \
     -boot order=c \
     -serial "file:${BOOT_LOG}" &
 qemu_pid="$!"
@@ -463,6 +523,11 @@ import sys
 log = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\0", b"").decode(errors="replace")
 log = log.replace("\r", "")
 log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
+# Rejoin markers cut in half by a kernel printk sharing the UART; see
+# repair_spliced_kernel_lines in os/scripts/lib/markers.sh for the mechanism and
+# the run that exposed it. Kept in step with that function because this
+# validator must stay correct if it is ever pointed at a raw log.
+log = re.sub(r"(?<!\n)\[ *\d+\.\d+\][^\n]*\n", "", log)
 markers = [
     "ANDROMEDA_SELINUX_LABELS_OK",
     "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",

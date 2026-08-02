@@ -20,14 +20,31 @@
 #                   rot-risk proxy (old digests are the ones registries prune)
 #                   and a missing-security-updates signal.
 #
+# Answers come in FOUR classes, and the distinctions are load-bearing:
+#
+#   UNRESOLVABLE   the registry positively reports the digest gone (HTTP
+#                  404/410, skopeo "manifest unknown"). The pin is broken NOW.
+#   STALE          still resolvable, but older than the age budget. Advisory:
+#                  rot risk plus missed upstream fixes; nothing broken today.
+#   INDETERMINATE  the registry answered with something other than a clean
+#                  yes/no: throttling (429), outage (5xx), auth trouble, a
+#                  timeout, or no build timestamp exposed. NOT proof of
+#                  deletion -- and NOT silently swallowed either, because a
+#                  silently dead signal is exactly how the skopeo timestamp
+#                  regression shipped green (commit 1921496).
+#   OK             resolvable and within the age budget.
+#
 # References that are NOT pinned are reported too, with the digest they resolve
 # to right now, so `docs/development/supply-chain.md`'s re-pin runbook is a
 # copy-paste operation rather than a research project.
 #
 # EXIT CODES
-#   0  no findings, or findings downgraded to warnings (the default)
-#   1  --strict and at least one finding
-#   2  usage error, or no usable registry client
+#   0  pass: no findings, or findings not gated (no --fail-on = advisory mode)
+#   1  gated findings include at least one UNRESOLVABLE pin
+#   3  gated findings present, none of them UNRESOLVABLE (STALE and/or
+#      INDETERMINATE)
+#   2  usage error, no usable registry client, or ZERO references scanned --
+#      a run that verified nothing must not report success
 #
 # See docs/development/supply-chain.md for the tiering strategy this implements.
 
@@ -41,10 +58,18 @@ readonly REPOSITORY_ROOT
 # where upstream security updates have been picked up -- not to nag on every
 # run. Registries differ wildly (Docker Hub keeps digests indefinitely, quay
 # prunes fedora-bootc within days), so treat a warning as "look at it", not
-# "the build is broken". --strict promotes findings to failures for the one
-# caller that wants a gate.
+# "the build is broken". --fail-on promotes classes of findings to failures
+# for the callers that want a gate.
 MAX_AGE_DAYS="${ANDROMEDA_PIN_MAX_AGE_DAYS:-90}"
-STRICT=0
+
+# Which finding classes fail the run. Empty = advisory: findings are warnings
+# and the exit code is 0. `--fail-on unresolvable` is for callers who mean
+# "block me only when a pin is broken right now" (the re-pin runbook gate);
+# `--fail-on any` (compatibility alias: --strict) also fails on STALE and
+# INDETERMINATE. The classes are deliberately NOT conflated: the rust pin
+# being 501 days old (STALE, advisory) must not be able to mask -- or be
+# mistaken for -- a digest the registry no longer serves (UNRESOLVABLE).
+FAIL_ON=""
 
 # Files scanned for image references. os/Containerfile is the Tier A input this
 # script exists for. os/scripts/build-iso.sh is READ ONLY here -- it carries the
@@ -54,16 +79,30 @@ SCAN_FILES="os/Containerfile os/scripts/build-iso.sh"
 
 usage() {
     cat <<'EOF'
-Usage: check-pin-freshness.sh [--strict] [--max-age-days N] [FILE...]
+Usage: check-pin-freshness.sh [--fail-on CLASS] [--max-age-days N] [FILE...]
 
 Reports on container image pins found in FILE... (default: os/Containerfile
 and os/scripts/build-iso.sh, relative to the repository root).
 
-  --strict            exit non-zero if any pin is unresolvable or over-age.
-                      Without it, findings are warnings and the exit code is 0.
+  --fail-on CLASS     promote finding classes to failures. CLASS is one of:
+                        unresolvable  fail only when the registry positively
+                                      no longer serves a pinned digest (the
+                                      build-breaking class)
+                        stale         additionally fail on over-age pins
+                        any           additionally fail on INDETERMINATE
+                                      findings (registry throttled or
+                                      unreachable, no build timestamp)
+                      Without --fail-on, findings are warnings and exit is 0.
+  --strict            compatibility alias for --fail-on any.
   --max-age-days N    age budget in days (default 90, or
                       $ANDROMEDA_PIN_MAX_AGE_DAYS).
   -h, --help          this message.
+
+Exit codes:
+  0  pass, or findings present but not gated by --fail-on
+  1  gated findings include at least one UNRESOLVABLE pin
+  3  gated findings present, none unresolvable (STALE and/or INDETERMINATE)
+  2  usage error, no usable registry client, or zero references scanned
 
 Requires skopeo, or curl + jq as a fallback.
 EOF
@@ -72,7 +111,19 @@ EOF
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --strict)
-            STRICT=1
+            FAIL_ON=any
+            shift
+            ;;
+        --fail-on)
+            if [ "$#" -lt 2 ]; then
+                printf 'check-pin-freshness: --fail-on needs a value\n' >&2
+                exit 2
+            fi
+            FAIL_ON="$2"
+            shift 2
+            ;;
+        --fail-on=*)
+            FAIL_ON="${1#--fail-on=}"
             shift
             ;;
         --max-age-days)
@@ -118,15 +169,36 @@ case "${MAX_AGE_DAYS}" in
         ;;
 esac
 
-readonly MAX_AGE_DAYS STRICT SCAN_FILES
+case "${FAIL_ON}" in
+    ''|unresolvable|stale|any) ;;
+    *)
+        printf 'check-pin-freshness: --fail-on must be unresolvable, stale or any, got: %s\n' \
+            "${FAIL_ON}" >&2
+        exit 2
+        ;;
+esac
 
-findings=0
+readonly MAX_AGE_DAYS FAIL_ON SCAN_FILES
+
+unresolvable=0
+stale=0
+indeterminate=0
 checked=0
 
 note() { printf '  %s\n' "$*"; }
 
-finding() {
-    findings=$((findings + 1))
+finding_unresolvable() {
+    unresolvable=$((unresolvable + 1))
+    printf '  !! %s\n' "$*"
+}
+
+finding_stale() {
+    stale=$((stale + 1))
+    printf '  !! %s\n' "$*"
+}
+
+finding_indeterminate() {
+    indeterminate=$((indeterminate + 1))
     printf '  !! %s\n' "$*"
 }
 
@@ -153,12 +225,26 @@ else
 fi
 readonly BACKEND
 
+# Every temp file lives under one mktemp -d that the EXIT trap removes --
+# including on set -e aborts, which is exactly when a stray header dump would
+# otherwise be left behind.
+SCRATCH_DIR="$(mktemp -d)"
+readonly SCRATCH_DIR
+trap 'rm -rf "${SCRATCH_DIR}"' EXIT
+
 MANIFEST_ACCEPT='application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json'
 readonly MANIFEST_ACCEPT
+
+# Bounded, retrying curl. Transient registry hiccups (the 429/5xx class) get a
+# few retries before they are reported as INDETERMINATE, and no single lookup
+# may hang the whole check.
+CURL_RETRY_ARGS=(--retry 3 --retry-all-errors --max-time 60 --connect-timeout 15)
+readonly CURL_RETRY_ARGS
 
 # registry_host REF -> the host to talk HTTP to.
 # docker.io is a redirect shim; the real API lives on registry-1.docker.io.
 registry_host() {
+    local ref_host
     ref_host="${1%%/*}"
     case "${ref_host}" in
         docker.io) printf 'registry-1.docker.io' ;;
@@ -190,10 +276,11 @@ strip_tag() {
 # the Authorization header entirely -- sending an empty `Bearer ` is a malformed
 # credential and gets rejected.
 registry_token() {
+    local token_host token_path token_ref challenge realm service
     token_host=$1
     token_path=$2
     token_ref=${3:-latest}
-    challenge=$(curl -sSI --max-time 30 \
+    challenge=$(curl -sSI "${CURL_RETRY_ARGS[@]}" \
         "https://${token_host}/v2/${token_path}/manifests/${token_ref}" 2>/dev/null \
         | tr -d '\r' \
         | awk 'tolower($1) == "www-authenticate:" { $1 = ""; print substr($0, 2); exit }') || true
@@ -204,7 +291,7 @@ registry_token() {
     realm=$(printf '%s' "${challenge}" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')
     service=$(printf '%s' "${challenge}" | sed -n 's/.*service="\([^"]*\)".*/\1/p')
     [ -n "${realm}" ] || return 0
-    curl -sS --max-time 30 --get \
+    curl -sS "${CURL_RETRY_ARGS[@]}" --get \
         --data-urlencode "service=${service}" \
         --data-urlencode "scope=repository:${token_path}:pull" \
         "${realm}" 2>/dev/null \
@@ -213,6 +300,7 @@ registry_token() {
 
 # curl_manifest HOST PATH REFERENCE [HEADERS_OUT] -> manifest body on stdout.
 curl_manifest() {
+    local manifest_host manifest_path manifest_ref manifest_headers manifest_token manifest_url
     manifest_host=$1
     manifest_path=$2
     manifest_ref=$3
@@ -220,34 +308,93 @@ curl_manifest() {
     manifest_token=$(registry_token "${manifest_host}" "${manifest_path}" "${manifest_ref}")
     manifest_url="https://${manifest_host}/v2/${manifest_path}/manifests/${manifest_ref}"
     if [ -n "${manifest_token}" ]; then
-        curl -sS --max-time 60 --fail --dump-header "${manifest_headers}" \
+        curl -sS "${CURL_RETRY_ARGS[@]}" --fail --dump-header "${manifest_headers}" \
             -H "Authorization: Bearer ${manifest_token}" \
             -H "Accept: ${MANIFEST_ACCEPT}" \
             "${manifest_url}" 2>/dev/null
     else
-        curl -sS --max-time 60 --fail --dump-header "${manifest_headers}" \
+        curl -sS "${CURL_RETRY_ARGS[@]}" --fail --dump-header "${manifest_headers}" \
             -H "Accept: ${MANIFEST_ACCEPT}" \
             "${manifest_url}" 2>/dev/null
     fi
 }
 
-# pin_resolvable REF DIGEST -> 0 when the registry still serves that digest.
-# This is the check that would have caught the fedora-bootc breakage.
+# pin_resolvable REF DIGEST -> three-way verdict, because "the fetch failed" is
+# NOT the same claim as "the registry deleted the digest". On a Docker Hub 429
+# the old binary yes/no printed "the registry no longer serves this digest",
+# which was simply false.
+#
+#   return 0                  digest is served (2xx)
+#   return 1, detail stdout   registry positively reports it gone (404/410,
+#                             skopeo "manifest unknown")
+#   return 2, detail stdout   anything else: throttling, outage, auth trouble,
+#                             timeout -> caller reports INDETERMINATE
 pin_resolvable() {
+    local skopeo_err err_file host path token url code
     if [ "${BACKEND}" = "skopeo" ]; then
-        skopeo inspect --raw "docker://$1@$2" >/dev/null 2>&1
-        return
+        err_file=$(mktemp "${SCRATCH_DIR}/skopeo-err.XXXXXX")
+        if skopeo inspect --raw "docker://$1@$2" >/dev/null 2>"${err_file}"; then
+            rm -f "${err_file}"
+            return 0
+        fi
+        skopeo_err=$(head -n 1 "${err_file}")
+        rm -f "${err_file}"
+        if printf '%s' "${skopeo_err}" | grep -qiE 'manifest[ _]unknown|name[ _]unknown|not found|404'; then
+            printf 'skopeo: %s' "${skopeo_err}"
+            return 1
+        fi
+        printf 'skopeo failed without a not-found error: %s' "${skopeo_err}"
+        return 2
     fi
-    curl_manifest "$(registry_host "$1")" "$(registry_path "$1")" "$2" >/dev/null
+
+    host=$(registry_host "$1")
+    path=$(registry_path "$1")
+    token=$(registry_token "${host}" "${path}" "$2")
+    url="https://${host}/v2/${path}/manifests/$2"
+    if [ -n "${token}" ]; then
+        code=$(curl -sS -o /dev/null -w '%{http_code}' "${CURL_RETRY_ARGS[@]}" \
+            -H "Authorization: Bearer ${token}" \
+            -H "Accept: ${MANIFEST_ACCEPT}" \
+            "${url}" 2>/dev/null) || true
+    else
+        code=$(curl -sS -o /dev/null -w '%{http_code}' "${CURL_RETRY_ARGS[@]}" \
+            -H "Accept: ${MANIFEST_ACCEPT}" \
+            "${url}" 2>/dev/null) || true
+    fi
+    case "${code}" in
+        2??)
+            return 0
+            ;;
+        404|410)
+            printf 'registry answered HTTP %s for the manifest' "${code}"
+            return 1
+            ;;
+        ''|000)
+            printf 'no HTTP response (DNS failure, connect failure, or timeout)'
+            return 2
+            ;;
+        *)
+            printf 'registry answered HTTP %s -- throttling/outage/auth, not proof of deletion' "${code}"
+            return 2
+            ;;
+    esac
 }
 
 # pin_created REF DIGEST -> the image's build timestamp (RFC 3339), or nothing.
 # Reaching it means walking index -> linux/amd64 manifest -> config blob, which
-# skopeo does for us via --override-os/--override-arch.
+# skopeo does for us via --override-os/--override-arch. An empty result is the
+# caller's cue to report INDETERMINATE -- never to stay silent.
 pin_created() {
+    local stamp created_host created_path created_manifest child config_digest config_token config_url
     if [ "${BACKEND}" = "skopeo" ]; then
-        skopeo inspect --override-os linux --override-arch amd64 \
-            --format '{{.Created}}' "docker://$1@$2" 2>/dev/null || true
+        stamp=$(skopeo inspect --override-os linux --override-arch amd64 \
+            --format '{{.Created}}' "docker://$1@$2" 2>/dev/null || true)
+        # Go renders a zero time.Time as 0001-01-01...; that means "no
+        # timestamp recorded", not a two-thousand-year-old image.
+        case "${stamp}" in
+            0001-01-01*) return 0 ;;
+        esac
+        printf '%s' "${stamp}"
         return 0
     fi
 
@@ -268,33 +415,50 @@ pin_created() {
     config_token=$(registry_token "${created_host}" "${created_path}" "$2")
     config_url="https://${created_host}/v2/${created_path}/blobs/${config_digest}"
     if [ -n "${config_token}" ]; then
-        curl -sSL --max-time 60 --fail \
+        curl -sSL "${CURL_RETRY_ARGS[@]}" --fail \
             -H "Authorization: Bearer ${config_token}" \
             "${config_url}" 2>/dev/null \
             | jq -r '.created // empty' 2>/dev/null || true
     else
-        curl -sSL --max-time 60 --fail "${config_url}" 2>/dev/null \
+        curl -sSL "${CURL_RETRY_ARGS[@]}" --fail "${config_url}" 2>/dev/null \
             | jq -r '.created // empty' 2>/dev/null || true
     fi
 }
 
 # tag_digest REF TAG -> the digest that tag points at today. Feeds the re-pin
 # runbook: the value printed here is the value to paste into the Containerfile.
-# The manifest-list digest is what we want (it keeps the reference
-# multi-arch), which is exactly sha256 over the raw manifest bytes.
+# The manifest-list digest is what we want (it keeps the reference multi-arch).
+#
+# On the skopeo path, prefer skopeo's own digest computation (`--format
+# '{{.Digest}}'`). The old fallback hashed `$(skopeo inspect --raw ...)`
+# client-side -- but command substitution strips trailing newlines, so a
+# manifest ending in one would hash to the WRONG digest. The fallback now
+# writes the raw bytes to a file and hashes the file, which preserves every
+# byte.
 tag_digest() {
+    local skopeo_digest raw_file tag_headers
     if [ "${BACKEND}" = "skopeo" ]; then
-        raw=$(skopeo inspect --raw "docker://$1:$2" 2>/dev/null) || return 0
-        [ -n "${raw}" ] || return 0
-        if command -v sha256sum >/dev/null 2>&1; then
-            printf 'sha256:%s' "$(printf '%s' "${raw}" | sha256sum | cut -d' ' -f1)"
-        elif command -v shasum >/dev/null 2>&1; then
-            printf 'sha256:%s' "$(printf '%s' "${raw}" | shasum -a 256 | cut -d' ' -f1)"
+        skopeo_digest=$(skopeo inspect --format '{{.Digest}}' "docker://$1:$2" 2>/dev/null || true)
+        case "${skopeo_digest}" in
+            sha256:*)
+                printf '%s' "${skopeo_digest}"
+                return 0
+                ;;
+        esac
+        raw_file=$(mktemp "${SCRATCH_DIR}/manifest.XXXXXX")
+        if skopeo inspect --raw "docker://$1:$2" >"${raw_file}" 2>/dev/null \
+            && [ -s "${raw_file}" ]; then
+            if command -v sha256sum >/dev/null 2>&1; then
+                printf 'sha256:%s' "$(sha256sum <"${raw_file}" | cut -d' ' -f1)"
+            elif command -v shasum >/dev/null 2>&1; then
+                printf 'sha256:%s' "$(shasum -a 256 <"${raw_file}" | cut -d' ' -f1)"
+            fi
         fi
+        rm -f "${raw_file}"
         return 0
     fi
 
-    tag_headers=$(mktemp)
+    tag_headers=$(mktemp "${SCRATCH_DIR}/headers.XXXXXX")
     if curl_manifest "$(registry_host "$1")" "$(registry_path "$1")" "$2" "${tag_headers}" >/dev/null; then
         tr -d '\r' <"${tag_headers}" \
             | awk 'tolower($1) == "docker-content-digest:" { print $2; exit }'
@@ -317,6 +481,7 @@ tag_digest() {
 # (Linux) and the maintainer's box (darwin) are not the same platform, so try
 # each rather than assuming.
 iso_to_epoch() {
+    local stamp
     stamp=$(printf '%s' "$1" \
         | sed -e 's/ /T/' -e 's/^\(....-..-..T..:..:..\).*/\1Z/')
     date -u -d "${stamp}" +%s 2>/dev/null && return 0
@@ -329,6 +494,7 @@ iso_to_epoch() {
 }
 
 age_days() {
+    local epoch now
     epoch=$(iso_to_epoch "$1") || return 1
     now=$(date -u +%s)
     printf '%s' "$(( (now - epoch) / 86400 ))"
@@ -339,6 +505,7 @@ age_days() {
 # --------------------------------------------------------------------------
 
 report_pinned() {
+    local ref digest origin resolve_detail resolve_status created days
     ref=$1
     digest=$2
     origin=$3
@@ -346,27 +513,39 @@ report_pinned() {
     printf '\n%s\n' "${ref}@${digest}"
     note "declared in ${origin}, pinned by digest"
 
-    if ! pin_resolvable "${ref}" "${digest}"; then
-        finding "UNRESOLVABLE: the registry no longer serves this digest."
+    resolve_status=0
+    resolve_detail=$(pin_resolvable "${ref}" "${digest}") || resolve_status=$?
+    if [ "${resolve_status}" -eq 1 ]; then
+        finding_unresolvable "UNRESOLVABLE: the registry no longer serves this digest (${resolve_detail})."
         note "This is the fedora-bootc failure mode (run 30702410393): every"
         note "build using this reference is broken until the pin is refreshed."
         note "Fix: resolve the tag to its current digest and update the pin --"
         note "see the re-pin runbook in docs/development/supply-chain.md."
         return
     fi
+    if [ "${resolve_status}" -ne 0 ]; then
+        finding_indeterminate "INDETERMINATE: could not verify the pin: ${resolve_detail}."
+        note "This is NOT the fedora-bootc failure mode: the registry did not"
+        note "positively report the digest gone, it just failed to answer"
+        note "cleanly. Re-run before treating this pin as broken."
+        return
+    fi
     note "resolvable: yes"
 
     created=$(pin_created "${ref}" "${digest}")
     if [ -z "${created}" ]; then
-        note "age: unknown (registry did not expose a build timestamp)"
+        finding_indeterminate "INDETERMINATE: age unknown (registry did not expose a build timestamp)."
+        note "The age signal is dead for this reference, so staleness cannot be"
+        note "assessed. A silently dead age signal is how the skopeo timestamp"
+        note "regression shipped unnoticed (commit 1921496) -- hence a finding."
         return
     fi
     if ! days=$(age_days "${created}"); then
-        note "age: unparseable timestamp ${created}"
+        finding_indeterminate "INDETERMINATE: unparseable build timestamp: ${created}."
         return
     fi
     if [ "${days}" -gt "${MAX_AGE_DAYS}" ]; then
-        finding "STALE: built ${created} (${days} days ago, budget ${MAX_AGE_DAYS})."
+        finding_stale "STALE: built ${created} (${days} days ago, budget ${MAX_AGE_DAYS})."
         note "Still resolvable, so nothing is broken today -- but an old pin is"
         note "both the kind registries prune and ${days} days of missed upstream"
         note "fixes. Renovate opens the refresh PR once it is installed."
@@ -376,6 +555,7 @@ report_pinned() {
 }
 
 report_unpinned() {
+    local ref tag origin digest created days
     ref=$1
     tag=$2
     origin=$3
@@ -389,7 +569,9 @@ report_unpinned() {
 
     digest=$(tag_digest "${ref}" "${tag}")
     if [ -z "${digest}" ]; then
-        note "current digest: could not resolve (registry unreachable?)"
+        finding_indeterminate "INDETERMINATE: could not resolve the tag's current digest (registry unreachable or throttled)."
+        note "The re-pin runbook needs this value; re-run when the registry"
+        note "answers."
         return
     fi
     note "current digest: ${digest}"
@@ -399,6 +581,8 @@ report_unpinned() {
         if days=$(age_days "${created}"); then
             note "tag content built ${created} (${days} days ago)"
         fi
+    else
+        note "tag content age: unavailable (no build timestamp exposed)"
     fi
     note "to re-pin, the reference becomes:"
     note "  ${ref}:${tag}@${digest}"
@@ -419,6 +603,7 @@ HOST_RE='[A-Za-z0-9][A-Za-z0-9._-]\{0,\}\(\.[A-Za-z0-9._-]\{1,\}\)\{1,\}\(:[0-9]
 PATH_RE='/[A-Za-z0-9._/-]\{1,\}\(:[A-Za-z0-9._-]\{1,\}\)\{0,1\}'
 
 scan_containerfile() {
+    local file origin image ref_and_tag base
     file=$1
     origin=$2
     while IFS= read -r image; do
@@ -456,6 +641,7 @@ EOF
 }
 
 scan_for_digests() {
+    local file origin image ref_and_tag
     file=$1
     origin=$2
     while IFS= read -r image; do
@@ -467,11 +653,12 @@ $(grep -o "${HOST_RE}${PATH_RE}@sha256:${DIGEST_RE}" "${file}" | sort -u)
 EOF
 }
 
-if [ "${STRICT}" -eq 1 ]; then
-    mode_label='strict (findings fail)'
+if [ -n "${FAIL_ON}" ]; then
+    mode_label="gate (--fail-on ${FAIL_ON})"
 else
     mode_label='advisory (findings warn)'
 fi
+readonly mode_label
 
 printf 'Container image pin freshness\n'
 printf '  backend:      %s\n' "${BACKEND}"
@@ -499,18 +686,74 @@ for relative in ${SCAN_FILES}; do
     esac
 done
 
+total=$((unresolvable + stale + indeterminate))
+
 printf '\n----\n'
-printf '%s reference(s) checked, %s finding(s)\n' "${checked}" "${findings}"
+printf '%s reference(s) checked, %s finding(s): %s unresolvable, %s stale, %s indeterminate\n' \
+    "${checked}" "${total}" "${unresolvable}" "${stale}" "${indeterminate}"
 
-if [ "${findings}" -eq 0 ]; then
+# Machine-readable summary: one line, stable format, greppable from CI logs
+# without parsing the prose above it.
+printf 'ANDROMEDA_PIN_FRESHNESS unresolvable=%s stale=%s indeterminate=%s checked=%s\n' \
+    "${unresolvable}" "${stale}" "${indeterminate}" "${checked}"
+
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+        printf '### Container image pin freshness\n\n'
+        printf -- '- references checked: %s\n' "${checked}"
+        printf -- '- UNRESOLVABLE (build-breaking): %s\n' "${unresolvable}"
+        printf -- '- STALE (over the %s-day age budget): %s\n' "${MAX_AGE_DAYS}" "${stale}"
+        printf -- '- INDETERMINATE (registry did not answer cleanly): %s\n' "${indeterminate}"
+        printf -- '- mode: %s, backend: %s\n\n' "${mode_label}" "${BACKEND}"
+    } >>"${GITHUB_STEP_SUMMARY}"
+fi
+
+# A run that checked nothing must not report success: either the scan list is
+# wrong or the extraction regressed, and both mean the safety net is not
+# actually deployed. This is an infrastructure failure (2), not a finding.
+if [ "${checked}" -eq 0 ]; then
+    printf 'check-pin-freshness: zero image references found in scan list: %s\n' \
+        "${SCAN_FILES}" >&2
+    printf 'A check that verified nothing cannot vouch for anything. Fix the\n' >&2
+    printf 'scan list (or the extraction patterns) before trusting this check.\n' >&2
+    exit 2
+fi
+
+# Gating. `--fail-on stale` gates the superset {unresolvable, stale}: a
+# staleness gate that waves through a pin the registry already deleted would
+# be nonsense. Exit codes stay distinct so callers can tell "broken now" (1)
+# from "advisory findings promoted" (3) without parsing output.
+fail_exit=0
+case "${FAIL_ON}" in
+    unresolvable)
+        if [ "${unresolvable}" -gt 0 ]; then
+            fail_exit=1
+        fi
+        ;;
+    stale)
+        if [ "${unresolvable}" -gt 0 ]; then
+            fail_exit=1
+        elif [ "${stale}" -gt 0 ]; then
+            fail_exit=3
+        fi
+        ;;
+    any)
+        if [ "${unresolvable}" -gt 0 ]; then
+            fail_exit=1
+        elif [ "${total}" -gt 0 ]; then
+            fail_exit=3
+        fi
+        ;;
+esac
+
+if [ "${fail_exit}" -ne 0 ]; then
+    printf 'ANDROMEDA_PIN_FRESHNESS_FAILED (--fail-on %s)\n' "${FAIL_ON}" >&2
+    exit "${fail_exit}"
+fi
+
+if [ "${total}" -eq 0 ]; then
     printf 'ANDROMEDA_PIN_FRESHNESS_OK\n'
-    exit 0
+else
+    printf 'ANDROMEDA_PIN_FRESHNESS_WARN (findings present but not gated by --fail-on)\n'
 fi
-
-if [ "${STRICT}" -eq 1 ]; then
-    printf 'ANDROMEDA_PIN_FRESHNESS_FAILED (strict)\n' >&2
-    exit 1
-fi
-
-printf 'ANDROMEDA_PIN_FRESHNESS_WARN (advisory mode, not failing)\n'
 exit 0
