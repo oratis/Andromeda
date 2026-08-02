@@ -410,9 +410,11 @@ M1/M2 的 16 KiB 原生页还影响 x86 游戏兼容；Asahi 的游戏栈用 4 K
 - 电池续航、待机掉电、热噪声不低于该硬件参考系统的可接受阈值；
 - 厂商或 Andromeda 团队持有恢复工具、固件和替换样机。
 
-### Tier 4 — Reference
+### Tier 4 — OEM Reference Design（顶层硬件产品线）
 
 Andromeda 与 OEM 共同控制 BOM、固件、校准、密钥、生命周期和出厂测试。只有这一层才可以接近 macOS 的“软硬件共同负责”可靠性。
+
+**OEM Reference Design** 是产品线里程碑，**不是**代码里机器可校验的 `SupportTier` 枚举取值。该枚举（权威来源 `crates/andromeda-hardware/src/model.rs`）的阶梯为 `blocked < community < reference < supported < certified`，其中 `reference` 反而是**次低级**、只有虚拟（L0–L2）证据的档位，语义上并非此处最高的 OEM 整机线。此类整机仍通过机器可校验的 `SupportTier`（最高为 `certified`）表达其硬件支持判定。
 
 支持等级是**每台整机 + 固件版本 + Andromeda release** 的属性，不是某个 CPU/GPU 的永久属性。
 
