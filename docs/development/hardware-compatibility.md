@@ -11,6 +11,23 @@
 - 可追溯 CI evidence；
 - 安全更新责任人与支持期限。
 
+## 信任边界：`hardware check` 不是信任门控
+
+matcher 校验的是清单的**内部一致性与新鲜度**（selector 是否命中、requirement 是否满足、
+证据是否过期、supported 以上是否固定了制品），**不是真实性**。具体地：
+
+- 不带 `--artifact-root` 时，清单里声明的 `sha256` **被原样采信**，不做任何字节比对；
+- HCM 目前**没有 manifest 级签名字段**，`ArtifactPin.signing_key_id` 只用于比对可信 key id
+  集合，不验证真实的 detached 签名（见 `crates/andromeda-hardware/src/verify.rs` 的说明）。
+
+因此一份自造的清单可以让 `andromeda hardware check --require-tier certified` 返回
+`certified` 与退出码 0。**在离线根密钥签名落地前（见"下一步"），不得把 `hardware check`
+的退出码用于放行安装、启用驱动或提升支持等级。**
+
+带 `--artifact-root <dir>` 时，每个 pin 会被解析为 `<dir>/<name>`、重算 SHA-256 并比对，
+不匹配或缺失即把 `effective_tier` 打到 `blocked`；再加 `--trusted-key <id>`（可重复）会
+要求每个 pin 声明可信 key id。这是当前可用的最强校验，仍不等于签名验证。
+
 ## v1 报告与诊断
 
 报告包含：

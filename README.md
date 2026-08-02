@@ -473,10 +473,11 @@ Global flag: `--state-dir <PATH>` (env `ANDROMEDA_STATE_DIR`, default `.andromed
 | `andromeda task list` | List all durable task records |
 | `andromeda task show <TASK_ID>` | Show one task record |
 | `andromeda task evaluate <TASK_ID> [--isolation <LEVEL>] [--confirm-external]` | Evaluate policy without executing any action |
-| `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>]` | Apply a checked state transition with optimistic concurrency |
+| `andromeda task record-outcome <TASK_ID> --action-id <ID> --status <STATUS> --evidence <TEXT> --expected-revision <N>` | Record one action's execution outcome and evidence (repeat `--evidence` for multiple items) |
+| `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | Apply a checked state transition with optimistic concurrency |
 | `andromeda hardware probe` | Print a privacy-conscious hardware report |
 | `andromeda hardware diagnose` | Diagnose driver binding and support-relevant device readiness |
-| `andromeda hardware check <MANIFEST> [--require-tier <TIER>]` | Probe this host and evaluate one HCM JSON document |
+| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--artifact-root <DIR>] [--trusted-key <KEY_ID>]` | Probe this host and evaluate one HCM JSON document |
 
 `--isolation` accepts `none`, `sandbox`, `micro-vm`, and `brokered`. When omitted, each action
 is evaluated at the minimum isolation implied by **its own declared risk**; when given, it
@@ -509,8 +510,9 @@ Exit codes for `hardware check`:
 | `GET` | `/v1/tasks` | List tasks as `{"tasks": [...], "warnings": [...]}`; a corrupt record file is skipped and reported in `warnings` instead of failing the whole listing |
 | `GET` | `/v1/tasks/{id}` | Read one task |
 | `POST` | `/v1/tasks/{id}/capabilities` | Grant capabilities to an existing task; each new capability must have `issued_to == plan.task_id` and be currently active; takes `expected_revision` |
+| `POST` | `/v1/tasks/{id}/outcomes` | Record one action's execution outcome and evidence; appends an `outcome_recorded` event and bumps the revision. Allowed only while `Running`/`Verifying`, at most one per action (append-only), and the action must belong to the plan |
 | `POST` | `/v1/tasks/{id}/evaluate` | Evaluate without executing; isolation is resolved **per action**, and the result is appended as an `evaluated` event, bumping the revision |
-| `POST` | `/v1/tasks/{id}/transition` | Revision-checked state transition; the `Ready` and `Running` edges are policy-gated |
+| `POST` | `/v1/tasks/{id}/transition` | Revision-checked state transition; the `Ready`, `Running`, and `Succeeded` edges are gated. `Ready -> Running` re-runs policy using the confirmation the request carries (default absent) and rejects unconfirmed L3 side effects; `Verifying -> Succeeded` requires an evidenced successful outcome for every action |
 
 Errors are uniformly `{"error": <code>, "message": <text>}`:
 
@@ -521,7 +523,9 @@ Errors are uniformly `{"error": <code>, "message": <text>}`:
 | 404 | `not_found` | No such task |
 | 409 | `already_exists` | Duplicate `task_id` |
 | 409 | `revision_conflict` | Stale `expected_revision` |
-| 422 | `invalid_task` | Plan validation failure, illegal state transition, or a policy-gated refusal |
+| 422 | `external_confirmation_required` | `Ready -> Running` was attempted without confirmation while the plan contains L3 external side effects |
+| 422 | `missing_evidence` | `Verifying -> Succeeded` was attempted while some action lacks a recorded outcome, has an unsuccessful outcome, or has an outcome without evidence |
+| 422 | `invalid_task` | Plan validation failure, illegal state transition, or another policy-gated refusal (ungranted plan, policy-denied action) |
 | 500 | `internal_error` | Serialization or internal failure |
 
 Request bodies use `deny_unknown_fields`: a camelCase typo such as `expiresAt` is **rejected**
@@ -532,9 +536,10 @@ Request bodies use `deny_unknown_fields`: a camelCase typo such as `expiresAt` i
 ### Host validation (DNS rebinding defense)
 
 `taskd` validates the `Host` header of every request (falling back to `:authority` under
-HTTP/2), accepting only `localhost`, `127.0.0.1`, and `[::1]` with an optional port; everything
-else gets a 403. Even if a malicious page uses DNS rebinding to resolve its own name to
-127.0.0.1, the request still carries the attacker's Host and is rejected.
+HTTP/2), accepting only `localhost` and literal loopback IPs (any of 127.0.0.0/8, `[::1]`, and
+their IPv4-mapped forms) with an optional port; everything else gets a 403. Even if a malicious
+page uses DNS rebinding to resolve its own name to 127.0.0.1, the request still carries the
+attacker's Host and is rejected.
 
 > [!CAUTION]
 > Host validation **only defends against browser-originated DNS rebinding; it is not
@@ -706,22 +711,33 @@ Detailed rules are in
 - authority is decided by the host Capability Broker and policy, never by natural language;
 - deny rules override capability grants;
 - a capability is resource-scoped, expires independently, and contains no secret value;
-- L2 actions require a strong-isolation decision, and L3 external side effects require a
-  brokered decision plus final confirmation;
-- task state cannot reach success without passing verification;
+- an L3 external side effect **cannot reach `running`** unless the transition explicitly carries
+  confirmation; confirmation defaults to absent and is recorded on the state-change event with
+  its actor;
+- a task **cannot reach `succeeded`** unless every planned action has a recorded outcome that
+  succeeded or was skipped and carries at least one piece of evidence;
 - task writes use atomic replacement, cross-process locking, and optimistic revision checks;
+- `taskd` refuses to bind to a non-loopback address at startup unless explicitly overridden;
 - hardware reports omit serial numbers and do not themselves grant a support tier.
 
 ### What does not hold yet
 
-- `taskd` is a non-privileged development service with no authentication, bound to `127.0.0.1`
-  by default;
-- the CLI's `--isolation` is only a policy simulation, not a sandbox proof;
+- `taskd` has **no authentication of any kind**: any local process reaching loopback can drive
+  the full API and mint its own capabilities. The `Host` header check defends browsers against
+  DNS rebinding only;
+- isolation levels are **asserted by the caller, not attested** by an execution environment —
+  the CLI's `--isolation` is a policy simulation, not a sandbox proof, and no sandbox exists;
+- the L3 confirmation is **caller-asserted, not broker-attested**: it proves a commit point was
+  taken and by whom, not that a human took it;
+- evidence is recorded by the executing party; there is **no independent verifier**;
+- `andromeda hardware check` is **not a trust gate** — see
+  [docs/development/hardware-compatibility.md](./docs/development/hardware-compatibility.md);
 - there is no real tool executor, so the API must not be exposed to untrusted networks;
 - the following are **not implemented**, and no integration may imply otherwise: model
-  invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, external
-  connector/MCP broker, signed policy bundles, verifier and rollback/compensation executors,
-  user identity and remote authentication, multi-tenancy, and the Task Center GUI.
+  invocation and planner, bubblewrap/SELinux/microVM executor, credential broker, confirmation
+  broker, external connector/MCP broker, signed policy bundles, independent verifier and
+  rollback/compensation executors, local caller authentication, user identity and remote
+  authentication, multi-tenancy, and the Task Center GUI.
 
 For security issues, read [SECURITY.md](./SECURITY.md). **Do not open a public issue** for an
 unpatched vulnerability involving privilege boundaries, credential exposure, filesystem escape,

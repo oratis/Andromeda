@@ -7,7 +7,10 @@ Developer Preview based on Fedora bootc 44 and KDE Plasma.
 
 The default ISO boot entry starts the graphical Anaconda installer. The second
 entry is destructive automation for CI and must never be selected on a machine
-with data: it wipes the first installation disk.
+with data: its kickstart runs `zerombr` plus `clearpart --all --initlabel`,
+which wipes **every** attached disk, not just the install target. A runtime
+guard in `check-platform-compatibility.sh` refuses that path outside a VM, but
+the blast radius is the whole machine.
 
 Builds with `INSTALLER_DEFAULT=1` invert that GRUB default so unattended VMs
 auto-install; those ISOs are named `*-ci.iso` and must never be distributed

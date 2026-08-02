@@ -1,12 +1,13 @@
 //! Local HTTP API for the Andromeda task control plane.
 
+use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use andromeda_core::TaskId;
 use andromeda_runtime::{
-    CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, ServiceError,
-    StateTransitionRequest, StoreError, TaskService,
+    CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, RecordOutcomeRequest,
+    ServiceError, StateTransitionRequest, StoreError, TaskService, TransitionGuardError,
 };
 use axum::extract::{Path, Request, State};
 use axum::http::{StatusCode, header};
@@ -27,6 +28,7 @@ pub fn app(service: TaskService) -> Router {
         .route("/v1/tasks", get(list_tasks).post(create_task))
         .route("/v1/tasks/{task_id}", get(get_task))
         .route("/v1/tasks/{task_id}/capabilities", post(grant_capabilities))
+        .route("/v1/tasks/{task_id}/outcomes", post(record_outcome))
         .route("/v1/tasks/{task_id}/evaluate", post(evaluate_task))
         .route("/v1/tasks/{task_id}/transition", post(transition_task))
         .layer(middleware::from_fn(require_loopback_host))
@@ -40,8 +42,10 @@ pub fn app(service: TaskService) -> Router {
 /// `taskd` binds to loopback by default, but a malicious web page can reach
 /// "localhost" services through DNS rebinding, where the browser resolves an
 /// attacker-controlled name to 127.0.0.1. Such requests still carry the
-/// attacker's `Host` header, so only `localhost`, `127.0.0.1`, and `[::1]`
-/// (each with an optional port) are accepted.
+/// attacker's `Host` header, so only `localhost` and literal loopback IPs
+/// (any of 127.0.0.0/8, `[::1]`, and their IPv4-mapped forms, each with an
+/// optional port) are accepted — exactly the addresses `taskd` will bind
+/// without an override.
 async fn require_loopback_host(request: Request, next: Next) -> Response {
     let host = request
         .headers()
@@ -60,6 +64,53 @@ async fn require_loopback_host(request: Request, next: Next) -> Response {
             })),
         )
             .into_response()
+    }
+}
+
+/// A bind address was rejected because it would expose the unauthenticated
+/// API beyond the local host.
+#[derive(Debug, PartialEq, Eq)]
+pub struct NonLoopbackBind {
+    pub address: SocketAddr,
+}
+
+impl std::fmt::Display for NonLoopbackBind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "refusing to bind {}: taskd has no authentication, so binding beyond loopback would \
+             expose the full task API to that network. The Host-header check only defends \
+             browsers against DNS rebinding and does not protect a non-loopback bind. Set \
+             ANDROMEDA_ALLOW_NON_LOOPBACK=1 only inside an already-isolated network namespace.",
+            self.address
+        )
+    }
+}
+
+impl std::error::Error for NonLoopbackBind {}
+
+/// Enforces the documented rule that `taskd` must not listen beyond loopback.
+///
+/// The `Host` middleware inspects a header, not the accepting socket, so it
+/// cannot make a public bind safe; a non-browser client simply sends
+/// `Host: localhost`. This check is the actual mechanism behind the rule, and
+/// it fails closed: a non-loopback address is rejected unless the operator
+/// explicitly opts out via `allow_override`.
+///
+/// # Errors
+///
+/// Returns [`NonLoopbackBind`] when `address` is not a loopback address and
+/// `allow_override` is false.
+pub fn ensure_loopback_bind(
+    address: SocketAddr,
+    allow_override: bool,
+) -> Result<(), NonLoopbackBind> {
+    // `to_canonical` unwraps IPv4-mapped addresses so `[::ffff:127.0.0.1]`
+    // counts as the loopback it actually is.
+    if address.ip().to_canonical().is_loopback() || allow_override {
+        Ok(())
+    } else {
+        Err(NonLoopbackBind { address })
     }
 }
 
@@ -88,7 +139,15 @@ fn is_loopback_host(value: &str) -> bool {
     if port.is_some_and(|port| port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit())) {
         return false;
     }
-    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // Accept exactly the addresses `ensure_loopback_bind` can be asked to
+    // bind: any literal loopback IP (all of 127.0.0.0/8, `::1`, and their
+    // IPv4-mapped forms). Anything that is not an IP literal — including
+    // `127.0.0.1.evil.example` — fails the parse and is rejected.
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
 /// Runs one synchronous [`TaskService`] operation on the blocking thread
@@ -152,6 +211,19 @@ async fn grant_capabilities(
     Ok(Json(serde_json::to_value(record)?))
 }
 
+async fn record_outcome(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<RecordOutcomeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let task_id = parse_task_id(&task_id)?;
+    let record = run_blocking(&state, move |service| {
+        service.record_outcome(task_id, request)
+    })
+    .await?;
+    Ok(Json(serde_json::to_value(record)?))
+}
+
 async fn evaluate_task(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
@@ -210,6 +282,23 @@ impl IntoResponse for ApiError {
             Self::Service(ServiceError::Store(StoreError::RevisionConflict { .. })) => {
                 (StatusCode::CONFLICT, "revision_conflict")
             }
+            // An unconfirmed L3 external side effect is a distinct operator
+            // action (obtain the final confirmation) from fixing an invalid
+            // task, so it gets its own wire code.
+            Self::Service(ServiceError::Guard(
+                TransitionGuardError::ExternalConfirmationRequired { .. },
+            )) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "external_confirmation_required",
+            ),
+            // Likewise, the evidence gate on `Verifying -> Succeeded` asks the
+            // caller to record (evidenced, successful) outcomes, not to repair
+            // the plan or the transition.
+            Self::Service(ServiceError::Guard(
+                TransitionGuardError::MissingOutcomes { .. }
+                | TransitionGuardError::UnsuccessfulOutcomes { .. }
+                | TransitionGuardError::MissingEvidence { .. },
+            )) => (StatusCode::UNPROCESSABLE_ENTITY, "missing_evidence"),
             Self::Service(
                 ServiceError::Validation(_) | ServiceError::Transition(_) | ServiceError::Guard(_),
             ) => (StatusCode::UNPROCESSABLE_ENTITY, "invalid_task"),
@@ -330,6 +419,127 @@ mod tests {
             serde_json::from_slice(&bytes).expect("json body")
         };
         (status, json)
+    }
+
+    #[test]
+    fn non_loopback_binds_are_refused_unless_explicitly_allowed() {
+        // The Host middleware checks a header, not the accepting socket, so it
+        // cannot protect a public bind. This is the mechanism that does.
+        let public: SocketAddr = "0.0.0.0:7777".parse().expect("addr");
+        let routable: SocketAddr = "192.168.1.10:7777".parse().expect("addr");
+        let any_v6: SocketAddr = "[::]:7777".parse().expect("addr");
+        for address in [public, routable, any_v6] {
+            assert_eq!(
+                ensure_loopback_bind(address, false),
+                Err(NonLoopbackBind { address }),
+                "{address} must be refused by default"
+            );
+            assert_eq!(
+                ensure_loopback_bind(address, true),
+                Ok(()),
+                "{address} must be reachable behind an explicit opt-out"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_binds_are_accepted() {
+        for address in [
+            "127.0.0.1:7777",
+            "[::1]:7777",
+            "127.0.0.5:1",
+            "[::ffff:127.0.0.1]:7777",
+        ] {
+            let address: SocketAddr = address.parse().expect("addr");
+            assert_eq!(ensure_loopback_bind(address, false), Ok(()));
+        }
+    }
+
+    #[tokio::test]
+    async fn succeeding_a_task_requires_recorded_evidence() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let create = inspection_request(workspace_path());
+        let task_id = create.plan.task_id;
+        let action_id = create.plan.actions[0].id;
+        send(&app, local_request("POST", "/v1/tasks", Some(&create))).await;
+
+        let mut revision = 0;
+        for state in ["running", "verifying"] {
+            let (status, body) = send(
+                &app,
+                local_request(
+                    "POST",
+                    &format!("/v1/tasks/{task_id}/transition"),
+                    Some(&json!({
+                        "to": state,
+                        "actor": "runner",
+                        "expected_revision": revision,
+                    })),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{state}: {body}");
+            revision = body["revision"].as_u64().expect("revision");
+        }
+
+        // Without an outcome the verifier cannot declare success; the wire
+        // code tells the caller evidence is what is missing.
+        let (status, body) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&json!({
+                    "to": "succeeded",
+                    "actor": "verifier",
+                    "expected_revision": revision,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"], "missing_evidence");
+
+        let now = chrono::Utc::now();
+        let (status, body) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/outcomes"),
+                Some(&json!({
+                    "outcome": {
+                        "action_id": action_id,
+                        "status": "succeeded",
+                        "started_at": now,
+                        "finished_at": now,
+                        "evidence": [{"kind": "assertion", "summary": "listing matched"}],
+                        "error": null,
+                    },
+                    "actor": "executor",
+                    "expected_revision": revision,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        revision = body["revision"].as_u64().expect("revision");
+
+        let (status, body) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&json!({
+                    "to": "succeeded",
+                    "actor": "verifier",
+                    "expected_revision": revision,
+                })),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["state"], "succeeded");
     }
 
     #[tokio::test]
@@ -477,6 +687,7 @@ mod tests {
             to: andromeda_core::TaskState::Running,
             actor: "runner".into(),
             expected_revision: 0,
+            external_side_effect_confirmed: false,
         };
         let (status, updated) = send(
             &app,
@@ -516,6 +727,7 @@ mod tests {
             to: andromeda_core::TaskState::Succeeded,
             actor: "runner".into(),
             expected_revision: 0,
+            external_side_effect_confirmed: false,
         };
         let (status, error) = send(
             &app,
@@ -528,6 +740,74 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(error["error"], "invalid_task");
+    }
+
+    /// Builds a create request whose single action is an L3 external side
+    /// effect, so `Ready -> Running` demands explicit confirmation.
+    fn l3_request() -> CreateTaskRequest {
+        let task_id = TaskId::new();
+        let capability = Capability {
+            id: CapabilityId::new(),
+            resource: CapabilityResource::Network {
+                host: "api.example.com".into(),
+                port: None,
+            },
+            issued_to: task_id.to_string(),
+            issued_at: Utc::now(),
+            expires_at: None,
+            single_use: false,
+        };
+        let plan = ActionPlan {
+            schema_version: ActionPlan::CURRENT_SCHEMA_VERSION,
+            task_id,
+            intent: Intent::new("Send", "test"),
+            actions: vec![ActionSpec {
+                id: ActionId::new(),
+                name: "send result through broker".into(),
+                kind: ActionKind::NetworkRequest,
+                target: "api.example.com".into(),
+                arguments: BTreeMap::new(),
+                depends_on: Vec::new(),
+                required_capabilities: vec![capability.id],
+                risk: RiskLevel::L3ExternalSideEffect,
+                recovery: RecoverySemantics::None,
+            }],
+        };
+        CreateTaskRequest {
+            plan,
+            capabilities: vec![capability],
+            actor: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_l3_transition_reports_external_confirmation_required() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let request = l3_request();
+        let task_id = request.plan.task_id;
+        let (status, created) =
+            send(&app, local_request("POST", "/v1/tasks", Some(&request))).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(created["state"], "ready");
+
+        let transition = StateTransitionRequest {
+            to: TaskState::Running,
+            actor: "runner".into(),
+            expected_revision: 0,
+            external_side_effect_confirmed: false,
+        };
+        let (status, error) = send(
+            &app,
+            local_request(
+                "POST",
+                &format!("/v1/tasks/{task_id}/transition"),
+                Some(&transition),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error["error"], "external_confirmation_required");
     }
 
     #[tokio::test]
@@ -587,8 +867,13 @@ mod tests {
             "localhost:7777",
             "127.0.0.1",
             "127.0.0.1:7777",
+            // Any 127.0.0.0/8 address `taskd` can bind must also pass the
+            // Host check, or `--listen 127.0.0.5` would 403 every request.
+            "127.0.0.5",
+            "127.0.0.5:7777",
             "[::1]",
             "[::1]:7777",
+            "[::ffff:127.0.0.1]:7777",
         ] {
             assert!(is_loopback_host(allowed), "{allowed} must be allowed");
         }
@@ -628,6 +913,7 @@ mod tests {
             to: TaskState::Ready,
             actor: "sneaky".into(),
             expected_revision: 0,
+            external_side_effect_confirmed: false,
         };
         let (status, error) = send(
             &app,
@@ -663,6 +949,7 @@ mod tests {
             to: TaskState::Ready,
             actor: "approver".into(),
             expected_revision: 1,
+            external_side_effect_confirmed: false,
         };
         let (status, ready) = send(
             &app,
