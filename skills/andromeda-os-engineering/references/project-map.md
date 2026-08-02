@@ -55,8 +55,10 @@ productize macOS on non-Apple hardware, or give an AI default administrator acce
   Asahi stack. Equivalent recovery semantics do not imply identical firmware mechanisms.
 - Make hardware support cohort- and evidence-based through HCM, not a generic Linux compatibility
   assertion.
-- Keep taskd loopback-only until authentication, identity, brokered execution, and multi-tenant
-  boundaries exist.
+- Keep taskd loopback-only until identity, brokered execution, and multi-tenant boundaries exist.
+  Local caller authentication now does exist (a mandatory bearer token, with an unauthenticated
+  listener unrepresentable in the type system), but it is a single shared secret that separates
+  the service account and root from other local users — not identity, and not remote auth.
 
 ## Evidence boundaries
 
