@@ -4,7 +4,7 @@ use crate::model::id_matches;
 use crate::signing::{ManifestSignatureStatus, TrustedKeyring, verify_manifest_signature};
 use crate::{
     ArtifactPin, CapabilityRequirement, CompatibilityEvaluation, DeviceInfo, EvidenceResult,
-    HardwareReport, HardwareSelector, HcmManifest, SupportTier,
+    HardwareReport, HardwareSelector, HcmManifest, ManifestAuthenticity, SupportTier,
 };
 
 /// Verdict for a single pinned artifact, produced by an [`ArtifactVerifier`].
@@ -185,9 +185,10 @@ fn evaluate(
         evaluate_requirement(report, requirement, &mut evidence, &mut missing);
     }
     evaluate_manifest_evidence(manifest, now, &mut evidence, &mut missing);
-    if let Some(keyring) = keyring {
-        evaluate_signature(manifest, keyring, &mut evidence, &mut missing);
-    }
+    let manifest_authenticity = match keyring {
+        Some(keyring) => evaluate_signature(manifest, keyring, &mut evidence, &mut missing),
+        None => ManifestAuthenticity::NotChecked,
+    };
     evaluate_artifacts(manifest, keyring, verifier, &mut evidence, &mut missing);
 
     let requirements_met = missing.is_empty();
@@ -202,12 +203,15 @@ fn evaluate(
             SupportTier::Blocked
         },
         boot_provider: manifest.boot_provider,
+        manifest_authenticity,
         evidence,
         missing,
     }
 }
 
-/// Turns the manifest signature verdict into evidence or a fail-closed reason.
+/// Turns the manifest signature verdict into evidence or a fail-closed reason,
+/// and returns the same verdict as structured [`ManifestAuthenticity`] for the
+/// evaluation output.
 ///
 /// Only ever called when a [`TrustedKeyring`] is supplied. Any status other
 /// than `Verified` lands in `missing`, which drives `effective_tier` to
@@ -218,24 +222,41 @@ fn evaluate_signature(
     keyring: &TrustedKeyring,
     evidence: &mut Vec<String>,
     missing: &mut Vec<String>,
-) {
+) -> ManifestAuthenticity {
+    // The structured `reason` deliberately equals the `missing` string, so the
+    // two views of one verdict can never drift apart.
+    let fail = |missing: &mut Vec<String>, reason: String| {
+        missing.push(reason.clone());
+        ManifestAuthenticity::Failed { reason }
+    };
     match verify_manifest_signature(manifest, keyring) {
-        ManifestSignatureStatus::Verified { key_id } => evidence.push(format!(
-            "manifest signature verified against trusted key '{key_id}'"
-        )),
-        ManifestSignatureStatus::Unsigned => missing.push(
+        ManifestSignatureStatus::Verified { key_id } => {
+            evidence.push(format!(
+                "manifest signature verified against trusted key '{key_id}'"
+            ));
+            ManifestAuthenticity::Verified { key_id }
+        }
+        ManifestSignatureStatus::Unsigned => fail(
+            missing,
             "manifest is unsigned but a trusted keyring is configured; authenticity cannot be established"
                 .to_owned(),
         ),
-        ManifestSignatureStatus::UnknownKey { key_id } => missing.push(format!(
-            "manifest signature names key '{key_id}', which is not in the trusted keyring"
-        )),
-        ManifestSignatureStatus::Malformed { reason } => {
-            missing.push(format!("manifest signature is malformed: {reason}"));
-        }
-        ManifestSignatureStatus::Invalid { key_id, reason } => missing.push(format!(
-            "manifest signature failed ed25519 verification for key '{key_id}': {reason}"
-        )),
+        ManifestSignatureStatus::UnknownKey { key_id } => fail(
+            missing,
+            format!(
+                "manifest signature names key '{key_id}', which is not in the trusted keyring"
+            ),
+        ),
+        ManifestSignatureStatus::Malformed { reason } => fail(
+            missing,
+            format!("manifest signature is malformed: {reason}"),
+        ),
+        ManifestSignatureStatus::Invalid { key_id, reason } => fail(
+            missing,
+            format!(
+                "manifest signature failed ed25519 verification for key '{key_id}': {reason}"
+            ),
+        ),
     }
 }
 
@@ -462,42 +483,54 @@ fn evaluate_manifest_evidence(
         missing.push("HCM support declaration has expired".into());
     }
 
+    // One exhaustive match per entry: a future `EvidenceResult` variant fails
+    // to compile here instead of silently falling through to "passed". Expiry
+    // is checked after the verdict so a stale *failure* reports the failure
+    // rather than the staleness; both block, but the more actionable reason is
+    // the one worth surfacing.
     for item in &manifest.evidence {
-        if item.result.blocks(manifest.tier) {
-            missing.push(match item.result {
-                EvidenceResult::Failed => format!(
-                    "capability evidence '{}' records a failure",
-                    item.capability
-                ),
-                EvidenceResult::Unknown => format!(
-                    "capability evidence '{}' has no verdict; unknown cannot promote",
-                    item.capability
-                ),
-                EvidenceResult::Degraded => format!(
-                    "capability evidence '{}' is degraded, which {:?} does not allow",
-                    item.capability, manifest.tier
-                ),
-                EvidenceResult::Passed => unreachable!("passed never blocks"),
-            });
-        } else if item.expires_at <= now {
-            // Expiry is checked after the verdict so a stale *failure* reports
-            // the failure rather than the staleness; both block, but the more
-            // actionable reason is the one worth surfacing.
-            missing.push(format!(
-                "capability evidence '{}' has expired",
+        match item.result {
+            EvidenceResult::Passed => {
+                if item.expires_at <= now {
+                    missing.push(format!(
+                        "capability evidence '{}' has expired",
+                        item.capability
+                    ));
+                } else {
+                    evidence.push(format!(
+                        "capability evidence '{}' is passed and current",
+                        item.capability
+                    ));
+                }
+            }
+            EvidenceResult::Degraded => {
+                if item.result.blocks(manifest.tier) {
+                    missing.push(format!(
+                        "capability evidence '{}' is degraded, which the certified tier does \
+                         not allow",
+                        item.capability
+                    ));
+                } else if item.expires_at <= now {
+                    missing.push(format!(
+                        "capability evidence '{}' has expired",
+                        item.capability
+                    ));
+                } else {
+                    evidence.push(format!(
+                        "capability evidence '{}' is degraded and current; the limitation must be \
+                         publicly disclosed",
+                        item.capability
+                    ));
+                }
+            }
+            EvidenceResult::Failed => missing.push(format!(
+                "capability evidence '{}' records a failure",
                 item.capability
-            ));
-        } else if item.result == EvidenceResult::Degraded {
-            evidence.push(format!(
-                "capability evidence '{}' is degraded and current; the limitation must be \
-                 publicly disclosed",
+            )),
+            EvidenceResult::Unknown => missing.push(format!(
+                "capability evidence '{}' has no verdict; unknown cannot promote",
                 item.capability
-            ));
-        } else {
-            evidence.push(format!(
-                "capability evidence '{}' is passed and current",
-                item.capability
-            ));
+            )),
         }
     }
 
@@ -929,32 +962,43 @@ mod tests {
         // A machine whose codec decodes but does not encode is genuinely
         // usable; flattening that into Failed understates it, and into Passed
         // overstates it. Certified is the tier that promises no known
-        // degradation, so that is where it stops.
-        let mut manifest = manifest();
-        manifest.tier = SupportTier::Reference;
-        manifest.evidence[0].result = crate::EvidenceResult::Degraded;
-        let evaluation = evaluate_manifest(&report(), &manifest);
-        assert_eq!(evaluation.effective_tier, SupportTier::Reference);
-        assert!(
-            evaluation
-                .evidence
-                .iter()
-                .any(|note| note.contains("degraded and current")
-                    && note.contains("publicly disclosed")),
-            "a degradation must be surfaced, not silently accepted: {:?}",
-            evaluation.evidence
-        );
-
-        let mut certified = manifest.clone();
-        certified.tier = SupportTier::Certified;
-        let evaluation = evaluate_manifest(&report(), &certified);
-        assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
-        assert!(
-            evaluation
-                .missing
-                .iter()
-                .any(|reason| reason.contains("is degraded"))
-        );
+        // degradation, so that is where it stops — every lower tier keeps its
+        // declared level.
+        for tier in [
+            SupportTier::Community,
+            SupportTier::Reference,
+            SupportTier::Supported,
+            SupportTier::Certified,
+        ] {
+            let mut manifest = manifest();
+            manifest.tier = tier;
+            manifest.evidence[0].result = crate::EvidenceResult::Degraded;
+            let evaluation = evaluate_manifest(&report(), &manifest);
+            if tier == SupportTier::Certified {
+                assert_eq!(evaluation.effective_tier, SupportTier::Blocked);
+                assert!(
+                    evaluation
+                        .missing
+                        .iter()
+                        .any(|reason| reason.contains("is degraded"))
+                );
+            } else {
+                assert_eq!(
+                    evaluation.effective_tier, tier,
+                    "degraded evidence must not block {tier:?}: {:?}",
+                    evaluation.missing
+                );
+                assert!(
+                    evaluation
+                        .evidence
+                        .iter()
+                        .any(|note| note.contains("degraded and current")
+                            && note.contains("publicly disclosed")),
+                    "a degradation must be surfaced, not silently accepted: {:?}",
+                    evaluation.evidence
+                );
+            }
+        }
     }
 
     #[test]
@@ -978,6 +1022,15 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&crate::EvidenceResult::Unknown).unwrap(),
             "\"unknown\""
+        );
+        // The deserialize side of the same contract for the new variants.
+        assert_eq!(
+            serde_json::from_str::<crate::EvidenceResult>("\"degraded\"").unwrap(),
+            crate::EvidenceResult::Degraded
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::EvidenceResult>("\"unknown\"").unwrap(),
+            crate::EvidenceResult::Unknown
         );
     }
 
@@ -1103,6 +1156,13 @@ mod tests {
                         "evidence_uri": "https://example.invalid/e",
                         "collected_at": "2026-01-01T00:00:00Z",
                         "expires_at": "2027-01-01T00:00:00Z"
+                    },
+                    {
+                        "capability": "video_encode",
+                        "result": "degraded",
+                        "evidence_uri": "https://example.invalid/e2",
+                        "collected_at": "2026-01-01T00:00:00Z",
+                        "expires_at": "2027-01-01T00:00:00Z"
                     }
                 ],
                 "expires_at": "2027-01-01T00:00:00Z",
@@ -1112,7 +1172,8 @@ mod tests {
         .expect("schema-full manifest");
         assert_eq!(full.requirements.len(), 3);
         assert_eq!(full.artifacts.len(), 1);
-        assert_eq!(full.evidence.len(), 1);
+        assert_eq!(full.evidence.len(), 2);
+        assert_eq!(full.evidence[1].result, crate::EvidenceResult::Degraded);
     }
 
     #[test]
@@ -1254,6 +1315,12 @@ mod tests {
                 .iter()
                 .any(|item| item.contains("manifest signature verified against trusted key"))
         );
+        assert_eq!(
+            evaluation.manifest_authenticity,
+            ManifestAuthenticity::Verified {
+                key_id: "prod-key".into()
+            }
+        );
     }
 
     #[test]
@@ -1316,6 +1383,10 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("manifest is unsigned"))
         );
+        assert!(matches!(
+            &evaluation.manifest_authenticity,
+            ManifestAuthenticity::Failed { reason } if reason.contains("unsigned")
+        ));
     }
 
     #[test]
@@ -1330,6 +1401,50 @@ mod tests {
                 .missing
                 .iter()
                 .any(|reason| reason.contains("signature") || reason.contains("unsigned"))
+        );
+        assert_eq!(
+            evaluation.manifest_authenticity,
+            ManifestAuthenticity::NotChecked
+        );
+    }
+
+    /// Consumers gate on `manifest_authenticity` as a structured JSON field
+    /// instead of substring-matching evidence strings, so its serialized shape
+    /// is contract: internally tagged, `snake_case`.
+    #[test]
+    fn manifest_authenticity_serializes_as_a_structured_json_field() {
+        // Verified.
+        let mut signed = manifest();
+        let keyring = sign_with_key(&mut signed, "prod-key");
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &signed, Utc::now(), &keyring, None);
+        let json = serde_json::to_value(&evaluation).expect("serialize evaluation");
+        assert_eq!(json["manifest_authenticity"]["type"], "verified");
+        assert_eq!(json["manifest_authenticity"]["key_id"], "prod-key");
+
+        // Failed: same keyring, but the manifest is unsigned.
+        let evaluation =
+            evaluate_manifest_at_verified(&report(), &manifest(), Utc::now(), &keyring, None);
+        let json = serde_json::to_value(&evaluation).expect("serialize evaluation");
+        assert_eq!(json["manifest_authenticity"]["type"], "failed");
+        assert!(
+            json["manifest_authenticity"]["reason"]
+                .as_str()
+                .expect("reason is a string")
+                .contains("unsigned")
+        );
+
+        // Not checked: the advisory, keyring-less path.
+        let evaluation = evaluate_manifest(&report(), &manifest());
+        let json = serde_json::to_value(&evaluation).expect("serialize evaluation");
+        assert_eq!(json["manifest_authenticity"]["type"], "not_checked");
+        assert_eq!(
+            json["manifest_authenticity"]
+                .as_object()
+                .expect("authenticity is an object")
+                .len(),
+            1,
+            "not_checked carries no payload beyond its tag"
         );
     }
 
@@ -1444,6 +1559,54 @@ mod tests {
         assert_eq!(
             schema_names, declared_names,
             "schema tier enum order must equal the SupportTier declaration order in model.rs"
+        );
+    }
+
+    /// Locks the JSON schema `evidence.result` enum to the `EvidenceResult`
+    /// declaration order in `model.rs`, so future reordering fails CI.
+    #[test]
+    fn schema_evidence_result_enum_matches_model_declaration_order() {
+        let declared = [
+            crate::EvidenceResult::Passed,
+            crate::EvidenceResult::Degraded,
+            crate::EvidenceResult::Failed,
+            crate::EvidenceResult::Unknown,
+        ];
+        // Exhaustive match: adding an `EvidenceResult` variant without listing
+        // it here fails to compile, so this guard can never silently miss one.
+        for result in declared {
+            match result {
+                crate::EvidenceResult::Passed
+                | crate::EvidenceResult::Degraded
+                | crate::EvidenceResult::Failed
+                | crate::EvidenceResult::Unknown => {}
+            }
+        }
+        let declared_names: Vec<String> = declared
+            .iter()
+            .map(|result| {
+                serde_json::to_value(result)
+                    .expect("serialize result")
+                    .as_str()
+                    .expect("result serializes to a string")
+                    .to_owned()
+            })
+            .collect();
+
+        let schema: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../schemas/hardware-compatibility-manifest.schema.json"
+        ))
+        .expect("schema parses");
+        let schema_names: Vec<String> = schema["$defs"]["evidence"]["properties"]["result"]["enum"]
+            .as_array()
+            .expect("schema evidence result enum is an array")
+            .iter()
+            .map(|value| value.as_str().expect("enum entry is a string").to_owned())
+            .collect();
+
+        assert_eq!(
+            schema_names, declared_names,
+            "schema evidence.result enum order must equal the EvidenceResult declaration order in model.rs"
         );
     }
 

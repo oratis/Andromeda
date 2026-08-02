@@ -74,8 +74,9 @@ source-sink 污点跟踪、`read(secret) + network(send)` 组合需二次数据�
 即可把任务标记成功。
 
 更根本的是：`TaskRecord` 原本**没有任何 outcome/evidence 字段**，而
-`andromeda-core` 的 `Evidence` / `ActionOutcome` / `OutcomeStatus` /
-`RecoverySemantics` 四个类型**在整个 workspace 里从未被构造过**。
+`andromeda-core` 的 `Evidence` / `ActionOutcome` / `OutcomeStatus`
+三个类型**在整个 workspace 里从未被构造过**（`RecoverySemantics` 除外：
+它在 CLI 的计划构造与多处测试夹具中一直有构造点）。
 
 因此 README 组件表里 `andromeda-core` 的"Evidence、恢复语义"在本轮修复前是
 **死类型**——这是 README 唯一的实质性过度声称。
@@ -253,12 +254,15 @@ BIOS/EC/TB/PD/SSD 固件 + 设备 ID + 镜像 digest；但 schema 的 selector �
 | ACPI HID/CID/UID、DT `compatible` | ✗ |
 | Apple `model_identifier`/`board_id`/`soc` | ✗ |
 | 排除（负向）选择器 | ✗ |
-| `degraded` / `unknown` 证据结果 | ✅ **已补**（见 PR "Give HCM evidence a verdict vocabulary"） |
+| `degraded` / `unknown` 证据结果 | ✓ 已补（[#26](https://github.com/oratis/Andromeda/pull/26)） |
 | 撤销（CRL）对象 | ✗ |
 
-**最要命的是倒数第二行**：cert plan §7 要求每项测试产出
-`pass/degraded/unsupported/blocked/unknown`，而 schema 只接受 `passed|failed`——
-**恰恰是整套策略赖以生存的"降级/未知"状态无法进入 HCM**。
+证据判定词汇一行已由 [#26](https://github.com/oratis/Andromeda/pull/26) 补齐：
+schema 与模型现在接受 `passed|degraded|failed|unknown`，cert plan §7 的
+`blocked` 映射到 `failed`、`unsupported` 不写入 `evidence[]`。**现在最要命的是
+仍然开着的 selector 与撤销两类行**：cohort 定义所需的主板/固件/ACPI/负向选择器
+全部无法表达，CRL 对象也不存在——补齐之前，"精确圈定被认证机器并在回归时立即
+阻断该 cohort"仍然做不到。
 
 ### 4.3 安装器比文档更具破坏性
 
@@ -272,19 +276,23 @@ BIOS/EC/TB/PD/SSD 固件 + 设备 ID + 镜像 digest；但 schema 的 selector �
 ### 4.4 CI 时间预算不自洽
 
 > **本节初稿有一处口径错误，已更正。** 初稿把 `test-gcp-nested.sh` 的 100+60+30=190
-> 分钟与 job 的 `timeout-minutes: 150` 直接对比。二者不是同一条执行路径：GCP wrapper
+> 分钟与 job 的 `timeout-minutes` 直接对比。二者不是同一条执行路径：GCP wrapper
 > 由算子在 GCP VM 上手动运行，受实例 `--max-run-duration` 约束，**从不被任何 workflow
 > 调用**。该对比不成立。
 
-真正的问题在 **GitHub job 自身**：把它实际执行的各步 deadline 相加——固定开销 15m +
-ISO 构建（**无内层 timeout**，只受 job 约束）+ install（`timeout 45m` qemu + 2700s
-生命周期 deadline = 91m）+ 矩阵（3 profile × 600s = 30m）——最坏情况约 **181 分钟**，
-**超过 150 分钟的 job 上限**。job 被外层超时杀死时证据上传步骤不会执行，运行只报
-"cancelled" 且没有串口日志，是整条流水线最难诊断的失败形态。
+问题的历史形态在 **GitHub job 自身**：各步 deadline 相加的最坏情况一度超过当时
+`timeout-minutes: 150` 的上限——job 被外层超时杀死时证据上传步骤不会执行，运行只报
+"cancelled" 且没有串口日志，是整条流水线最难诊断的失败形态。#22 已把上限提到
+**180** 并在 workflow 注释里写明预算不变式（build ≤50m + install `timeout 45m` +
+生命周期 deadline 46m + 矩阵 3×600s=30m + 固定开销 ~6m = 177m < 180m）；nightly
+schedule 触发也**已经存在**（同样由 #22 引入，作上游漂移检测）。剩余缺口是这个
+不变式只活在注释里：`os/scripts/test-ci-timeout-budget.sh`（#27）把每一项 deadline
+从各自的 owning 文件解析出来重新求和并与 `timeout-minutes` 比较，任何一侧漂移都
+在 CI 里当场失败，而不是等 job 被 cancel 才暴露——即把注释中的不变式变成
+**自我强制**的。
 
 `/dev/kvm` 断言**已存在**（`test-install.sh` 与 `test-hardware-matrix.sh` 均在缺少
-KVM 时硬失败，需显式 `ANDROMEDA_ALLOW_TCG=1` 才回退）。仓库确实**没有任何
-nightly/scheduled 触发**。
+KVM 时硬失败，需显式 `ANDROMEDA_ALLOW_TCG=1` 才回退）。
 
 ### 4.5 文档内部不一致
 
@@ -299,6 +307,9 @@ nightly/scheduled 触发**。
 | `product-development-plan.md` §6.4 vs §10.2 | suspend 循环 1000 次 vs 发布门 100/500 次，§6.4 无 stretch-goal 注 |
 
 ## 5. 建议的优先级
+
+> 后续进展：第 3、5、6、8、11 项已在后一轮综合为四个工作流并各产出落地设计，四份设计
+> **全部被对抗复核否决**——被否原因与重做约束见[整改设计对抗评审](./remediation-design-review.md)。
 
 ### 执行器落地前必须（越晚改越贵，且直接违背安全叙事）
 

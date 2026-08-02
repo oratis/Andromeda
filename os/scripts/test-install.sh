@@ -3,6 +3,16 @@ set -euo pipefail
 
 REPOSITORY_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 readonly REPOSITORY_ROOT
+ANDROMEDA_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly ANDROMEDA_SCRIPT_DIR
+# Resolved from BASH_SOURCE so it works from CI, from `sudo os/scripts/...`, and
+# from the GCP path where the repository is untarred into ~/andromeda.
+# shellcheck source=os/scripts/lib/assert.sh
+# shellcheck disable=SC1091
+. "${ANDROMEDA_SCRIPT_DIR}/lib/assert.sh"
+# shellcheck source=os/scripts/lib/markers.sh
+# shellcheck disable=SC1091
+. "${ANDROMEDA_SCRIPT_DIR}/lib/markers.sh"
 readonly OUTPUT_DIR="${1:-${REPOSITORY_ROOT}/output}"
 readonly ISO_PATH="${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.iso"
 
@@ -14,6 +24,12 @@ readonly DISK_PATH="${OUTPUT_DIR}/andromeda-test.qcow2"
 readonly INSTALL_LOG="${OUTPUT_DIR}/install-serial.log"
 readonly BOOT_LOG="${OUTPUT_DIR}/boot-serial.log"
 readonly DIAGNOSTICS_DIR="${OUTPUT_DIR}/diagnostics"
+# Every marker assertion below greps these NUL/CR/ANSI-stripped copies, never
+# the raw serial logs (lib/markers.sh explains why). They live under
+# diagnostics/host so the os-e2e evidence artifact carries exactly the bytes the
+# gates actually saw.
+readonly INSTALL_LOG_NORMALIZED="${DIAGNOSTICS_DIR}/host/install-serial.normalized.log"
+readonly BOOT_LOG_NORMALIZED="${DIAGNOSTICS_DIR}/host/boot-serial.normalized.log"
 readonly OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 readonly OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 readonly OVMF_VARS="${OUTPUT_DIR}/OVMF_VARS.fd"
@@ -61,9 +77,12 @@ if [[ ! -f "${ISO_PATH}" ]]; then
     printf 'Build it with INSTALLER_DEFAULT=1 os/scripts/build-iso.sh; this lifecycle test needs the destructive CI entry as the GRUB default.\n' >&2
     exit 1
 fi
-test -f "${OUTPUT_DIR}/andromeda-v2.tar"
-test -f "${OVMF_CODE}"
-test -f "${OVMF_VARS_TEMPLATE}"
+require_file "${OUTPUT_DIR}/andromeda-v2.tar" \
+    'the rev2 update payload (andromeda-v2.tar) built by build-iso.sh is required; the guest fetches it over slirp and verifies it against the fw_cfg SHA-256'
+require_file "${OVMF_CODE}" \
+    'the OVMF firmware image is required for the UEFI boot path; install the ovmf package or set OVMF_CODE'
+require_file "${OVMF_VARS_TEMPLATE}" \
+    'the OVMF variable-store template is required to give the guest fresh NVRAM; install the ovmf package or set OVMF_VARS_TEMPLATE'
 update_sha256="$(sha256sum "${OUTPUT_DIR}/andromeda-v2.tar" | cut -d' ' -f1)"
 readonly update_sha256
 
@@ -83,13 +102,13 @@ if [[ -c /dev/kvm ]]; then
     accel=kvm
     cpu=host
 elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
-    # Mirror test-gcp-nested.sh:41's `test -c /dev/kvm` precheck. Without KVM the
+    # Mirror test-gcp-nested.sh's `test -c /dev/kvm` precheck. Without KVM the
     # TCG software fallback runs ~10x slower: the 45m install timeout plus the
-    # 2700s boot deadline can exceed the os-e2e job `timeout-minutes: 150`, so a
+    # 2700s boot deadline can exceed the os-e2e job `timeout-minutes: 180`, so a
     # missing /dev/kvm would surface as a confusing timeout instead of a clear
     # failure. Fail fast; set ANDROMEDA_ALLOW_TCG=1 to force TCG for local debug.
     printf 'test-install.sh: /dev/kvm is unavailable.\n' >&2
-    printf 'The TCG software fallback can exceed the os-e2e job timeout (150m) and surface as a confusing timeout rather than a clear failure.\n' >&2
+    printf 'The TCG software fallback can exceed the os-e2e job timeout (180m) and surface as a confusing timeout rather than a clear failure.\n' >&2
     printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
     exit 1
 else
@@ -143,7 +162,8 @@ for candidate in /dev/nbd{0..15}; do
         break
     fi
 done
-test -n "${nbd_device}"
+require 'a free /dev/nbdN device is needed to inspect the installed disk; all of /dev/nbd0../dev/nbd15 are already connected (another test-install.sh run on this host?)' \
+    test -n "${nbd_device}"
 
 qemu-nbd --read-only --connect="${nbd_device}" "${DISK_PATH}"
 blockdev --rereadpt "${nbd_device}"
@@ -247,6 +267,91 @@ if [[ "${image_check_status}" -ne 0 ]]; then
         "${image_check_status}" >&2
     exit "${image_check_status}"
 fi
+
+# ---------------------------------------------------------------------------
+# Installer failure gate: a QEMU exit status of 0 does NOT mean the install
+# succeeded.
+#
+# Anaconda's %onerror hook (os/installer/andromeda-ci.ks:33-35) collects
+# diagnostics and returns; the kickstart's own `shutdown` (:27) then still runs,
+# so the VM powers off cleanly and `install_status` above is 0. run 30686771448
+# failed exactly this way: the ESP carried EFI/Andromeda/diagnostics/*, which is
+# written ONLY by %onerror, yet every exit-status gate passed and the script
+# fell through to the marker grep further below. That grep matched nothing, and
+# `set -o pipefail` plus `set -e` turned it into a bare `exit code 1` with not
+# one word of explanation in the CI log. See docs/reviews/e2e-pipeline-review.md
+# P0 #1.
+#
+# This gate MUST run before the partition-probe gate below: a `%pre
+# --erroronfail` preflight failure aborts Anaconda before partitioning, so the
+# ESP GUID and andromeda-root label never appear, partition_probe_ok stays 0,
+# and the probe gate would otherwise mask the real cause behind a misleading
+# "Timed out waiting for the ESP GUID..." message -- leaving the
+# PREFLIGHT_FAILED branch here unreachable.
+#
+# So: check the installer's own failure markers explicitly, and positively
+# require its success marker instead of only asserting that some greps matched.
+# Both checks read the normalized log -- a marker split by serial cursor-control
+# residue must not be able to hide an installer failure.
+normalize_serial_log "${INSTALL_LOG}" "${INSTALL_LOG_NORMALIZED}"
+
+install_failure_reason=""
+if LC_ALL=C grep --text --quiet 'ANDROMEDA_INSTALLER_PREFLIGHT_FAILED' \
+    "${INSTALL_LOG_NORMALIZED}"; then
+    install_failure_reason='the installer preflight (%pre) rejected this host or the embedded payload'
+elif LC_ALL=C grep --text --quiet 'ANDROMEDA_INSTALLER_DIAGNOSTICS_START' \
+    "${INSTALL_LOG_NORMALIZED}"; then
+    install_failure_reason='Anaconda ran its %onerror hook, so the installation aborted'
+elif [[ -n "$(find "${DIAGNOSTICS_DIR}/installer" -type f 2>/dev/null)" ]]; then
+    # Third, serial-independent trigger: EFI/Andromeda/diagnostics on the ESP
+    # is written ONLY by the %onerror hook, so harvested installer diagnostics
+    # prove the install aborted even when neither marker reached the serial
+    # log (e.g. /dev/ttyS0 was not a character device in the installer
+    # environment, so the markers were never emitted there).
+    install_failure_reason='the ESP carries EFI/Andromeda/diagnostics, which only the %onerror hook writes, so the installation aborted (no serial failure marker was captured; /dev/ttyS0 may not have been usable in the installer environment)'
+fi
+
+if [[ -n "${install_failure_reason}" ]]; then
+    {
+        printf '\n'
+        printf '================================================================\n'
+        printf 'INSTALLER FAILED -- this is NOT a test-harness failure.\n'
+        printf '================================================================\n'
+        printf '  reason: %s.\n' "${install_failure_reason}"
+        printf '  QEMU exited %s, but the exit code is not an install result:\n' \
+            "${install_status}"
+        printf '  the kickstart still runs its shutdown directive after %%onerror,\n'
+        printf '  so a failed install also powers the VM off cleanly.\n'
+        printf '\n'
+        printf '  Installer diagnostics harvested from the ESP:\n'
+    } >&2
+    # The directory is pre-created empty, so test for CONTENT, not existence.
+    installer_diagnostics="$(
+        find "${DIAGNOSTICS_DIR}/installer" -type f 2>/dev/null | sort
+    )" || installer_diagnostics=""
+    if [[ -n "${installer_diagnostics}" ]]; then
+        printf '%s\n' "${installer_diagnostics}" | sed 's/^/    /' >&2
+        printf '  (anaconda.log, program.log and anaconda-payloads-journal.log\n' >&2
+        printf '   carry the bootc payload stderr; start there.)\n' >&2
+    else
+        printf '    none -- the ESP held no EFI/Andromeda/diagnostics, or it\n' >&2
+        printf '    could not be mounted (see the WARNINGs above).\n' >&2
+    fi
+    printf '\n' >&2
+    dump_log_region "${INSTALL_LOG_NORMALIZED}" \
+        'ANDROMEDA_INSTALLER_(PREFLIGHT_FAILED|DIAGNOSTICS_START)' 60 120
+    printf '\n  serial markers seen during the install:\n' >&2
+    LC_ALL=C grep --text --extended-regexp \
+        'ANDROMEDA_INSTALLER_[A-Z_]*' "${INSTALL_LOG_NORMALIZED}" \
+        | sed 's/^/    /' >&2 || true
+    printf '\n  full normalized install log: %s\n\n' \
+        "${INSTALL_LOG_NORMALIZED}" >&2
+    exit 1
+fi
+
+require_marker "${INSTALL_LOG_NORMALIZED}" 'ANDROMEDA_INSTALLER_EFI_OK' \
+    'the UEFI fallback stage never completed: os/installer/install-uefi-fallback.sh did not emit ANDROMEDA_INSTALLER_EFI_OK, so the kickstart %post that installs EFI/BOOT/BOOTX64.EFI and creates the Andromeda NVRAM entry did not finish'
+
 if [[ "${partition_probe_ok}" -ne 1 ]]; then
     printf 'Timed out waiting for the ESP GUID and andromeda-root label on %s.\n' \
         "${nbd_device}" >&2
@@ -255,18 +360,25 @@ fi
 
 # Success path: the partitions were found and must be mounted for the strict
 # assertions below (partition_probe_ok=1 guarantees both were present).
-test -n "${esp_mount}"
-test -n "${root_mount}"
+require 'the ESP was found on the installed disk but could not be mounted, so the EFI binary assertions below cannot run (see the earlier WARNING for the mount error)' \
+    test -n "${esp_mount}"
+require 'the andromeda-root partition was found but could not be mounted read-only, so the installed-system assertions below cannot run (see the earlier WARNING for the mount error)' \
+    test -n "${root_mount}"
 
 grep --text --extended-regexp \
-    'ANDROMEDA_INSTALLER_(EFI_(START|OK)|KARGS_OK)' "${INSTALL_LOG}" \
+    'ANDROMEDA_INSTALLER_(EFI_(START|OK)|KARGS_OK)' "${INSTALL_LOG_NORMALIZED}" \
     | tee "${OUTPUT_DIR}/install-post.log"
-grep -q 'ANDROMEDA_INSTALLER_KARGS_OK mode=ci' "${INSTALL_LOG}"
+require_marker "${INSTALL_LOG_NORMALIZED}" 'ANDROMEDA_INSTALLER_KARGS_OK mode=ci' \
+    'the installer did not confirm the CI kernel arguments; install-uefi-fallback.sh emits this only after selinux=1/enforcing=1 are merged and the root=/boot= arguments survive in the target boot entries'
 
-test -f "${esp_mount}/EFI/fedora/shimx64.efi"
-test -f "${esp_mount}/EFI/fedora/grubx64.efi"
-test -f "${esp_mount}/EFI/BOOT/BOOTX64.EFI"
-test -f "${esp_mount}/EFI/BOOT/grubx64.efi"
+require_file "${esp_mount}/EFI/fedora/shimx64.efi" \
+    'the ESP is missing the shim vendor binary, so Secure Boot chain loading cannot start'
+require_file "${esp_mount}/EFI/fedora/grubx64.efi" \
+    'the ESP is missing the GRUB vendor binary that shim chain loads'
+require_file "${esp_mount}/EFI/BOOT/BOOTX64.EFI" \
+    'the ESP is missing the removable-media fallback loader; firmware that ignores NVRAM boot entries would drop to the UEFI Shell'
+require_file "${esp_mount}/EFI/BOOT/grubx64.efi" \
+    'the ESP is missing the GRUB copy next to the removable-media fallback loader'
 
 umount "${root_mount}"
 umount "${esp_mount}"
@@ -299,26 +411,47 @@ qemu-system-x86_64 \
     -serial "file:${BOOT_LOG}" &
 qemu_pid="$!"
 
+# TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4).
+# The budgets must nest, or a genuinely slow run surfaces as an unattributable
+# cancellation instead of a named timeout:
+#
+#   unit timeout            andromeda-ci-verify.service TimeoutStartSec = 12 min
+#     <  per-boot budget    12 min unit + ~2 min firmware/kernel/sddm/plasma
+#                           = 14 min
+#   3 x per-boot budget     3 boots (first-boot, update, rollback) = 42 min
+#     <  boot deadline      2700 s = 45 min   <-- the deadline below
+#   sum of stage budgets    install 45 min + boot 45 min
+#                           + matrix 3 x 10 min (a HOST-side cap that
+#                             deliberately sits below the 12 min verify unit
+#                             timeout; test-hardware-matrix.sh explains why)
+#                           + build (<=50 min; observed max 42.25 min)
+#                           + prep/upload ~6 min = ~176 min
+#     <  job timeout        os-e2e.yml timeout-minutes: 180
+#
+# Changing any budget here means re-checking the two sites above and below it.
 deadline="$((SECONDS + 2700))"
 while (( SECONDS < deadline )); do
-    # Strip serial cursor-control residue (NUL, CR, ANSI CSI escapes) before the
-    # trigger greps so a marker split mid-token by control chars can't cause a
-    # false 2700s timeout. This mirrors the Python sequence validator below and
-    # test-gcp-nested.sh:78-85's LC_ALL=C extraction on a normalized copy.
-    boot_log_stripped="$(
-        LC_ALL=C tr -d '\000\r' <"${BOOT_LOG}" 2>/dev/null \
-            | LC_ALL=C sed -E 's#\x1b\[[0-?]*[ -/]*[@-~]##g'
-    )" || boot_log_stripped=""
-    if LC_ALL=C grep -qE 'ANDROMEDA_.*_FAILED' <<<"${boot_log_stripped}"; then
+    # Grep the NUL/CR/ANSI-stripped copy, never the raw serial log: a marker
+    # split mid-token by cursor-control residue would otherwise cause a false
+    # 2700 s timeout. normalize_serial_log lives in lib/markers.sh and is shared
+    # with test-hardware-matrix.sh so this fix cannot again land in only one of
+    # the two pollers.
+    normalize_serial_log "${BOOT_LOG}" "${BOOT_LOG_NORMALIZED}"
+    if LC_ALL=C grep --text -qE 'ANDROMEDA_.*_FAILED' \
+        "${BOOT_LOG_NORMALIZED}"; then
         printf 'Installed system emitted a failure marker.\n' >&2
-        LC_ALL=C grep -aE 'ANDROMEDA_.*_(FAILED|OK)' <<<"${boot_log_stripped}" >&2
+        LC_ALL=C grep -aE 'ANDROMEDA_.*_(FAILED|OK)' \
+            "${BOOT_LOG_NORMALIZED}" >&2
         exit 1
     fi
-    if LC_ALL=C grep -q ANDROMEDA_E2E_OK <<<"${boot_log_stripped}"; then
+    if LC_ALL=C grep --text -q ANDROMEDA_E2E_OK "${BOOT_LOG_NORMALIZED}"; then
         LC_ALL=C grep -aE \
             'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
-            <<<"${boot_log_stripped}"
-        python3 - "${BOOT_LOG}" <<'PY'
+            "${BOOT_LOG_NORMALIZED}"
+        # The validator is fed the already-normalized log; it repeats the
+        # stripping because the transform is idempotent and it must stay correct
+        # if it is ever pointed at a raw log.
+        python3 - "${BOOT_LOG_NORMALIZED}" <<'PY'
 import pathlib
 import re
 import sys
@@ -350,20 +483,23 @@ if positions != sorted(positions):
 PY
         exit 0
     fi
-    if grep -q 'Shell>' "${BOOT_LOG}" 2>/dev/null; then
+    # The UEFI Shell prompt is written by firmware that also emits cursor
+    # positioning, so this detector reads the normalized copy as well.
+    if LC_ALL=C grep --text -q 'Shell>' "${BOOT_LOG_NORMALIZED}" 2>/dev/null; then
         printf 'UEFI firmware could not find an installed bootloader.\n' >&2
-        tail -200 "${BOOT_LOG}" >&2
+        tail -200 "${BOOT_LOG_NORMALIZED}" >&2
         exit 1
     fi
     if ! kill -0 "${qemu_pid}" 2>/dev/null; then
         wait "${qemu_pid}"
         printf 'QEMU exited before the end-to-end marker was emitted.\n' >&2
-        tail -200 "${BOOT_LOG}" >&2
+        tail -200 "${BOOT_LOG_NORMALIZED}" >&2
         exit 1
     fi
     sleep 5
 done
 
-printf 'Timed out waiting for ANDROMEDA_E2E_OK.\n' >&2
-tail -200 "${BOOT_LOG}" >&2
+printf 'Timed out waiting for ANDROMEDA_E2E_OK after %s s.\n' 2700 >&2
+printf 'Budget check: 3 guest boots x (TimeoutStartSec 12min + ~2min boot) = 42min must fit in this deadline; see the invariant comment above.\n' >&2
+tail -200 "${BOOT_LOG_NORMALIZED}" >&2
 exit 1

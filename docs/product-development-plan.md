@@ -954,7 +954,7 @@ VTSR 必须绑定版本化任务集、环境、成功断言和人工裁决规则
 
 1. [`andromeda-threat-model.md`](./andromeda-threat-model.md) —— v0 已交付
 2. `agent-runtime-spec.md`
-3. `hardware-compatibility-manifest.schema.json`
+3. [`hardware-compatibility-manifest.schema.json`](../schemas/hardware-compatibility-manifest.schema.json) —— 已交付
 4. `compatibility-database.schema.json`
 5. `migration-manifest.schema.json`
 6. `update-and-recovery-spec.md`

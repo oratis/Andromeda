@@ -1,6 +1,15 @@
 #!/usr/bin/bash
 set -Eeuo pipefail
 
+ANDROMEDA_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly ANDROMEDA_SCRIPT_DIR
+# Resolved from BASH_SOURCE, not from SOURCE_DIR: gcp-run-e2e.sh untars a
+# `git archive` of the repository into ~/andromeda and runs this script from
+# there, so the library must be found relative to this file.
+# shellcheck source=os/scripts/lib/assert.sh
+# shellcheck disable=SC1091
+. "${ANDROMEDA_SCRIPT_DIR}/lib/assert.sh"
+
 SOURCE_DIR="${1:-$(pwd)}"
 OUTPUT_DIR="${2:-${SOURCE_DIR}/output}"
 EVIDENCE_DIR="${3:-${OUTPUT_DIR}/gcp-evidence}"
@@ -38,12 +47,23 @@ on_exit() {
 }
 trap on_exit EXIT
 
-test -c /dev/kvm
-grep -q vmx /proc/cpuinfo
-test "$(grep -cw vmx /proc/cpuinfo)" -ge 4
-test "$(nproc)" -ge 4
-test "$(awk '/MemTotal/ { print $2 }' /proc/meminfo)" -ge 16000000
-test "$(df --output=avail --block-size=1 "${OUTPUT_DIR}" | tail -1 | xargs)" \
+# Host preconditions for the nested-KVM run. This is the most expensive path in
+# the whole pipeline -- by the time these run, a billed Compute Engine instance
+# already exists -- so every one of them says what it wanted and what it found
+# instead of leaving the operator with a bare exit code.
+# See docs/reviews/e2e-pipeline-review.md P0 #2.
+require 'nested virtualization is not available: /dev/kvm is missing, so the instance was created without --enable-nested-virtualization or on a machine type that does not support it' \
+    test -c /dev/kvm
+require 'the CPU does not expose the vmx flag in /proc/cpuinfo; nested virtualization is off for this instance' \
+    grep -q vmx /proc/cpuinfo
+require "at least 4 vmx-capable CPUs are required for the guest's -smp 4; this host reports $(grep -cw vmx /proc/cpuinfo)" \
+    test "$(grep -cw vmx /proc/cpuinfo)" -ge 4
+require "at least 4 host CPUs are required; nproc reports $(nproc)" \
+    test "$(nproc)" -ge 4
+require "at least ~16 GiB of RAM is required (guest -m 8192 plus the podman build); /proc/meminfo reports $(awk '/MemTotal/ { print $2 }' /proc/meminfo) kB" \
+    test "$(awk '/MemTotal/ { print $2 }' /proc/meminfo)" -ge 16000000
+require "at least 100 GiB free is required in ${OUTPUT_DIR} (4 GiB ISO + 4 GiB OCI archive + a 64 GiB qcow2 + matrix overlays); df reports $(df --output=avail --block-size=1 "${OUTPUT_DIR}" | tail -1 | xargs) bytes" \
+    test "$(df --output=avail --block-size=1 "${OUTPUT_DIR}" | tail -1 | xargs)" \
     -ge 107374182400
 
 {
@@ -82,6 +102,8 @@ LC_ALL=C grep -aoE \
 # Anchor as a prefix match: trailing printable junk on the same physical
 # serial line (cursor-control residue) must not turn success into a false
 # negative again.
-grep -q '^ANDROMEDA_E2E_OK' "${EVIDENCE_DIR}/lifecycle-markers.txt"
-grep -qx 'ANDROMEDA_HARDWARE_MATRIX_OK scenarios=3' \
-    "${EVIDENCE_DIR}/hardware-matrix.log"
+require_marker "${EVIDENCE_DIR}/lifecycle-markers.txt" '^ANDROMEDA_E2E_OK' \
+    'the guest never reached the end of the install/update/rollback lifecycle on this nested-KVM host'
+require_marker "${EVIDENCE_DIR}/hardware-matrix.log" \
+    '^ANDROMEDA_HARDWARE_MATRIX_OK scenarios=3$' \
+    'the hardware matrix did not complete all three controller profiles on this nested-KVM host'

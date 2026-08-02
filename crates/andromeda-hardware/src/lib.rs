@@ -23,7 +23,8 @@ pub use matcher::{
 pub use model::{
     ArtifactKind, ArtifactPin, BootInfo, BootProvider, CapabilityEvidence, CapabilityRequirement,
     CompatibilityEvaluation, CpuInfo, DeviceInfo, EvidenceResult, HardwareIdentity, HardwareReport,
-    HardwareSelector, HcmManifest, ManifestSignature, MemoryInfo, OsFamily, SupportTier,
+    HardwareSelector, HcmManifest, ManifestAuthenticity, ManifestSignature, MemoryInfo, OsFamily,
+    SupportTier,
 };
 pub use probe::{ProbeError, probe_host};
 pub use signing::{

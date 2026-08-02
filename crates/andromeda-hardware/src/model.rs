@@ -208,7 +208,13 @@ impl EvidenceResult {
     pub const fn blocks(self, tier: SupportTier) -> bool {
         match self {
             Self::Passed => false,
-            Self::Degraded => matches!(tier, SupportTier::Certified),
+            Self::Degraded => match tier {
+                SupportTier::Certified => true,
+                SupportTier::Blocked
+                | SupportTier::Community
+                | SupportTier::Reference
+                | SupportTier::Supported => false,
+            },
             Self::Failed | Self::Unknown => true,
         }
     }
@@ -273,6 +279,30 @@ impl HcmManifest {
     pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 }
 
+/// Authenticity verdict for the evaluated manifest, surfaced as a structured
+/// field on [`CompatibilityEvaluation`] so consumers can gate on it instead of
+/// substring-matching `evidence`/`missing` strings.
+///
+/// Internally tagged like [`CapabilityRequirement`], so it serializes as
+/// `{"type": "not_checked"}`, `{"type": "verified", "key_id": "..."}`, or
+/// `{"type": "failed", "reason": "..."}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ManifestAuthenticity {
+    /// No trusted keyring was supplied: the advisory path. The manifest's
+    /// signature (if any) was neither required nor checked, and its declared
+    /// tier is self-asserted.
+    #[default]
+    NotChecked,
+    /// A keyring was supplied and the manifest's detached ed25519 signature
+    /// verified against the trusted key named `key_id`.
+    Verified { key_id: String },
+    /// A keyring was supplied but authenticity could not be established
+    /// (unsigned, unknown key, malformed signature, or failed verification).
+    /// Fail-closed: the evaluation's `effective_tier` is `Blocked`.
+    Failed { reason: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompatibilityEvaluation {
     pub manifest_id: String,
@@ -284,6 +314,11 @@ pub struct CompatibilityEvaluation {
     /// for transparency; enforcement against the target platform happens in
     /// the installer preflight, not here.
     pub boot_provider: BootProvider,
+    /// Whether the manifest itself was authenticated, and how. Defaults to
+    /// [`ManifestAuthenticity::NotChecked`] when deserializing evaluations
+    /// recorded before this field existed.
+    #[serde(default)]
+    pub manifest_authenticity: ManifestAuthenticity,
     #[serde(default)]
     pub evidence: Vec<String>,
     #[serde(default)]

@@ -1,0 +1,82 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Supply-chain Tier A automation for Andromeda. See docs/development/supply-chain.md.",
+    "THIS FILE IS INERT UNTIL THE RENOVATE GITHUB APP IS INSTALLED ON THE REPOSITORY.",
+    "Renovate is a GitHub App, not a workflow: config alone opens no pull requests.",
+    "Do NOT re-pin quay.io/fedora/fedora-bootc by digest until Renovate is live and",
+    "has proven it can raise a digest-refresh PR -- Fedora garbage-collects superseded",
+    "fedora-bootc digests from quay.io within days, which is what broke every build in",
+    "Actions run 30702410393 and forced the un-pin in commit d27cefa."
+  ],
+  "extends": [
+    "config:recommended",
+    "docker:pinDigests",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "timezone": "Etc/UTC",
+  "schedule": ["before 6am on monday"],
+  "labels": ["dependencies", "supply-chain"],
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "enabledManagers": ["dockerfile", "github-actions"],
+  "packageRules": [
+    {
+      "description": [
+        "Tier A: container base images must stay pinned by digest, and the pin must",
+        "stay fresh. pinDigests makes Renovate rewrite a bare tag into tag@sha256:...",
+        "on first run -- that Pin PR is itself the proof that the automation works,",
+        "so it is the correct way to re-pin fedora-bootc rather than doing it by hand."
+      ],
+      "matchManagers": ["dockerfile"],
+      "pinDigests": true,
+      "groupName": "container base images",
+      "commitMessageTopic": "container base image {{depName}}"
+    },
+    {
+      "description": [
+        "Digest refreshes must NOT wait for the weekly window. quay.io prunes",
+        "superseded fedora-bootc digests within days, so a pin that Renovate notices",
+        "on Tuesday but only files on Monday can rot in between. Run these at any",
+        "time and give them priority over everything else in the queue.",
+        "Cooling-off (minimumReleaseAge) is deliberately NOT applied here: for a",
+        "digest refresh, delay is the failure mode, not the mitigation."
+      ],
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["digest", "pin", "pinDigest"],
+      "schedule": ["at any time"],
+      "prPriority": 10
+    },
+    {
+      "description": [
+        "GitHub Actions stay pinned to a full commit SHA with the version as a",
+        "trailing comment, which is the policy already documented in ci.yml and",
+        "os-e2e.yml. Renovate updates the SHA and rewrites that comment in step.",
+        "Grouped into one PR because action bumps are low-risk and reviewing five",
+        "separate SHA diffs a week is how pin hygiene gets abandoned."
+      ],
+      "matchManagers": ["github-actions"],
+      "pinDigests": true,
+      "groupName": "github actions",
+      "minimumReleaseAge": "3 days"
+    },
+    {
+      "description": [
+        "First-party actions/* are currently pinned to major tags by repository",
+        "policy. Group them separately so that a deliberate move to SHA pinning is",
+        "one reviewable PR rather than noise mixed into third-party bumps."
+      ],
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["actions/**"],
+      "groupName": "github actions (first-party)"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "description": "Security fixes bypass the weekly window entirely.",
+    "schedule": ["at any time"],
+    "minimumReleaseAge": null,
+    "labels": ["dependencies", "supply-chain", "security"]
+  },
+  "osvVulnerabilityAlerts": true
+}
