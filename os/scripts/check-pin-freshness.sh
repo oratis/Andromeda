@@ -302,15 +302,23 @@ tag_digest() {
     rm -f "${tag_headers}"
 }
 
-# iso_to_epoch RFC3339 -> seconds since epoch. GNU date, BSD date and python3
-# all disagree here, and CI (Linux) and the maintainer's box (darwin) are not
-# the same platform, so try each rather than assuming.
+# iso_to_epoch TIMESTAMP -> seconds since epoch.
+#
+# Two normalisations are needed before any date(1) will touch it:
+#   * the registry API returns RFC 3339:  2025-03-18T20:40:17Z
+#   * skopeo's Go template renders a time.Time with Go's default layout:
+#     2025-03-18 20:40:17 +0000 UTC
+# The second form silently defeated parsing on CI runners (which DO ship
+# skopeo), so every age check there degraded to "unparseable" and the stale-pin
+# finding was lost. Collapse both to YYYY-MM-DDTHH:MM:SSZ; the age budget is
+# measured in days, so dropping sub-second precision costs nothing.
+#
+# Then: GNU date, BSD date and python3 all disagree on parsing flags, and CI
+# (Linux) and the maintainer's box (darwin) are not the same platform, so try
+# each rather than assuming.
 iso_to_epoch() {
-    stamp="${1%%.*}"
-    case "${stamp}" in
-        *Z) ;;
-        *) stamp="${stamp}Z" ;;
-    esac
+    stamp=$(printf '%s' "$1" \
+        | sed -e 's/ /T/' -e 's/^\(....-..-..T..:..:..\).*/\1Z/')
     date -u -d "${stamp}" +%s 2>/dev/null && return 0
     date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "${stamp}" +%s 2>/dev/null && return 0
     if command -v python3 >/dev/null 2>&1; then

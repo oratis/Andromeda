@@ -49,9 +49,10 @@ jobs:
       # (Actions run 30702410393) was experienced. The signal belongs on a
       # dashboard, not in the merge gate. Run it with --strict to make it a gate.
       #
-      # skopeo is not preinstalled on ubuntu-latest; the script falls back to the
-      # registry HTTP API over curl + jq (both preinstalled), so this job stays
-      # fast and needs no apt step.
+      # No apt step: ubuntu-latest ships skopeo, which the script prefers. Where
+      # it is absent (a slimmer runner, or a macOS dev box) the script falls
+      # back to the registry HTTP API over curl + jq. Both paths are exercised;
+      # keep them that way, because the backends disagree on timestamp format.
       - run: os/scripts/check-pin-freshness.sh
         continue-on-error: true
 
