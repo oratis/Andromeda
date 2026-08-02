@@ -741,7 +741,8 @@ Detailed rules are in
 
 
 The full trust-boundary analysis, including the known-unfixed attack surface, is in
-[docs/andromeda-threat-model.md](./docs/andromeda-threat-model.md).
+[docs/andromeda-threat-model.md](./docs/andromeda-threat-model.md) (written in Chinese,
+matching the docs/ convention).
 
 For security issues, read [SECURITY.md](./SECURITY.md). **Do not open a public issue** for an
 unpatched vulnerability involving privilege boundaries, credential exposure, filesystem escape,
