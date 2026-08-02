@@ -14,9 +14,9 @@
 | OS 镜像 / 安装器 / CI 基础设施 | **A−** | [os-infrastructure-review.md](os-infrastructure-review.md) |
 | 文档与产品一致性 | **B+** | [documentation-review.md](documentation-review.md) |
 | E2E 验证流水线（专项） | **B** | [e2e-pipeline-review.md](e2e-pipeline-review.md) |
+| 三大产品目标对齐（后续轮次） | 设计成熟／交付起步 | [ai-native-goals-review.md](ai-native-goals-review.md) |
 
 另有一篇跨阶段的工作总述与优化路线：[engagement-summary.md](engagement-summary.md)。
-| 三大产品目标对齐（后续轮次） | 设计成熟／交付起步 | [ai-native-goals-review.md](ai-native-goals-review.md) |
 
 > [ai-native-goals-review.md](ai-native-goals-review.md) 是**后一轮**评审，标尺不同：上表五份问
 > "实现是否可靠、契约形状是否正确"，它问"离 AI 原生 / Mac 级开发鲁棒性 / Windows 级驱动与

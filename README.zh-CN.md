@@ -449,10 +449,11 @@ stateDiagram-v2
 | `andromeda task list` | 列出全部持久化任务记录 |
 | `andromeda task show <TASK_ID>` | 显示单个任务记录 |
 | `andromeda task evaluate <TASK_ID> [--isolation <LEVEL>] [--confirm-external]` | 只评估策略，不执行任何动作 |
-| `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>]` | 带乐观并发的受检状态转换 |
+| `andromeda task record-outcome <TASK_ID> --action-id <ID> --status <STATUS> --evidence <TEXT> --expected-revision <N>` | 记录单个 action 的执行结果与证据（`--evidence` 可重复给出多条） |
+| `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | 带乐观并发的受检状态转换 |
 | `andromeda hardware probe` | 打印隐私友好的硬件报告 |
 | `andromeda hardware diagnose` | 诊断驱动绑定与支持相关的设备就绪度 |
-| `andromeda hardware check <MANIFEST> [--require-tier <TIER>]` | 探测本机并评估一份 HCM JSON |
+| `andromeda hardware check <MANIFEST> [--require-tier <TIER>] [--artifact-root <DIR>] [--trusted-key <KEY_ID>]` | 探测本机并评估一份 HCM JSON |
 
 `--isolation` 的取值为 `none` / `sandbox` / `micro-vm` / `brokered`。省略时，每个 action 按
 **自身声明风险**对应的最低隔离评估；显式给出时会**覆盖全部** action，主要用于整盘探查。
@@ -496,7 +497,9 @@ stateDiagram-v2
 | 404 | `not_found` | 任务不存在 |
 | 409 | `already_exists` | 重复的 `task_id` |
 | 409 | `revision_conflict` | `expected_revision` 过期 |
-| 422 | `invalid_task` | 计划校验失败、非法状态转换、或被策略门控拒绝 |
+| 422 | `external_confirmation_required` | 计划含 L3 外部副作用，而 `Ready → Running` 未携带确认 |
+| 422 | `missing_evidence` | `Verifying → Succeeded` 时仍有 action 缺少已记录 outcome、outcome 非成功、或 outcome 不含 evidence |
+| 422 | `invalid_task` | 计划校验失败、非法状态转换、或其余策略门控拒绝（计划未完全授权、action 被策略 Deny） |
 | 500 | `internal_error` | 序列化或内部故障 |
 
 请求体使用 `deny_unknown_fields`：`expiresAt` 这类 camelCase 拼写会被**拒绝**（422），
@@ -505,8 +508,8 @@ stateDiagram-v2
 
 ### Host 校验（DNS rebinding 防护）
 
-`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`），只接受 `localhost`、
-`127.0.0.1`、`[::1]`（可带端口），其余一律 403。恶意网页即使通过 DNS rebinding 把自己的域名
+`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`），只接受 `localhost` 与
+字面回环 IP（127.0.0.0/8、`[::1]` 及其 IPv4-mapped 形式，可带端口），其余一律 403。恶意网页即使通过 DNS rebinding 把自己的域名
 解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
 
 > [!CAUTION]
@@ -677,7 +680,8 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
 - L3 确认是**调用方自报，而非 broker 证明**：它证明"确认这一步发生过并被归属"，
   不证明"确认来自真实的人"；
 - 证据由执行方自己记录，**没有独立 verifier**；
-- `andromeda hardware check` **不是信任门控**，见 [SECURITY.md](./SECURITY.md)；
+- `andromeda hardware check` **不是信任门控**，见
+  [docs/development/hardware-compatibility.md](./docs/development/hardware-compatibility.md)；
 - 当前没有真实 tool executor，不应把 API 暴露到不可信网络；
 - 以下均**未实现**，任何集成都不得暗示其存在：模型调用与 planner、
   bubblewrap/SELinux/microVM executor、credential broker、确认代理、
