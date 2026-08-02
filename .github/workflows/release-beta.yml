@@ -1,0 +1,278 @@
+name: Beta release
+
+# Builds and publishes beta artifacts as a GitHub pre-release.
+#
+# Triggers:
+#   - pushing a tag matching v*-beta* (e.g. v0.1.0-beta.1)
+#   - manual dispatch against an existing tag (re-runs a failed publish)
+#
+# Artifacts:
+#   - andromeda CLI binaries for Linux/macOS/Windows (tar.gz / zip + sha256)
+#   - optional Andromeda-Developer-Preview-x86_64.iso (safe interactive
+#     installer, INSTALLER_DEFAULT=0) with sha256 and build manifest
+#   - SHA256SUMS covering every attached asset
+#
+# The destructive *-ci.iso variant is never built here; see
+# skills/github-beta-release/SKILL.md for the full release procedure.
+
+on:
+  push:
+    tags:
+      - "v*-beta*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v*-beta* tag to (re)publish"
+        required: true
+        type: string
+      build_iso:
+        description: "Build and attach the Developer Preview ISO"
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: release-beta-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  preflight:
+    name: Validate tag and run tests
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      build_iso: ${{ steps.resolve.outputs.build_iso }}
+    steps:
+      # Pinning policy (matches ci.yml): first-party actions/* are pinned to
+      # major tags; third-party actions are pinned to a full commit SHA with a
+      # trailing version comment.
+      - name: Resolve tag
+        id: resolve
+        env:
+          DISPATCH_TAG: ${{ github.event.inputs.tag }}
+          DISPATCH_BUILD_ISO: ${{ github.event.inputs.build_iso }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${DISPATCH_TAG}"
+            build_iso="${DISPATCH_BUILD_ISO}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            build_iso=true
+          fi
+          case "${tag}" in
+            v*-beta*) ;;
+            *)
+              printf 'Tag %s does not match v*-beta*\n' "${tag}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'tag=%s\nbuild_iso=%s\n' "${tag}" "${build_iso}" \
+            >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve.outputs.tag }}
+      - name: Check tag version against workspace version
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          workspace_version="$(
+            cargo metadata --no-deps --format-version 1 \
+              | jq --raw-output \
+                '.packages[] | select(.name == "andromeda-cli") | .version'
+          )"
+          case "${TAG}" in
+            "v${workspace_version}-beta"*) ;;
+            *)
+              printf 'Tag %s does not match workspace version %s\n' \
+                "${TAG}" "${workspace_version}" >&2
+              exit 1
+              ;;
+          esac
+      - uses: dtolnay/rust-toolchain@8641a17e25bf5b40c118d48fe0f81e8655731839 # 1.85.0
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo test --workspace --locked
+
+  cli:
+    name: CLI (${{ matrix.target }})
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@8641a17e25bf5b40c118d48fe0f81e8655731839 # 1.85.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo build --release --locked --package andromeda-cli --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          base="andromeda-${TAG}-${TARGET}"
+          if [[ "${TARGET}" == *windows* ]]; then
+            cp "target/${TARGET}/release/andromeda.exe" dist/
+            (cd dist && 7z a "${base}.zip" andromeda.exe > /dev/null)
+            asset="${base}.zip"
+          else
+            cp "target/${TARGET}/release/andromeda" dist/
+            tar --create --gzip \
+              --file "dist/${base}.tar.gz" \
+              --directory dist andromeda
+            asset="${base}.tar.gz"
+          fi
+          (
+            cd dist
+            if command -v sha256sum > /dev/null; then
+              sha256sum "${asset}" > "${asset}.sha256"
+            else
+              shasum -a 256 "${asset}" > "${asset}.sha256"
+            fi
+            rm -f andromeda andromeda.exe
+          )
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  iso:
+    name: Developer Preview ISO
+    needs: preflight
+    if: needs.preflight.outputs.build_iso == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+      - name: Free runner disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: true
+          docker-images: true
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman runc
+          sudo apt-get clean
+          runtime="$(command -v runc)"
+          printf 'PODMAN_RUNTIME=%s\nBUILDAH_RUNTIME=%s\n' \
+            "${runtime}" "${runtime}" >> "$GITHUB_ENV"
+      - name: Build safe interactive ISO
+        # INSTALLER_DEFAULT=0 (the script default) keeps the interactive
+        # installer as the GRUB default. Never build the destructive
+        # *-ci.iso variant in a release workflow.
+        run: |
+          sudo --preserve-env=PODMAN_RUNTIME,BUILDAH_RUNTIME \
+            os/scripts/build-iso.sh "$GITHUB_WORKSPACE/output"
+          # The oci-archive payload is an E2E-test input, not a release asset.
+          sudo rm -f output/andromeda-v2.tar output/andromeda-v1-history.json
+          sudo chown --recursive "$(id -u):$(id -g)" output
+          ls -lh output
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iso
+          path: |
+            output/Andromeda-Developer-Preview-x86_64.iso
+            output/Andromeda-Developer-Preview-x86_64.iso.sha256
+            output/Andromeda-Developer-Preview-x86_64.manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    name: Publish pre-release
+    needs: [preflight, cli, iso]
+    # Run when the ISO job is skipped (build_iso=false) but never when a
+    # needed job failed.
+    if: >-
+      always() &&
+      needs.preflight.result == 'success' &&
+      needs.cli.result == 'success' &&
+      (needs.iso.result == 'success' || needs.iso.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - name: Assemble assets and SHA256SUMS
+        id: assemble
+        run: |
+          cd assets
+          ls -lh
+          # Attach the ISO only if it fits the GitHub release asset limit
+          # (2 GiB); otherwise leave it as a workflow artifact and say so in
+          # the release notes.
+          iso_note=""
+          iso="Andromeda-Developer-Preview-x86_64.iso"
+          if [[ -f "${iso}" ]]; then
+            size="$(stat --format %s "${iso}")"
+            if (( size > 2147483648 )); then
+              printf 'ISO is %s bytes, over the 2 GiB asset limit.\n' "${size}"
+              rm -f "${iso}"
+              iso_note="The Developer Preview ISO (${size} bytes) exceeds the \
+2 GiB release-asset limit; download it from this run's \`iso\` artifact: \
+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            fi
+          fi
+          sha256sum --check --strict ./*.sha256
+          rm -f ./*.sha256
+          sha256sum ./* > SHA256SUMS
+          printf 'iso_note=%s\n' "${iso_note}" >> "$GITHUB_OUTPUT"
+      - name: Create pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          ISO_NOTE: ${{ steps.assemble.outputs.iso_note }}
+        run: |
+          notes_file="$(mktemp)"
+          previous_tag="$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)"
+          {
+            printf 'Beta pre-release %s. Not a stable release; artifacts are\n' "${TAG}"
+            printf 'for testing and feedback only.\n\n'
+            printf 'Verify downloads against SHA256SUMS.\n'
+            if [[ -n "${ISO_NOTE}" ]]; then
+              printf '\n%s\n' "${ISO_NOTE}"
+            fi
+            if [[ -n "${previous_tag}" ]]; then
+              printf '\nFull changelog: %s/%s/compare/%s...%s\n' \
+                "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" \
+                "${previous_tag}" "${TAG}"
+            fi
+          } > "${notes_file}"
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            gh release upload "${TAG}" assets/* --clobber
+          else
+            gh release create "${TAG}" assets/* \
+              --prerelease \
+              --verify-tag \
+              --title "${TAG}" \
+              --notes-file "${notes_file}"
+          fi
