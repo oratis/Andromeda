@@ -139,6 +139,10 @@ enum HardwareCommand {
     ///
     /// Exit codes: 0 when the effective tier is usable, 2 when it is
     /// `blocked`, 3 when it is below the tier given via `--require-tier`.
+    /// Exit code 1 (an `Err` from `main`) means the check was refused
+    /// outright — `--require-tier supported|certified` without
+    /// `--trusted-keys` and without `--allow-unverified` — or that an input
+    /// failed (unreadable manifest, unknown schema version, probe error).
     ///
     /// Authenticity is off by default and must be opted into with
     /// `--trusted-keys`. Without it the manifest's own claims — including its
@@ -173,8 +177,10 @@ enum HardwareCommand {
         artifact_signing_keys: Vec<String>,
         /// Acknowledge that an unverified evaluation is being used to gate a
         /// high tier. Required to combine `--require-tier supported|certified`
-        /// with no `--trusted-keys`.
-        #[arg(long)]
+        /// with no `--trusted-keys`. Contradicts `--trusted-keys` (the check
+        /// is verified then) and means nothing without `--require-tier`, so
+        /// both combinations are parse errors.
+        #[arg(long, conflicts_with = "trusted_keys", requires = "require_tier")]
         allow_unverified: bool,
     },
     /// Derive the public half of a signing seed, for publishing into a keyring.
@@ -248,6 +254,40 @@ fn load_seed(path: &Path) -> Result<[u8; 32], String> {
 /// gating on them requires either a keyring or an explicit acknowledgement.
 fn requires_authenticity(tier: SupportTier) -> bool {
     matches!(tier, SupportTier::Supported | SupportTier::Certified)
+}
+
+/// The `hardware check` refusal gate, the command's one new security control:
+/// decides whether the requested tier gate must be refused because it would
+/// rest on an unauthenticated manifest.
+///
+/// Returns the refusal message when `--require-tier` names a tier that
+/// [`requires_authenticity`] while no keyring was supplied and the caller did
+/// not acknowledge the risk with `--allow-unverified`; `None` means the check
+/// may proceed. Pure so every arm is directly testable.
+fn refuse_unverified_gate(
+    required: Option<SupportTier>,
+    has_keyring: bool,
+    allow_unverified: bool,
+) -> Option<String> {
+    let tier = required?;
+    if has_keyring || allow_unverified || !requires_authenticity(tier) {
+        return None;
+    }
+    // Total, wildcard-free mapping: adding a `SupportTier` variant without
+    // naming it here fails to compile instead of silently printing nothing.
+    let tier_name = match tier {
+        SupportTier::Blocked => "blocked",
+        SupportTier::Community => "community",
+        SupportTier::Reference => "reference",
+        SupportTier::Supported => "supported",
+        SupportTier::Certified => "certified",
+    };
+    Some(format!(
+        "--require-tier {tier_name} gates a real support promise, so it requires \
+         --trusted-keys to authenticate the manifest. Without a keyring the manifest \
+         asserts its own tier and any file can claim it. Pass --trusted-keys <file>, \
+         or --allow-unverified to acknowledge an advisory-only check."
+    ))
 }
 
 /// Loads a `{ "key_id": "<hex>" }` keyring file.
@@ -417,22 +457,10 @@ fn handle_hardware(command: HardwareCommand) -> Result<(), Box<dyn std::error::E
             // Refuse the dangerous combination outright rather than printing a
             // warning nobody reads: gating a real support promise on a manifest
             // that was never authenticated is the forgery problem itself.
-            if trusted_keys.is_none()
-                && !allow_unverified
-                && required.is_some_and(requires_authenticity)
+            if let Some(refusal) =
+                refuse_unverified_gate(required, trusted_keys.is_some(), allow_unverified)
             {
-                return Err(format!(
-                    "--require-tier {} gates a real support promise, so it requires \
-                     --trusted-keys to authenticate the manifest. Without a keyring the manifest \
-                     asserts its own tier and any file can claim it. Pass --trusted-keys <file>, \
-                     or --allow-unverified to acknowledge an advisory-only check.",
-                    required.map_or("", |tier| match tier {
-                        SupportTier::Supported => "supported",
-                        SupportTier::Certified => "certified",
-                        _ => "",
-                    })
-                )
-                .into());
+                return Err(refusal.into());
             }
 
             let manifest = load_manifest(&manifest)?;
@@ -466,8 +494,8 @@ fn handle_hardware(command: HardwareCommand) -> Result<(), Box<dyn std::error::E
             if evaluation.effective_tier == SupportTier::Blocked {
                 std::process::exit(2);
             }
-            if let Some(required) = require_tier {
-                if evaluation.effective_tier < SupportTier::from(required) {
+            if let Some(required) = required {
+                if evaluation.effective_tier < required {
                     std::process::exit(3);
                 }
             }
@@ -661,33 +689,140 @@ mod tests {
         assert!(requires_authenticity(SupportTier::Certified));
     }
 
-    /// Writes `contents` to a uniquely named temp file and returns its path.
-    fn temp_keys(tag: &str, contents: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "andromeda-cli-keys-{tag}-{}-{}.json",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::write(&path, contents).expect("write keys");
-        path
+    #[test]
+    fn gate_refuses_certified_without_keyring_or_acknowledgement() {
+        let refusal = refuse_unverified_gate(Some(SupportTier::Certified), false, false)
+            .expect("certified without a keyring must be refused");
+        assert!(refusal.contains("--require-tier certified"), "{refusal}");
+        assert!(refusal.contains("--trusted-keys"), "{refusal}");
+        assert!(refusal.contains("--allow-unverified"), "{refusal}");
+    }
+
+    #[test]
+    fn gate_refuses_supported_without_keyring_or_acknowledgement() {
+        let refusal = refuse_unverified_gate(Some(SupportTier::Supported), false, false)
+            .expect("supported without a keyring must be refused");
+        assert!(refusal.contains("--require-tier supported"), "{refusal}");
+    }
+
+    #[test]
+    fn gate_allows_certified_with_a_keyring() {
+        assert_eq!(
+            refuse_unverified_gate(Some(SupportTier::Certified), true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn gate_allows_certified_with_explicit_acknowledgement() {
+        assert_eq!(
+            refuse_unverified_gate(Some(SupportTier::Certified), false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn gate_allows_community_without_a_keyring() {
+        // community carries no real support promise; self-assertion is harmless.
+        assert_eq!(
+            refuse_unverified_gate(Some(SupportTier::Community), false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn gate_allows_when_no_tier_is_required() {
+        assert_eq!(refuse_unverified_gate(None, false, false), None);
+    }
+
+    #[test]
+    fn allow_unverified_is_constrained_at_parse_time() {
+        // Contradiction: --allow-unverified alongside --trusted-keys.
+        assert!(
+            Cli::try_parse_from([
+                "andromeda",
+                "hardware",
+                "check",
+                "m.json",
+                "--trusted-keys",
+                "keys.json",
+                "--allow-unverified",
+            ])
+            .is_err()
+        );
+        // Meaningless: --allow-unverified without --require-tier.
+        assert!(
+            Cli::try_parse_from([
+                "andromeda",
+                "hardware",
+                "check",
+                "m.json",
+                "--allow-unverified",
+            ])
+            .is_err()
+        );
+        // The combination the flag exists for parses.
+        assert!(
+            Cli::try_parse_from([
+                "andromeda",
+                "hardware",
+                "check",
+                "m.json",
+                "--require-tier",
+                "certified",
+                "--allow-unverified",
+            ])
+            .is_ok()
+        );
+    }
+
+    /// RAII temp directory under the system temp dir; removed on drop so a
+    /// failed assertion cannot leak files. Mirrors the guard in
+    /// `andromeda-hardware/src/verify.rs`.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let unique = format!(
+                "andromeda-cli-keys-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+            );
+            let path = std::env::temp_dir().join(unique);
+            std::fs::create_dir_all(&path).expect("create temp dir");
+            Self(path)
+        }
+
+        /// Writes `contents` to `name` inside the directory, returning the path.
+        fn write(&self, name: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).expect("write file");
+            path
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     #[test]
     fn an_empty_keyring_is_rejected_rather_than_silently_blocking_everything() {
-        let path = temp_keys("empty", "{}");
+        let dir = TempDir::new("empty");
+        let path = dir.write("keys.json", "{}");
         let error = load_trusted_keys(&path).expect_err("empty keyring must be rejected");
-        let _ = std::fs::remove_file(&path);
         assert!(error.contains("empty"), "unhelpful error: {error}");
     }
 
     #[test]
     fn a_malformed_key_is_rejected_with_the_file_named() {
-        let path = temp_keys("bad", r#"{"root": "not-hex"}"#);
+        let dir = TempDir::new("bad");
+        let path = dir.write("keys.json", r#"{"root": "not-hex"}"#);
         let error = load_trusted_keys(&path).expect_err("malformed key must be rejected");
-        let _ = std::fs::remove_file(&path);
         assert!(
             error.contains("invalid key in") && error.contains("andromeda-cli-keys-bad"),
             "error should name the offending file: {error}"
@@ -699,12 +834,12 @@ mod tests {
         // Derive a real verifying key so the test exercises actual ed25519
         // decoding rather than an arbitrary hex string.
         let key = andromeda_hardware::ManifestSigningKey::from_seed(&[7u8; 32]);
-        let path = temp_keys(
-            "ok",
+        let dir = TempDir::new("ok");
+        let path = dir.write(
+            "keys.json",
             &format!(r#"{{"root": "{}"}}"#, key.verifying_key_hex()),
         );
         let keyring = load_trusted_keys(&path).expect("valid keyring loads");
-        let _ = std::fs::remove_file(&path);
         assert!(keyring.contains("root"));
         assert_eq!(keyring.len(), 1);
     }

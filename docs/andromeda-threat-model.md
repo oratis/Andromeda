@@ -39,7 +39,7 @@
 | A4 | 不可逆外部动作的授权（发信、发布、购买、转账） | 金钱、名誉、法律后果，且**无法回滚** | 是（v0 程度）：L3 确认门，见 §4.3 |
 | A5 | 硬件安全状态：Secure Boot、TPM、固件 | 信任链断裂，且部分不可逆（固件） | 部分：安装器强制 `selinux=1 enforcing=1`；固件路径未纳入策略 |
 | A6 | 审计线索本身 | 事故无法归因，无法判断影响范围 | 弱：事件史内嵌于可重写 JSON，非防篡改 ledger |
-| A7 | 支持等级判定（HCM） | 用户在不受支持硬件上被误导安装 | 弱：**可伪造**，见 §6.1 |
+| A7 | 支持等级判定（HCM） | 用户在不受支持硬件上被误导安装 | 部分：`--trusted-keys` 时 fail-closed 验签，高等级门控无 keyring 即拒绝；根密钥管理与撤销未建立，见 §6.1 |
 | A8 | 用户注意力与信任 | "确认疲劳"导致确认沦为形式 | 设计层：见 §5.4 |
 
 A8 不是修辞。一个每步都弹窗的系统与一个从不确认的系统，最终危害相同——
@@ -185,9 +185,10 @@ append-only，不可被后续"成功"覆盖。
 
 **当前强制点**：selector fail-closed（空/全 null/仅空白一律不匹配）、schema 版本门、
 过期清单或过期证据一律 `Blocked`、`effective_tier` 永不高于声明、
-`--artifact-root` 可重算并比对 `sha256`。
+`--artifact-root` 可重算并比对 `sha256`、`--trusted-keys` 对清单做 fail-closed
+ed25519 验签，且 `--require-tier supported|certified` 不带 keyring 直接拒绝执行。
 
-**已知弱点（未修）**：见 §6.1——**清单可伪造**。
+**已知弱点（未修）**：见 §6.1 残余风险——根密钥生成/分发/轮换未建立、无撤销机制。
 
 ### 4.6 边界 B6：外部镜像/更新 → 本机系统状态
 
@@ -198,7 +199,7 @@ append-only，不可被后续"成功"覆盖。
 **已知弱点（未修）**：rust builder 基础镜像已按 digest 固定，但 fedora-bootc
 载荷基础镜像仍按滚动 tag（`quay.io/fedora/fedora-bootc:44`，上游会回收旧 digest，
 待 digest 刷新自动化落地后再固定）；`--target-imgref` 指向**可变、未签名**的 `:edge`；
-sigstore 验签与 §6.1 同型——**能力在、接线缺**：`containers-policy.json` 的
+sigstore 验签与 §6.1 的**原始缺口**同型——**能力在、接线缺**（HCM 侧已接线，此处仍未）：`containers-policy.json` 的
 sigstoreSigned 模板已存在（`os/signing/policy.json.example`），但未安装、无签名密钥、
 刻意未启用 fail-closed（启用会打断未签名 `:edge` 的更新流）；**无健康门控自动回滚**——
 能引导进坏桌面的更新会永久留下。
@@ -268,31 +269,31 @@ sigstoreSigned 模板已存在（`os/signing/policy.json.example`），但未安
 
 ## 6. 已知未修的攻击面（按可利用性排序）
 
-### 6.1 验签能力已具备，但 `hardware check` 未接线〔已实机复现〕
+### 6.1 HCM 清单验签的 CLI 接线〔原始缺口已修复；残余：密钥管理〕
 
-构造一份 selector 命中本机、`requirements: []`、含任意 `sha256` 与
-"passed / 2099 到期"证据、**且不带 `signature` 字段**的清单，
-`andromeda hardware check --require-tier certified` 返回 `certified` 与退出码 0。
+**原始缺口（已实机复现，作为失效模式保留）**：构造一份 selector 命中本机、
+`requirements: []`、含任意 `sha256` 与"passed / 2099 到期"证据、**且不带
+`signature` 字段**的清单，`andromeda hardware check --require-tier certified`
+曾返回 `certified` 与退出码 0。当时缺的不是能力而是接线：
+`crates/andromeda-hardware/src/signing.rs` 已实现 fail-closed 的 ed25519 detached
+签名验证（`TrustedKeyring` 是信任锚，`ManifestSignatureStatus` 只有 `Verified`
+算接受，空 keyring 谁都不信），schema 也已具备 `signature` 字段，但 CLI 调用的是
+**不验签**的 `evaluate_manifest`。这类失效模式值得单独记录：**安全能力写好了、
+测试也齐全，却没有被唯一的用户入口消费**——库是安全的，产品不是。任何
+"我们已经实现了 X"的说法，都必须回答"哪个入口真的调用了 X"。
 
-**这不是缺少能力，是缺少接线。** `crates/andromeda-hardware/src/signing.rs` 已实现
-fail-closed 的 ed25519 detached 签名验证：`TrustedKeyring` 是信任锚，
-`ManifestSignatureStatus` 只有 `Verified` 算接受，空 keyring 谁都不信。schema 也已
-具备 `signature` 字段。但 CLI 调用的是**不验签**的 `evaluate_manifest`，
-而非 `evaluate_manifest_verified`。
+**现状（CLI 已接线）**：`hardware check --trusted-keys <file>` 走
+`evaluate_manifest_verified`——未签名、未知 key、签名格式非法、验签失败一律
+fail-closed 到 `Blocked`；`--require-tier supported|certified` 不带
+`--trusted-keys` 且不带显式 `--allow-unverified` 时**直接拒绝执行**（退出码 1），
+而不是打印一条警告后照常判定。签发闭环由 `hardware keygen` / `hardware sign`
+提供（离线签名机、确定性种子）。
 
-这是一类值得单独记录的失效模式：**安全能力写好了、测试也齐全，却没有被唯一的
-用户入口消费**——库是安全的，产品不是。任何"我们已经实现了 X"的说法，都必须回答
-"哪个入口真的调用了 X"。
-
-**当前缓解**：`--artifact-root` 可挡住制品哈希造假；不带时**强制打印警告**；
-[hardware-compatibility.md](./development/hardware-compatibility.md) 明确声明
-**退出码不得用于放行安装或提升支持等级**。注意 `--trusted-key` 只检查制品 pin
-是否**声明了**一个受信 key id，并不验证任何真实签名
-（`crates/andromeda-hardware/src/verify.rs` 中是显式标注的 stub），
-**不得当作真实性来源**。
-
-**根治**：CLI 接到 verified 路径；要求 supported 以上时"无签名"即 fail-closed；
-再补离线根密钥管理、密钥轮换与撤销对象。
+**残余风险（未修）**：离线根密钥的生成、分发与轮换流程未建立；无签名/密钥撤销
+机制。另外 `--artifact-signing-key` 只检查制品 pin 是否**声明了**一个受信 key id，
+并不验证任何真实签名（`crates/andromeda-hardware/src/verify.rs` 中是显式标注的
+stub），**不得当作真实性来源**——制品真实性目前依赖"已验签清单认证其 `sha256` +
+`--artifact-root` 重算比对"这条链。
 
 ### 6.2 capability 自签发 + taskd 无鉴权
 
