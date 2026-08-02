@@ -227,23 +227,27 @@ jobs:
         run: |
           cd assets
           ls -lh
-          # Attach the ISO only if it fits the GitHub release asset limit
-          # (2 GiB); otherwise leave it as a workflow artifact and say so in
-          # the release notes.
+          # Verify every checksum while all files are still present, then
+          # decide what attaches to the release.
+          sha256sum --check --strict ./*.sha256
+          # The Developer Preview ISO is ~4 GiB, which is over the 2 GiB
+          # release-asset limit, so in the current steady state it ships as
+          # this run's `iso` workflow artifact and the release notes link to
+          # it. The manifest.json (which records the ISO sha256) still
+          # attaches. This branch flips automatically if the ISO ever fits.
           iso_note=""
           iso="Andromeda-Developer-Preview-x86_64.iso"
           if [[ -f "${iso}" ]]; then
             size="$(stat --format %s "${iso}")"
             if (( size > 2147483648 )); then
               printf 'ISO is %s bytes, over the 2 GiB asset limit.\n' "${size}"
-              rm -f "${iso}"
+              rm -f "${iso}" "${iso}.sha256"
               iso_note="The Developer Preview ISO (${size} bytes) exceeds the"
-              iso_note+=" 2 GiB release-asset limit; download it from this"
-              iso_note+=" run's iso artifact: ${GITHUB_SERVER_URL}"
+              iso_note+=" 2 GiB release-asset limit; download it (with its"
+              iso_note+=" .sha256) from this run's iso artifact: ${GITHUB_SERVER_URL}"
               iso_note+="/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             fi
           fi
-          sha256sum --check --strict ./*.sha256
           rm -f ./*.sha256
           sha256sum ./* > SHA256SUMS
           printf 'iso_note=%s\n' "${iso_note}" >> "$GITHUB_OUTPUT"

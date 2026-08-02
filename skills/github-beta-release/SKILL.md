@@ -45,9 +45,12 @@ The tag push triggers the workflow, which:
    producing `Andromeda-Developer-Preview-x86_64.iso`, its `.sha256`, and the
    build `manifest.json`.
 4. **publish** — verifies all checksums, writes `SHA256SUMS`, and creates the
-   pre-release with `gh release create --prerelease --verify-tag`. If the ISO
-   exceeds the 2 GiB release-asset limit it stays available as the run's
-   `iso` workflow artifact and the release notes link to the run.
+   pre-release with `gh release create --prerelease --verify-tag`. The ISO is
+   currently ~4 GiB — over the 2 GiB release-asset limit — so in the normal
+   case it ships as the run's `iso` workflow artifact (14-day retention) and
+   the release notes link to the run; the `manifest.json` recording the ISO
+   sha256 still attaches to the release. If the ISO ever fits under 2 GiB it
+   attaches automatically.
 
 ## Verify a published beta
 
