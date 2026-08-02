@@ -80,6 +80,21 @@ pub enum CapabilityResource {
     ExternalService { service: String, operation: String },
 }
 
+/// A detached ed25519 signature by the issuer that vouched for a capability.
+///
+/// `key_id` selects the verifying key from a
+/// [`CapabilityKeyring`](crate::capability_signing::CapabilityKeyring); `sig`
+/// is the 64-byte ed25519 signature as 128 lowercase hex characters, over the
+/// bytes produced by
+/// [`canonical_signing_bytes`](crate::capability_signing::canonical_signing_bytes).
+/// Hex, not base64, matching every other opaque byte string in this workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitySignature {
+    pub key_id: String,
+    pub sig: String,
+}
+
 /// A scoped permission proposed by a plan and granted by host policy or a user.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +104,27 @@ pub struct Capability {
     pub issued_to: String,
     pub issued_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Detached signature by a trusted issuer, when one exists.
+    ///
+    /// **`Option`, deliberately.** No capability *issuer* exists in this
+    /// repository yet, so making the field mandatory would reject every
+    /// capability that can be produced today — including every record already
+    /// persisted by a running `taskd`. Instead the requirement lives in
+    /// deployment configuration: `andromeda-runtime`'s `CapabilityAdmission`
+    /// refuses unsigned capabilities whenever a keyring is configured, and the
+    /// type keeps parsing old, unsigned records so an upgrade does not orphan
+    /// them.
+    ///
+    /// Omitted from serialized output when absent, so an unsigned capability's
+    /// JSON is byte-identical to what earlier versions wrote.
+    ///
+    /// A signature says "a holder of this key vouched for this grant". It does
+    /// **not** say the grant is safe to execute, and on its own it does not
+    /// close the self-issuance gap: whoever holds the key is the issuer, and
+    /// today that is whoever runs the signing helper. The gap closes when a
+    /// trusted host component owns the key and the caller cannot reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<CapabilitySignature>,
     /// Reserved; not yet enforced (no executor exists). Single-use
     /// consumption — invalidating the capability after its first successful
     /// execution — will belong to the runtime execution layer once it exists;
@@ -212,6 +248,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         }
     }
 
@@ -317,10 +354,37 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: Some(Utc::now() + chrono::Duration::minutes(5)),
             single_use: true,
+            signature: None,
         };
         let encoded = serde_json::to_string(&capability).expect("serialize capability");
         let decoded: Capability = serde_json::from_str(&encoded).expect("deserialize capability");
         assert_eq!(decoded, capability);
+    }
+
+    /// Adding `signature` must not break records written before it existed,
+    /// and must not change what an unsigned capability serializes to — a store
+    /// full of unsigned records has to survive the upgrade untouched.
+    #[test]
+    fn unsigned_capabilities_are_wire_compatible_in_both_directions() {
+        let capability = file_capability("/work/project", FileAccess::Read);
+        let encoded = serde_json::to_value(&capability).expect("serialize");
+        assert!(
+            encoded.get("signature").is_none(),
+            "an unsigned capability must not emit a signature field: {encoded}"
+        );
+
+        // A record written by an older build (no `signature` key at all) still
+        // parses, and parses as unsigned rather than as anything else.
+        let legacy = serde_json::json!({
+            "id": capability.id,
+            "resource": { "type": "files", "root": "/work/project", "access": "read" },
+            "issued_to": "task",
+            "issued_at": capability.issued_at,
+            "expires_at": null,
+            "single_use": false,
+        });
+        let decoded: Capability = serde_json::from_value(legacy).expect("legacy record parses");
+        assert_eq!(decoded.signature, None);
     }
 
     #[test]

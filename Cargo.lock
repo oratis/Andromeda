@@ -39,6 +39,7 @@ name = "andromeda-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "ed25519-dalek",
  "serde",
  "serde_json",
  "thiserror",
@@ -49,6 +50,7 @@ dependencies = [
 name = "andromeda-hardware"
 version = "0.1.0"
 dependencies = [
+ "andromeda-core",
  "chrono",
  "ed25519-dalek",
  "serde",

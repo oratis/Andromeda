@@ -863,6 +863,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         };
         let plan = ActionPlan {
             schema_version: ActionPlan::CURRENT_SCHEMA_VERSION,
@@ -1238,6 +1239,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         };
         let network_cap = Capability {
             id: CapabilityId::new(),
@@ -1249,6 +1251,7 @@ mod tests {
             issued_at: Utc::now(),
             expires_at: None,
             single_use: false,
+            signature: None,
         };
         let parse = ActionSpec {
             id: ActionId::new(),

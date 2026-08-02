@@ -9,12 +9,24 @@ rust-version.workspace = true
 
 [dependencies]
 chrono.workspace = true
+# Declared here (not in `[workspace.dependencies]`) because only this crate and
+# `andromeda-hardware` need ed25519, for detached capability and HCM manifest
+# signature verification. Same version and same feature set as the hardware
+# crate's declaration, so the two resolve to one `Cargo.lock` entry. No default
+# `rand_core`/key-generation feature: keys are built from a caller-supplied
+# seed, so no runtime RNG is ever invoked. `zeroize` keeps signing-key material
+# from lingering in memory.
+ed25519-dalek = { version = "2.2.0", default-features = false, features = [
+    "std",
+    "zeroize",
+] }
 serde.workspace = true
+# Promoted from a dev-dependency: canonical JSON (`encoding::canonical_json`) is
+# how a signed capability becomes a message, so it is part of the shipped code
+# path now, not only of tests. Already in `Cargo.lock` either way.
+serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true
