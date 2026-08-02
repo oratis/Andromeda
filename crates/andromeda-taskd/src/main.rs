@@ -61,13 +61,36 @@ struct Args {
     allow_non_loopback: bool,
 }
 
+/// Runs the daemon, reporting a startup failure as a *readable* message.
+///
+/// `fn main() -> Result<_, _>` would print the error's `Debug`, not its
+/// `Display` — so a permission refusal surfaced as
+/// `TooPermissive { path: "...", mode: 488 }`: the octal mode rendered in
+/// decimal, and none of the guidance the error type carefully spells out. Every
+/// startup error here exists to tell an operator what to change, so `main`
+/// prints `Display` and walks the `source()` chain instead.
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!("{error}");
+            let mut source = error.source();
+            while let Some(cause) = source {
+                tracing::error!("  caused by: {cause}");
+                source = cause.source();
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     andromeda_taskd::ensure_loopback_bind(args.listen, args.allow_non_loopback)?;
     if !args.listen.ip().to_canonical().is_loopback() {
