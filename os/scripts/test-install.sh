@@ -267,11 +267,6 @@ if [[ "${image_check_status}" -ne 0 ]]; then
         "${image_check_status}" >&2
     exit "${image_check_status}"
 fi
-if [[ "${partition_probe_ok}" -ne 1 ]]; then
-    printf 'Timed out waiting for the ESP GUID and andromeda-root label on %s.\n' \
-        "${nbd_device}" >&2
-    exit 1
-fi
 
 # ---------------------------------------------------------------------------
 # Installer failure gate: a QEMU exit status of 0 does NOT mean the install
@@ -281,10 +276,18 @@ fi
 # diagnostics and returns; the kickstart's own `shutdown` (:27) then still runs,
 # so the VM powers off cleanly and `install_status` above is 0. run 30686771448
 # failed exactly this way: the ESP carried EFI/Andromeda/diagnostics/*, which is
-# written ONLY by %onerror, yet every gate above passed and the script fell
-# through to the marker grep below. That grep matched nothing, and `set -o
-# pipefail` plus `set -e` turned it into a bare `exit code 1` with not one word
-# of explanation in the CI log. See docs/reviews/e2e-pipeline-review.md P0 #1.
+# written ONLY by %onerror, yet every exit-status gate passed and the script
+# fell through to the marker grep further below. That grep matched nothing, and
+# `set -o pipefail` plus `set -e` turned it into a bare `exit code 1` with not
+# one word of explanation in the CI log. See docs/reviews/e2e-pipeline-review.md
+# P0 #1.
+#
+# This gate MUST run before the partition-probe gate below: a `%pre
+# --erroronfail` preflight failure aborts Anaconda before partitioning, so the
+# ESP GUID and andromeda-root label never appear, partition_probe_ok stays 0,
+# and the probe gate would otherwise mask the real cause behind a misleading
+# "Timed out waiting for the ESP GUID..." message -- leaving the
+# PREFLIGHT_FAILED branch here unreachable.
 #
 # So: check the installer's own failure markers explicitly, and positively
 # require its success marker instead of only asserting that some greps matched.
@@ -299,6 +302,13 @@ if LC_ALL=C grep --text --quiet 'ANDROMEDA_INSTALLER_PREFLIGHT_FAILED' \
 elif LC_ALL=C grep --text --quiet 'ANDROMEDA_INSTALLER_DIAGNOSTICS_START' \
     "${INSTALL_LOG_NORMALIZED}"; then
     install_failure_reason='Anaconda ran its %onerror hook, so the installation aborted'
+elif [[ -n "$(find "${DIAGNOSTICS_DIR}/installer" -type f 2>/dev/null)" ]]; then
+    # Third, serial-independent trigger: EFI/Andromeda/diagnostics on the ESP
+    # is written ONLY by the %onerror hook, so harvested installer diagnostics
+    # prove the install aborted even when neither marker reached the serial
+    # log (e.g. /dev/ttyS0 was not a character device in the installer
+    # environment, so the markers were never emitted there).
+    install_failure_reason='the ESP carries EFI/Andromeda/diagnostics, which only the %onerror hook writes, so the installation aborted (no serial failure marker was captured; /dev/ttyS0 may not have been usable in the installer environment)'
 fi
 
 if [[ -n "${install_failure_reason}" ]]; then
@@ -341,6 +351,12 @@ fi
 
 require_marker "${INSTALL_LOG_NORMALIZED}" 'ANDROMEDA_INSTALLER_EFI_OK' \
     'the UEFI fallback stage never completed: os/installer/install-uefi-fallback.sh did not emit ANDROMEDA_INSTALLER_EFI_OK, so the kickstart %post that installs EFI/BOOT/BOOTX64.EFI and creates the Andromeda NVRAM entry did not finish'
+
+if [[ "${partition_probe_ok}" -ne 1 ]]; then
+    printf 'Timed out waiting for the ESP GUID and andromeda-root label on %s.\n' \
+        "${nbd_device}" >&2
+    exit 1
+fi
 
 # Success path: the partitions were found and must be mounted for the strict
 # assertions below (partition_probe_ok=1 guarantees both were present).
@@ -404,9 +420,12 @@ qemu_pid="$!"
 #                           = 14 min
 #   3 x per-boot budget     3 boots (first-boot, update, rollback) = 42 min
 #     <  boot deadline      2700 s = 45 min   <-- the deadline below
-#   sum of stage budgets    install 45 min + boot 45 min + matrix 3 x 10 min
+#   sum of stage budgets    install 45 min + boot 45 min
+#                           + matrix 3 x 10 min (a HOST-side cap that
+#                             deliberately sits below the 12 min verify unit
+#                             timeout; test-hardware-matrix.sh explains why)
 #                           + build (<=50 min; observed max 42.25 min)
-#                           + prep/upload ~5 min = ~175 min
+#                           + prep/upload ~6 min = ~176 min
 #     <  job timeout        os-e2e.yml timeout-minutes: 180
 #
 # Changing any budget here means re-checking the two sites above and below it.

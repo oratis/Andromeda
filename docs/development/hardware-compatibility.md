@@ -11,6 +11,79 @@
 - 可追溯 CI evidence；
 - 安全更新责任人与支持期限。
 
+## 信任边界：真实性必须显式开启
+
+**默认不校验真实性。** 不带 `--trusted-keys` 时，matcher 只校验清单的**内部一致性与
+新鲜度**（selector 是否命中、requirement 是否满足、证据是否过期、supported 以上是否
+固定了制品）。此时清单的 `tier` 是**自我声明**的，任何人写一份文件都能声明
+`certified`；`sha256` 也被原样采信。这条路径的结果是**咨询性的，不是信任门控**。
+
+### 三档校验强度
+
+| 调用方式 | 校验内容 | 可否作信任门控 |
+|---|---|---|
+| `hardware check m.json` | 一致性 + 新鲜度 | **否**（会打印两条 warning） |
+| `+ --artifact-root <dir>` | 追加：每个 pin 解析为 `<dir>/<name>`、重算 SHA-256 比对；不匹配或缺失即 `blocked` | 否（清单本身仍未认证） |
+| `+ --trusted-keys <file>` | 追加：清单必须携带 detached ed25519 签名，且解析到 keyring 中的可信 key 并在**规范化字节**上验签，否则 `effective_tier` 被打到 `blocked` | **是** |
+
+`--trusted-keys` 接受 `{"key_id": "<64 位 hex 验证公钥>"}` 的 JSON 文件。空文件被拒绝
+（空 keyring 谁都不信，会静默阻断一切，属于易误用的配置）。
+
+`--artifact-signing-key <id>`（可重复，需配合 `--artifact-root`）另外要求每个**制品 pin**
+声明可信 key id；它认证的是制品，与 `--trusted-keys` 认证清单本身是两件事。
+
+### 高等级门控 fail-closed
+
+`--require-tier supported` 或 `certified` 表达的是对真实硬件的真实承诺，因此
+**不带 `--trusted-keys` 时会被直接拒绝**（非零退出，不产生判定结果），而不是打印一条
+没人看的警告。确实需要咨询性检查时，必须显式加 `--allow-unverified` 表示知情。
+
+`blocked`/`community`/`reference` 不作真实硬件承诺（`reference` 只代表虚拟证据），
+自我声明它们不会误导任何人，因此不受此限制。
+
+### 签发：`hardware keygen` 与 `hardware sign`
+
+验签只有在能签名时才有意义。两个子命令在**离线签名机**上运行，都不探测本机硬件：
+
+```bash
+andromeda hardware keygen --seed-file root.seed --key-id andromeda-hcm-root
+```
+
+从一个 **32 字节种子**（64 位 hex 或 32 原始字节）导出验证公钥，并直接打印可粘贴进
+keyring 文件的 `keyring_entry`。签名是**由种子确定性导出**的，不用 RNG，因此离线签名器
+可复现。
+
+> **本工具不生成密钥材料。** 种子的生成、离线保管（HSM/离线根）与轮换是部署职责；
+> 一个开发者 CLI 随手造出的密钥没人能对其负责。持有种子者即可签发任意清单。
+
+```bash
+andromeda hardware sign cohort.json --seed-file root.seed \
+  --key-id andromeda-hcm-root --output cohort-signed.json
+```
+
+规范化会剥离已有 `signature`，因此对已签名清单重新签名是安全的。
+
+完整闭环：`keygen` → 把 `keyring_entry` 写入 keyring 文件 → `sign` → `check --trusted-keys`。
+
+### 已验证的行为
+
+以一份 selector 命中本机、`requirements: []`、含任意 `sha256` 与 2099 年到期证据、
+**且不带签名**的伪造清单实测：
+
+- `--require-tier certified` → **拒绝执行**，提示需要 `--trusted-keys`；
+- `--require-tier certified --allow-unverified` → `certified`（这正是咨询模式的含义，
+  也是为什么它不能当门控）；
+- `--require-tier certified --trusted-keys keys.json` → `blocked`，原因为
+  `manifest is unsigned but a trusted keyring is configured; authenticity cannot be established`。
+
+对**已签名**清单的补充实测（同一 keyring）：
+
+| 场景 | 结果 |
+|---|---|
+| 用可信种子签名，但制品 pin 声明了 keyring 之外的 key id | `blocked` —— `artifact 'vmlinuz' names signing key 'totally-real-key', which is not in the trusted keyring`（纵深防御：清单真实性与制品真实性分别成立才放行） |
+| 内部一致、正确签名、制品哈希与 key id 均匹配 | **`certified`，`missing: []`，退出码 0**（正向路径确实可通过——一个永远 `blocked` 的门控没有价值） |
+| 在签名后篡改任一字段（如改 `name`） | `blocked` —— `manifest signature failed ed25519 verification ... Verification equation was not satisfied` |
+
 ## v1 报告与诊断
 
 报告包含：
@@ -60,11 +133,48 @@ Wi-Fi 无驱动，或主 GPU 正常而副 GPU 无驱动——整机降级为 `ne
 - `boot_provider` 会原样出现在评估输出中，但由**安装器预检**（platform
   identity 比对）而非 matcher 执行；matcher 的 evidence 中会明确注明这一点；
 - Supported 及以上必须固定 kernel/driver/firmware/HEP artifact；
-- capability evidence 必须通过、未过期且可追溯；
+- capability evidence 必须未过期、可追溯，且其判定不阻断所声明的 tier（见下）；
 - 支持声明到期后自动降为 Blocked；
 - PCI 设备可以匹配 subsystem vendor/device 和 revision，不能只按品牌承诺。
 
 Schema 位于 [`schemas/hardware-compatibility-manifest.schema.json`](../../schemas/hardware-compatibility-manifest.schema.json)，示例位于 [`examples/hcm/developer-x86_64-pc.json`](../../examples/hcm/developer-x86_64-pc.json)。
+
+## 证据判定词汇
+
+`evidence.result` 取四值。此前只有 `passed`/`failed`，导致
+[认证测试计划](./hardware-certification-test-plan.md) §7 要求的"降级"与"未知"
+**无法表达**——而这两种状态恰恰是整套支持策略赖以成立的部分：把降级压成
+`passed` 是夸大，压成 `failed` 又会阻断一台真正可用的机器。
+
+| 取值 | 含义 | 阻断哪些 tier |
+|---|---|---|
+| `passed` | 能力验证通过 | 无 |
+| `degraded` | 能力可用但有**必须公开披露**的限制（例如 codec 只能解码不能编码、suspend 仅在交流供电下可靠） | 仅阻断 `certified` |
+| `failed` | 能力验证失败 | **全部** |
+| `unknown` | 未产出判定：未运行、结论不确定或证据不可获取 | **全部** |
+
+两条设计约束值得记录：
+
+1. **`unknown` 在每个 tier 都 fail-closed。** "没测"是最容易被误当成"测过没问题"的
+   状态，认证计划也明确 `unknown` 不能晋级，因此它不被当作"缺省无此项"忽略。
+2. **认证计划的 `blocked` 映射到 `failed`，`failed` 没有被改名。** 规范化会重新
+   序列化类型化模型，改名或调整既有取值的编码会让**所有已签名清单的签名失效**。
+   同理，新增取值不影响 `passed`/`failed` 的编码——仓库有两条测试锁定这一点：
+   一条断言四个取值的 wire 编码，一条对只用旧取值的清单做真实签名→验签往返。
+
+`degraded` 通过时，评估输出的 `evidence` 中会显式带上"限制必须公开披露"，
+避免降级被静默接受。
+
+> **注：两处已知设计张力，均只作记录、不改变当前行为，留待后续决定。**
+>
+> 1. `certified` 清单携带 `degraded` 证据时，整机直接 `effective_tier =
+>    blocked`，而**不是**降级为 `supported`。诚实登记降级的作者比谎报
+>    `passed` 的作者拿到更差的结果——这一激励问题没有消失，只是从
+>    "passed/failed 二值"上移到了 certified 这一个 tier；是否引入降级式回退
+>    是尚未定案的后续设计。
+> 2. 在 `community` 这一证据可选的 tier 上，登记 `unknown` 会被评估为
+>    `blocked`，而**完全删掉该条目**则保持 `community`——fail-closed 在唯一
+>    允许不带证据的 tier 上奖励了删除记录。同样标记为后续决定。
 
 ## HCM 清单签名与真实性（fail-closed）
 
@@ -126,21 +236,22 @@ matcher 过去只校验清单的**内部一致性与新鲜度**，从不校验**
 
 ## `hardware check` 作为预检门禁
 
-> **重要：`andromeda hardware check` 目前是咨询性的，不可作信任决策。** 现有 CLI 走
-> 默认（无 keyring）路径，只校验一致性与新鲜度，**不验签清单真实性**；伪造清单仍可得到
-> 非 `blocked` 结果与退出码 0。要让退出码具备真实性保证，评估方必须经库 API 传入
-> `TrustedKeyring`（`evaluate_manifest_verified`）。为 `hardware check` 增加
-> `--trusted-keys <path>` 开关以在 CLI 层强制验签，是自然的后续项（见“下一步”）。
+> **真实性语义见上文[“信任边界：真实性必须显式开启”](#信任边界真实性必须显式开启)
+> 及其三档校验强度表。** 概括：不带 `--trusted-keys` 的调用是咨询性的，退出码不具备
+> 真实性保证；带 `--trusted-keys` 时验签 fail-closed，退出码可作信任门控；
+> `--require-tier supported|certified` 不带 keyring 会被直接拒绝执行，除非显式
+> `--allow-unverified`。
 
 `andromeda hardware check <manifest>` 可以直接用于脚本和 CI 门禁：
 
 - 退出码 `0`：selector 匹配、requirements 满足，且（如提供
   `--require-tier`）有效 tier 达标；
+- 退出码 `1`：**拒绝执行**——`--require-tier supported|certified` 既未带
+  `--trusted-keys` 也未带 `--allow-unverified`，不产生判定结果；probe 失败、
+  manifest 无法读取或 `schema_version` 未知等输入错误同样以 `1` 退出；
 - 退出码 `2`：`effective_tier` 为 `blocked`；
 - 退出码 `3`：`effective_tier` 低于 `--require-tier <tier>` 指定的最低
-  等级；
-- 其他非零退出码：probe 失败、manifest 无法读取或 `schema_version`
-  未知。
+  等级。
 
 Tier 阶梯从低到高为 `blocked < community < reference < supported <
 certified`（`reference` 只有虚拟 L0–L2 证据，因此低于要求实体认证的
@@ -164,9 +275,9 @@ andromeda hardware check examples/hcm/developer-x86_64-pc.json --require-tier co
 
 ## 下一步
 
-1. HCM detached ed25519 验签已在**库层**落地并 fail-closed（见“HCM 清单签名与真实性”）；
-   待办：为 `andromeda hardware check` 增加 `--trusted-keys <path>` 开关，把验签下沉到
-   CLI 层并使退出码具备真实性保证；同时建立离线根密钥的生成、分发与轮换流程；
+1. HCM detached ed25519 验签已在库层与 CLI 层（`hardware check --trusted-keys`，配套
+   `hardware keygen` / `hardware sign`）落地并 fail-closed；待办：建立离线根密钥的
+   生成、分发与轮换流程，并补充签名/密钥撤销机制；
 2. 对 HEP OCI digest 与签名身份进行在线/离线验证；
 3. 从 Windows/macOS source agent 导入更完整但经用户同意的设备 inventory；
 4. 建立 QEMU、参考 PC、Intel Mac、T2、M1/M2 分离的实验室队列；

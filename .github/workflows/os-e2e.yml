@@ -75,7 +75,7 @@ jobs:
     # unattributable job cancellation. Splitting the job splits the OUTERMOST
     # term in two, and each half now has to hold on its own:
     #
-    #   free runner disk space                      4 min (observed 2.10-2.90)
+    #   free runner disk space                      5 min (observed 2.10-4.50)
     #   + apt install host deps                     2 min (observed 0.21-0.36)
     #   + validate scripts                          1 min (observed 0.01-0.03)
     #   + build payloads + ISO                     50 min (observed max 42.25)
@@ -83,7 +83,7 @@ jobs:
     #   + layer-size budget                         1 min
     #   + upload ISO 4.0 GiB + rev2 tar ~4 GiB      6 min (ISO alone: 0.31-0.74)
     #   + checkout, registry login                  1 min
-    #   = 70 min                                    < 75 min (here)
+    #   = 71 min                                    < 75 min (here)
     #
     # Build remains the one term with no enforced ceiling, so the ~50 min
     # assumption is written down: if it regresses past that, raise this number in
@@ -286,15 +286,19 @@ jobs:
     # What changed is the outermost term, which no longer has to carry the
     # build:
     #
-    #   free runner disk space                        4 min
+    #   free runner disk space                        5 min (observed 4.50 in
+    #                                                 run 30732275955)
     #   + apt install host deps                       2 min
     #   + download ISO 4.0 GiB + rev2 tar ~4 GiB      6 min
     #   + test-install.sh install timeout            45 min
     #   + test-install.sh boot deadline              45 min
     #   + test-hardware-matrix.sh (3 x 600 s)        30 min
+    #     (a host-side cap deliberately BELOW the 12 min andromeda-ci-verify
+    #      unit timeout; test-hardware-matrix.sh explains why raising it to
+    #      840 s would push this sum past the job timeout)
     #   + upload serial evidence (2 MiB)              1 min
     #   + checkout                                    1 min
-    #   = 134 min                                     < 140 min (here)
+    #   = 135 min                                     < 140 min (here)
     #
     # test-install.sh:302 and test-hardware-matrix.sh:46 both cite "the os-e2e
     # job timeout (180m)" when refusing to run under TCG. 140 is still far above
@@ -366,6 +370,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Andromeda-serial-evidence-${{ github.sha }}
+          # hardware-matrix/ is globbed by extension, not with **: each profile
+          # directory also holds a disk.qcow2 overlay and an OVMF_VARS.fd that
+          # would bloat the evidence artifact. *.log and *.txt cover everything
+          # test-hardware-matrix.sh writes as text (qemu-version.txt,
+          # qemu-img-version.txt, and per profile serial.log,
+          # serial.normalized.log, qemu-argv.txt, qemu-img-check.txt,
+          # qemu-img-check-status.txt).
           path: |
             output/install-serial.log
             output/boot-serial.log
@@ -374,7 +385,8 @@ jobs:
             output/install-post.log
             output/ovmf-vars.txt
             output/diagnostics/**
-            output/hardware-matrix/**
+            output/hardware-matrix/**/*.log
+            output/hardware-matrix/**/*.txt
           retention-days: 14
           include-hidden-files: true
           if-no-files-found: warn

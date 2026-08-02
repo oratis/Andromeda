@@ -177,7 +177,47 @@ pub struct ArtifactPin {
 #[serde(rename_all = "snake_case")]
 pub enum EvidenceResult {
     Passed,
+    /// The capability works with a limitation that must be publicly disclosed.
+    ///
+    /// The certification plan's suites emit this constantly (a codec that
+    /// decodes but not encodes, suspend that works on AC but not battery), and
+    /// until now it had to be flattened into `Passed` — which overstates — or
+    /// `Failed` — which understates and blocks a machine that is genuinely
+    /// usable. It satisfies evidence below `Certified` and blocks `Certified`,
+    /// which is the tier that promises no known degradation.
+    Degraded,
     Failed,
+    /// The suite did not produce a verdict: not run, inconclusive, or the
+    /// evidence could not be retrieved.
+    ///
+    /// Always blocking. "Not measured" is the state most easily confused with
+    /// "measured fine", and the certification plan is explicit that `unknown`
+    /// cannot promote, so it fails closed at every tier rather than being
+    /// silently treated as absence.
+    Unknown,
+}
+
+impl EvidenceResult {
+    /// Whether this result blocks the given declared tier.
+    ///
+    /// Deliberately a `match` over explicit tiers rather than an `Ord`
+    /// comparison: adding a `SupportTier` variant must not silently widen or
+    /// narrow the gate. Mirrors the reasoning already used for the artifact
+    /// gate in the matcher.
+    #[must_use]
+    pub const fn blocks(self, tier: SupportTier) -> bool {
+        match self {
+            Self::Passed => false,
+            Self::Degraded => match tier {
+                SupportTier::Certified => true,
+                SupportTier::Blocked
+                | SupportTier::Community
+                | SupportTier::Reference
+                | SupportTier::Supported => false,
+            },
+            Self::Failed | Self::Unknown => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -239,6 +279,30 @@ impl HcmManifest {
     pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 }
 
+/// Authenticity verdict for the evaluated manifest, surfaced as a structured
+/// field on [`CompatibilityEvaluation`] so consumers can gate on it instead of
+/// substring-matching `evidence`/`missing` strings.
+///
+/// Internally tagged like [`CapabilityRequirement`], so it serializes as
+/// `{"type": "not_checked"}`, `{"type": "verified", "key_id": "..."}`, or
+/// `{"type": "failed", "reason": "..."}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ManifestAuthenticity {
+    /// No trusted keyring was supplied: the advisory path. The manifest's
+    /// signature (if any) was neither required nor checked, and its declared
+    /// tier is self-asserted.
+    #[default]
+    NotChecked,
+    /// A keyring was supplied and the manifest's detached ed25519 signature
+    /// verified against the trusted key named `key_id`.
+    Verified { key_id: String },
+    /// A keyring was supplied but authenticity could not be established
+    /// (unsigned, unknown key, malformed signature, or failed verification).
+    /// Fail-closed: the evaluation's `effective_tier` is `Blocked`.
+    Failed { reason: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompatibilityEvaluation {
     pub manifest_id: String,
@@ -250,6 +314,11 @@ pub struct CompatibilityEvaluation {
     /// for transparency; enforcement against the target platform happens in
     /// the installer preflight, not here.
     pub boot_provider: BootProvider,
+    /// Whether the manifest itself was authenticated, and how. Defaults to
+    /// [`ManifestAuthenticity::NotChecked`] when deserializing evaluations
+    /// recorded before this field existed.
+    #[serde(default)]
+    pub manifest_authenticity: ManifestAuthenticity,
     #[serde(default)]
     pub evidence: Vec<String>,
     #[serde(default)]

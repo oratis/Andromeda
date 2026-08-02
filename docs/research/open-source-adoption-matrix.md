@@ -35,7 +35,7 @@
 | OS 构建/交付 | bootc + OCI | Adopt/Pilot | 长期交付格式；原型期补齐可信启动链 |
 | deployment | OSTree | Adopt | 内容寻址、多部署、回滚 |
 | 近期桌面部署工具 | rpm-ostree | Adopt（过渡） | 复用成熟能力；产品 API 不与其独有接口绑定 |
-| 镜像构建 | osbuild/image-builder | Pilot | 生成安装 ISO、裸盘与 VM 镜像 |
+| 镜像构建 | osbuild/image-builder | Adopt | 生成安装 ISO、裸盘与 VM 镜像；与 §8 一致，已用于当前 ISO 构建 |
 | 启动/服务 | systemd、UKI、systemd-boot/stub | Adopt | boot counting、measured boot、资源管理 |
 | 状态文件系统 | Btrfs | Pilot→Adopt | 用户/应用/agent checkpoint；不替代 OS deployment |
 | 固件更新 | fwupd + LVFS | Adopt | 按设备身份、HCM 和灰度通道门控 |

@@ -16,6 +16,19 @@ ExecStart=/usr/libexec/andromeda-ci-verify
 #   3 x 14min = 42min          (first-boot, update, rollback)
 #     < 45min                  test-install.sh boot deadline (2700 s)
 #
+# The ~2min slice is not just firmware/kernel: it also has to absorb every
+# ordered predecessor named in After= above, all of which run (or at least
+# start) before this unit does:
+#   - network-online.target              the network manager's wait-online check
+#   - andromeda-hardware-report.service  Type=oneshot, so it runs to COMPLETION
+#                                        first, under the systemd DEFAULT 90 s
+#                                        TimeoutStartSec (it sets none itself)
+#   - andromeda-taskd.service            Type=simple; ordering is satisfied as
+#                                        soon as the daemon is executed
+#   - sddm.service                       display-manager startup
+# Anyone raising TimeoutStartSec here must re-check that these predecessors
+# still fit inside the ~2min slice of the per-boot budget.
+#
 # It was 20min, which made 3 x 20 = 60min > the 45min host deadline: a slow but
 # healthy guest would be killed by the host with no unit-level diagnostic.
 # Observed full lifecycle including all three boots is 10-15min, so 12min per

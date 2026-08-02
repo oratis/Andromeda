@@ -37,16 +37,23 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 | GET | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
 | GET | `/v1/tasks/{id}` | 读取任务 |
 | POST | `/v1/tasks/{id}/capabilities` | 给已存在的任务补授权：追加 capability，记 `granted` 事件并使 revision +1。每个新 capability 必须 `issued_to == plan.task_id` 且当前有效（未过期、已到 `issued_at`），否则返回 422；带 `expected_revision` 做乐观并发 |
+| POST | `/v1/tasks/{id}/outcomes` | 记录单个 action 的执行结果与证据；追加 `outcome_recorded` 事件并使 revision +1。只允许在 `Running`/`Verifying` 状态记录，每个 action 至多一条（重复返回 422），action 必须属于该计划 |
 | POST | `/v1/tasks/{id}/evaluate` | 评估、不执行；**逐 action** 解析隔离等级，结果作为 `evaluated` 事件追加到任务事件史并使 revision +1 |
-| POST | `/v1/tasks/{id}/transition` | 带 revision 的状态转换；`Ready`/`Running` 两条边受策略门控（见下） |
+| POST | `/v1/tasks/{id}/transition` | 带 revision 的状态转换；`Ready`/`Running`/`Succeeded` 三条边受门控（见下） |
 
 所有 `TaskService` 调用在 `tokio::task::spawn_blocking` 中执行，阻塞的文件锁和 fsync 不会占用 async worker，`/healthz` 在锁竞争时依旧可响应。
 
 ### Host 校验（DNS rebinding 防护）
 
-`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost`、`127.0.0.1`、`[::1]`（可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
+`taskd` 校验每个请求的 `Host`（HTTP/2 下回退到 `:authority`）：只接受 `localhost` 与字面回环 IP（127.0.0.0/8、`[::1]` 及其 IPv4-mapped 形式，可带端口），其余一律 403 `forbidden_host`。恶意网页即使通过 DNS rebinding 把自己的域名解析到 127.0.0.1，请求携带的仍是攻击者的 Host，会被拒绝。
 
-注意：Host 校验**只防御浏览器发起的 DNS rebinding**，不是鉴权，也**不能保护非 loopback 绑定**。它只检查请求携带的 `Host` 头取值，不检查实际入站接口。任何非浏览器客户端（curl／脚本／攻击者）都可以自带 `Host: localhost` 通过校验——因此若把 `ANDROMEDA_LISTEN` 改为非 loopback 地址，API 会向该网络**暴露且无鉴权**。**禁止把 `taskd` 绑定到 loopback 之外。** 此外，本地任意进程/用户经 loopback 亦可无鉴权访问 API。远程鉴权在下述能力实现前不存在（参见 `getting-started.md`、`README.md` 的一致说明）。
+注意：Host 校验**只防御浏览器发起的 DNS rebinding**，不是鉴权，也**不能保护非 loopback 绑定**。它只检查请求携带的 `Host` 头取值，不检查实际入站接口。任何非浏览器客户端（curl／脚本／攻击者）都可以自带 `Host: localhost` 通过校验。此外，本地任意进程/用户经 loopback 亦可无鉴权访问 API。远程鉴权在下述能力实现前不存在（参见 `getting-started.md`、`README.md` 的一致说明）。
+
+### 绑定地址强制（非 Host 校验）
+
+因为 Host 校验保护不了绑定面，`taskd` 在**启动时**校验监听地址：非回环地址直接拒绝启动并说明原因。只有显式设置 `ANDROMEDA_ALLOW_NON_LOOPBACK=1`（或 `--allow-non-loopback`）才能越过，并会打印醒目警告说明 API 无鉴权。这把"禁止绑定 loopback 之外"从文档约定变成机制。
+
+生产部署另有内核级纵深防御：`andromeda-taskd.service` 设置 `IPAddressAllow=localhost` / `IPAddressDeny=any`。
 
 ### `Ready` 状态的语义
 
@@ -78,12 +85,20 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 
 ### 策略门控的状态转换
 
-状态机边合法性之外，两条授权敏感的边额外做策略复检，避免仅凭断言就把任务推进到"可执行"语义：
+状态机边合法性之外，三条授权/证据敏感的边额外做复检，避免仅凭断言就把任务推进到"可执行"或"已成功"语义：
 
 - **`AwaitingApproval → Ready`**：要求 `plan_fully_granted`（每个 action 的所需 capability 都齐备、有效、覆盖 target 且不命中 deny 规则），否则拒绝。这样因授权不足而挂起的任务，必须先经 `POST /v1/tasks/{id}/capabilities` 补齐授权，才能进入 `Ready`。
-- **`Ready → Running`**：对每个 action 以其逐 action 最低隔离重跑策略引擎，任一 action 为 `Deny` 或 `Ask` 即拒绝转换，并在错误中列出各 action 的原因。这使 `Running` 成为一个强制的重新授权点（例如 capability 在 `Ready` 之后过期，会在此被挡下），而非依赖未来 executor 自觉先调用 `evaluate`。
+- **`Ready → Running`**：对每个 action 以其逐 action 最低隔离重跑策略引擎，**使用请求体显式提供的 `external_side_effect_confirmed`（默认 `false`）**。任一 action 为 `Deny` 即拒绝并列出原因；任一 action 为 `Ask`（即未确认的 L3 外部副作用）则以 `external_confirmation_required` 拒绝，并列出待确认的 action。这使 `Running` 成为强制的重新授权点与 **L3 提交点**：capability 在 `Ready` 之后过期会在此被挡下，未确认的外部副作用也无法启动。确认值记入 `state_changed` 事件，与 actor 一起留痕。
+- **`Verifying → Succeeded`**：要求计划中**每个** action 都有已记录的 outcome；outcome 状态必须是 `succeeded` 或 `skipped`（`failed`/`rolled_back`/`compensated` 一律拒绝），且**每条 outcome 至少携带一条 evidence**。因此"成功"是被证明的，不是被断言的。
 
-被门控拒绝的转换返回 422 `invalid_task`。
+被门控拒绝的转换一律返回 422，`error` 码按需要的操作员动作区分：未确认 L3 外部副作用（`Ready → Running` 的 `Ask`）返回 `external_confirmation_required`；`Verifying → Succeeded` 的证据门控（缺 outcome、outcome 非成功、outcome 无 evidence）返回 `missing_evidence`；其余门控与结构性拒绝（计划未完全授权、action 被策略 Deny、非法状态转换、计划校验失败）返回 `invalid_task`。
+
+#### L3 确认的 v0 边界
+
+`external_side_effect_confirmed` 由**调用方自报**，不是受信 broker 的证明。当前它保证的是
+"确认这一步确实发生过、并被归属到某个 actor 并留痕"，**不保证**"确认来自真实的人"。
+真正的确认代理（把参数摘要绑定到用户确认，防止批准后调包）属于 host broker 的职责，
+见下方"明确未实现"。
 
 ## 持久化
 
@@ -93,9 +108,11 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - 临时文件写入、flush、`sync_all` 后原子 rename 到新的 revision 文件；
 - 目录同步（仅 Unix；Windows 上 `File::open` 无法打开目录）；
 - revision 乐观并发；
-- 每次受支持的状态变化、每次授权补授（`granted`）和每次策略评估都追加 event；
+- 每次受支持的状态变化、每次授权补授（`granted`）、每次结果记录（`outcome_recorded`）和每次策略评估都追加 event；
+- 执行结果与证据保存在 `TaskRecord.outcomes`（每个 action 至多一条，append-only：已记录的 outcome 不可被覆盖）；
 - store 打开时在独占锁内清理崩溃残留的 `.{uuid}.tmp` 孤儿文件；
-- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套。
+- 单个计划最多 `MAX_PLAN_ACTIONS`（10 000）个 action，结构校验（去重/悬挂依赖/环检测）由 core `ActionPlan::validate`（迭代 Kahn 拓扑排序）单一实现负责，runtime 复用它，不再各写一套；
+- 单个 task 累计最多 `MAX_TASK_CAPABILITIES`（10 000）个 capability——创建与补授（`grant_capabilities`）两条路径都强制，且按**授予后的总量**计而非单次请求的数量，因此重复补授无法越过上限；重复的 capability 按条目计数，而非按去重后的权限计数。
 
 ### Compaction 策略
 
@@ -114,7 +131,11 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 - credential broker；
 - 外部 connector/MCP broker；
 - 签名 policy bundle；
-- verifier、rollback/compensation executor；
+- **独立 verifier**：`Verifying → Succeeded` 现在强制要求带证据的 outcome，但证据由执行方
+  自行记录，尚无独立断言器复核（"验证不能由执行模型自证"仍是未兑现的设计目标）；
+- **确认代理**：L3 确认目前由调用方自报（见上方 v0 边界），尚无把参数摘要绑定到用户
+  确认的 host broker；
+- rollback/compensation executor；
 - 用户身份、远程认证和多租户；
 - Task Center 图形界面。
 

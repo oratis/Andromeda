@@ -121,6 +121,17 @@ Apple 路径的额外限制：
 每项输出 `pass`、`degraded`、`unsupported`、`blocked` 或 `unknown`，并附原始
 证据 URI。`unknown` 不能晋级。
 
+写入 HCM 时按下表映射到 `evidence.result`（详见
+[HCM 开发说明](./hardware-compatibility.md#证据判定词汇)）：
+
+| 套件判定 | HCM `evidence.result` | 说明 |
+|---|---|---|
+| `pass` | `passed` | |
+| `degraded` | `degraded` | 仅阻断 `certified`；限制必须公开披露 |
+| `blocked` | `failed` | HCM 保留 `failed` 而非改名为 `blocked`——改名会使**所有已签名清单失效** |
+| `unknown` | `unknown` | 在每个 tier 都阻断 |
+| `unsupported` | —— | 表示"本机不具备该能力"，不是测试失败。**不写入 `evidence[]`**，应记入 cohort 的已知缺口清单，否则会与"测过但不通过"混淆 |
+
 ### 7.1 启动与生命周期
 
 - 冷启动 10 次、热重启 10 次、关机 10 次；
@@ -258,8 +269,9 @@ cohort 阶段标签**，不是 `SupportTier` 的取值，HCM 中不能声明它�
 ```bash
 cargo test --workspace --locked
 os/scripts/test-installer-platform-guard.sh
+os/scripts/test-containerfile-layer-budget.sh
 os/scripts/test-hardware-matrix.sh output
-os/scripts/test-daily-driver.sh output
+os/scripts/test-install.sh output
 ```
 
 当前虚拟矩阵覆盖 `modern-nvme`、`q35-sata` 与 `legacy-i440fx`。实体调度器应
@@ -270,7 +282,7 @@ os/scripts/test-daily-driver.sh output
 1. 校验 evidence 包签名和所有 digest；
 2. 校验 HCM selector 精确匹配；
 3. 校验 artifact pins 与被测镜像一致；
-4. 校验全部必需 capability evidence 为 `passed` 且未过期；
+4. 校验全部必需 capability evidence 的判定不阻断目标 tier（见 §7 映射表）且未过期；
 5. 由第二位审核者批准 Tier 变化；
 6. 保存撤销入口，以便发现回归时立即阻断该 cohort。
 
@@ -286,9 +298,11 @@ os/scripts/test-daily-driver.sh output
 - 规范化规则、`signature` 字段格式、库 API 与签名流程见
   [HCM 开发说明](./hardware-compatibility.md) 的“HCM 清单签名与真实性”一节，
   唯一权威实现在 `crates/andromeda-hardware/src/signing.rs`。
-- **`andromeda hardware check` 默认咨询性、不可作信任决策**：现有 CLI 走无 keyring
-  路径，只校验一致性与新鲜度。把清单真实性纳入 CI/发布门禁前，必须让评估经库 API
-  传入 keyring（CLI `--trusted-keys` 开关为后续项）。
+- **`andromeda hardware check` 默认咨询性、不可作信任决策**：不带 keyring 的调用只
+  校验一致性与新鲜度。把清单真实性纳入 CI/发布门禁时必须传入 keyring：
+  `andromeda hardware check <manifest> --require-tier supported --trusted-keys keys.json`。
+  不带 `--trusted-keys` 时，该 `--require-tier` 组合会被直接拒绝执行（退出码 1，
+  除非显式 `--allow-unverified` 承认仅作咨询）。
 - 密钥生成、分发、轮换与**生产清单的实际签名**是部署/运维职责；代码提供验证路径、
   可复现的签名助手 `ManifestSigningKey` 与上述流程约定，不代替运维。
 
