@@ -39,7 +39,32 @@ readonly ANDROMEDA_ESC
 # oriented so invalid UTF-8 in the serial stream cannot abort the pipeline.
 normalize_serial_stream() {
     LC_ALL=C tr -d '\000\r' \
-        | LC_ALL=C sed -E "s#${ANDROMEDA_ESC}\\[[0-?]*[ -/]*[@-~]##g"
+        | LC_ALL=C sed -E "s#${ANDROMEDA_ESC}\\[[0-?]*[ -/]*[@-~]##g" \
+        | repair_spliced_kernel_lines
+}
+
+# repair_spliced_kernel_lines
+#
+# The guest and the kernel share one UART, so a printk can land in the MIDDLE of
+# a userspace write and cut a marker in half:
+#
+#     ANDROMEDA_SELINU[    8.687420] snd_hda_codec_generic hdaudioC0D0: Line=0x5
+#     X_LABELS_OK
+#
+# Stripping control characters cannot repair this -- the marker is split by
+# another writer's text, not by escape codes -- so a lifecycle that actually
+# completed still fails the "each marker exactly once" check. Observed on Actions
+# run 30740353815: the guest emitted all ten markers including ANDROMEDA_E2E_OK,
+# and the run failed because ANDROMEDA_SELINUX_LABELS_OK matched zero times.
+#
+# Rejoin only the splice: a kernel timestamp that begins mid-line, plus the rest
+# of that physical line and its newline. A kernel message at the START of a line
+# is ordinary console output and is kept -- this does not strip kernel logging in
+# general, only the fragment that interrupted somebody else's line. On the run
+# above, all 42 removed fragments were embedded in non-kernel lines. The raw
+# serial log is retained next to the normalized copy, so no evidence is lost.
+repair_spliced_kernel_lines() {
+    LC_ALL=C perl -0777 -pe 's/(?<!\n)\[[ ]*\d+\.\d+\][^\n]*\n//g'
 }
 
 # normalize_serial_log <input> [output]

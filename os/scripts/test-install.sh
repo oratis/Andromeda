@@ -523,6 +523,11 @@ import sys
 log = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\0", b"").decode(errors="replace")
 log = log.replace("\r", "")
 log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
+# Rejoin markers cut in half by a kernel printk sharing the UART; see
+# repair_spliced_kernel_lines in os/scripts/lib/markers.sh for the mechanism and
+# the run that exposed it. Kept in step with that function because this
+# validator must stay correct if it is ever pointed at a raw log.
+log = re.sub(r"(?<!\n)\[ *\d+\.\d+\][^\n]*\n", "", log)
 markers = [
     "ANDROMEDA_SELINUX_LABELS_OK",
     "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",
