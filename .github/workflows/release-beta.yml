@@ -237,9 +237,10 @@ jobs:
             if (( size > 2147483648 )); then
               printf 'ISO is %s bytes, over the 2 GiB asset limit.\n' "${size}"
               rm -f "${iso}"
-              iso_note="The Developer Preview ISO (${size} bytes) exceeds the \
-2 GiB release-asset limit; download it from this run's \`iso\` artifact: \
-${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+              iso_note="The Developer Preview ISO (${size} bytes) exceeds the"
+              iso_note+=" 2 GiB release-asset limit; download it from this"
+              iso_note+=" run's iso artifact: ${GITHUB_SERVER_URL}"
+              iso_note+="/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             fi
           fi
           sha256sum --check --strict ./*.sha256
