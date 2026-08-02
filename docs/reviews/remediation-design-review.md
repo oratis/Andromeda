@@ -2,8 +2,9 @@
 
 > 日期：2026-08-02
 >
-> 背景：[三大产品目标对齐评审](./ai-native-goals-review.md) §5 列出四项待办工程。
-> 本轮为每项产出一份落地设计，再由**独立 agent 逐份对抗性复核**（任务是"驳倒它"，
+> 背景：[三大产品目标对齐评审](./ai-native-goals-review.md) §5 按优先级列出 11 项
+> 待办（分四档）；本轮把其中第 3、5、6、8、11 项综合为四个工作流，为每个工作流
+> 产出一份落地设计，再由**独立 agent 逐份对抗性复核**（任务是"驳倒它"，
 > 而非"确认它"），复核者读真实仓库、核对包名/crate API/文件路径是否真实存在。
 >
 > **结果：四份设计全部被判 `needs-redesign`。** 本文记录被驳倒的内容与
@@ -15,7 +16,7 @@
 ## 0. 为什么值得单独记一篇
 
 四份设计都写得像样：有取舍、有依据、有代码片段。但对抗复核在其中找到了
-**26 条致命缺陷**，其中至少三条会造成真实损害：
+**27 条致命缺陷**（§1 六条、§2 九条、§3 八条、§4 四条），其中至少三条会造成真实损害：
 
 | 缺陷 | 后果 |
 |---|---|
@@ -41,15 +42,16 @@ UNIX socket + `SO_PEERCRED` / TCP + owner-only token 双路径。
 2. **签发路径同样不可用**：`UMask=0077` 使 `keys init` 写出的策略文件为 `0600 root:root`，
    本该签发的用户组读不到。
 3. **依赖前提是错的**：设计以"引入 Ed25519 是重大取舍"立论，但
-   `ed25519-dalek 2.2.0` **已经是工作区依赖**（`andromeda-hardware` 已声明）。
-   整个"选型论证"因此建立在错误事实上。
+   `ed25519-dalek 2.2.0` **已在本仓库的依赖图中**（`crates/andromeda-hardware/Cargo.toml`
+   声明，`Cargo.lock` 已固定）。整个"选型论证"因此建立在错误事实上。
 4. **供应链无谓膨胀**：新增 `getrandom 0.3.4` 会让锁文件里出现**第三个** getrandom 大版本
    （已有 0.2.17 与 0.4.3）。`base64` 同样多余——仓库对同类对象一律用 hex。
 5. **核心保证未被强制**：`AuthConfig::resolve` 校验的是**配置**而非 serve 接线，
    匿名监听在类型上仍可表示；UNIX 路径下 token 变为可选，实际部署的单元又设成
    "只记录 uid、不做授权判定"，**镜像里的行为与设计摘要不符**。
 6. **新增本地 DoS**：对**无界**的调用方 capability 向量做强制 Ed25519 验证。
-   （此条已单独修复，见 PR"Bound the capabilities a task may hold"。）
+   （此条已单独修复，见 [#24](https://github.com/oratis/Andromeda/pull/24)
+   "Bound the capabilities a task may hold"。）
 
 ### 重做必须满足
 
@@ -58,7 +60,7 @@ UNIX socket + `SO_PEERCRED` / TCP + owner-only token 双路径。
 - 先核对 `Cargo.toml`/`Cargo.lock` 现状再论证依赖取舍；
 - 任何强制密码学校验的输入必须**先有长度上界**；
 - 必须同步更新 [威胁模型](../andromeda-threat-model.md) §4.2——该节把这三项列为
-  executor 的阻塞前置项，是**明文的合并门槛**。
+  "落地前必须成立"的 executor 阻塞前置项（合并/发布门槛类的表述在该文 §0 与 §8）。
 
 ## 2. HCM v3 表达力（hcm-v3）
 
@@ -68,7 +70,9 @@ UNIX socket + `SO_PEERCRED` / TCP + owner-only token 双路径。
 ### 致命
 
 1. **前提已过时**：设计称"CLI 无法传入 keyring"，但该能力在本轮已经落地
-   （见 PR "Gate hardware check on manifest authenticity"）。设计针对的是一个已消失的缺口。
+   （见 [#23](https://github.com/oratis/Andromeda/pull/23)
+   "Gate hardware check on manifest authenticity"，`946192c`）。
+   设计针对的是一个已消失的缺口。
 2. **会作废所有现存签名**：新规范化方案默认套用到没有 `canon` 字段的旧签名上，
    而现有 `ManifestSignature` 只有两个字段——**方向刚好反了**。
 3. **"零签名扰动"是假的**：`#[serde(alias)]` 只保住**解析**，保不住**签名字节**；
@@ -114,8 +118,10 @@ CI 超时预算与 `/dev/kvm` 断言、nightly。
 6. **必需健康门重新引入它要防的离线回滚**：把"存在 failed unit"判红，
    而离线机器上 `NetworkManager-wait-online.service` 本就会超时失败 →
    **离线笔记本被自动回滚**。
-7. **发布 `:edge` 反而是安全倒退**：今天该 tag 悬空，远程 `bootc upgrade`
-   **fail-closed**；在强制签名落地前把它变成可写的活 tag，等于把一个安全默认换成风险。
+7. **发布 `:edge` 反而是安全倒退**：本仓库把该引用记录为**预留、在签名发布流水线
+   建立前不应依赖**（CI 用本地 OCI archive 验证更新，见
+   `docs/development/installable-preview.md`）；在强制签名落地前把它变成可写的活 tag，
+   等于把这个文档化的保守默认换成真实的供应链暴露面。
 8. **GRUB 计数器安全网静默可选**：以 `if [ -f ]` 软跳过缺失单元，
    而这些单元historically 在独立子包中——最该兜底的失败恰好不被覆盖。
 
@@ -125,7 +131,7 @@ CI 超时预算与 `/dev/kvm` 断言、nightly。
 - 故障注入的计时窗口必须对齐**被注入的真实阶段**，并先证明该窗口被正确测量；
 - 预算数字要与 harness 内部 deadline **在同一处推导**，且有守卫断言；
 - 健康检查必须区分"**服务失败**"与"**本机就没有该条件**"（离线、无显示器、CI）；
-- 在强制验签存在**之前**，不要把 fail-closed 的悬空引用变成可写 tag。
+- 在强制验签存在**之前**，不要把文档明言"仅预留、不应依赖"的引用变成可写 tag。
 
 ## 4. OS 开发与游戏闭环（os-closed-loops）
 
@@ -144,7 +150,9 @@ CI 超时预算与 `/dev/kvm` 断言、nightly。
 
 ### 重做必须满足
 
-- 任何新增配置文件必须先确认**格式合法**（本仓库已有守卫会因此失败）；
+- 任何新增配置文件必须先确认**格式合法**（设计自带的守卫会因此失败；本仓库目前
+  没有配置文件格式守卫，CI 只跑 `test-installer-platform-guard.sh` 与
+  `test-containerfile-layer-budget.sh`）；
 - 在 `runuser` 环境下驱动 rootless 容器前，先证明 subuid/session 条件成立；
 - 超时改动必须**同时**覆盖 unit、`test-install.sh` 与 GCP wrapper；
 - 开发容器要有**更新路径**，不能把"永不变化"当卖点。
