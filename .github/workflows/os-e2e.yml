@@ -54,7 +54,8 @@ jobs:
 
       - name: Validate scripts
         run: |
-          shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
+          shellcheck os/scripts/*.sh os/scripts/lib/*.sh os/installer/*.sh \
+            os/files/usr/libexec/*
           os/scripts/test-installer-platform-guard.sh
           # Static Containerfile layer-COUNT floor only; no image exists yet.
           # The layer-SIZE budget runs post-build below against real history.
