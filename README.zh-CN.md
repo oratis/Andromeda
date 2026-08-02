@@ -686,6 +686,9 @@ HCM 是一份声明 selector、requirements、kernel channel、artifacts 与 evi
   多租户、Task Center 图形界面。
 
 
+完整的信任边界分析与已知未修攻击面见
+[docs/andromeda-threat-model.md](./docs/andromeda-threat-model.md)。
+
 安全问题请阅读 [SECURITY.md](./SECURITY.md)。涉及权限边界、凭据泄露、文件系统逃逸、
 任务策略绕过、不安全更新/恢复、固件或破坏性硬件操作的未修复漏洞，
 **请勿开公开 issue**，改走 GitHub Security Advisories。
