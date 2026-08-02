@@ -34,6 +34,7 @@ jobs:
       - run: cargo test --workspace --locked
       - run: os/scripts/test-installer-platform-guard.sh
       - run: os/scripts/test-containerfile-layer-budget.sh
+      - run: os/scripts/test-ci-timeout-budget.sh
 
   platform:
     name: Platform probe (${{ matrix.os }})

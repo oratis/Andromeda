@@ -271,9 +271,20 @@ BIOS/EC/TB/PD/SSD 固件 + 设备 ID + 镜像 digest；但 schema 的 selector �
 
 ### 4.4 CI 时间预算不自洽
 
-job 上限 `timeout-minutes: 150`，但 `test-gcp-nested.sh` 内部超时加总为 100 + 60 + 30 =
-**190 分钟**；`test-install.sh` 单独就允许 45m install + 2700s boot ≈ 90m。且两个
-harness 无 `/dev/kvm` 即硬失败，而仓库**没有任何 nightly/scheduled 触发**。
+> **本节初稿有一处口径错误，已更正。** 初稿把 `test-gcp-nested.sh` 的 100+60+30=190
+> 分钟与 job 的 `timeout-minutes: 150` 直接对比。二者不是同一条执行路径：GCP wrapper
+> 由算子在 GCP VM 上手动运行，受实例 `--max-run-duration` 约束，**从不被任何 workflow
+> 调用**。该对比不成立。
+
+真正的问题在 **GitHub job 自身**：把它实际执行的各步 deadline 相加——固定开销 15m +
+ISO 构建（**无内层 timeout**，只受 job 约束）+ install（`timeout 45m` qemu + 2700s
+生命周期 deadline = 91m）+ 矩阵（3 profile × 600s = 30m）——最坏情况约 **181 分钟**，
+**超过 150 分钟的 job 上限**。job 被外层超时杀死时证据上传步骤不会执行，运行只报
+"cancelled" 且没有串口日志，是整条流水线最难诊断的失败形态。
+
+`/dev/kvm` 断言**已存在**（`test-install.sh` 与 `test-hardware-matrix.sh` 均在缺少
+KVM 时硬失败，需显式 `ANDROMEDA_ALLOW_TCG=1` 才回退）。仓库确实**没有任何
+nightly/scheduled 触发**。
 
 ### 4.5 文档内部不一致
 

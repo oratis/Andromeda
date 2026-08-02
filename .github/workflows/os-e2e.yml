@@ -2,6 +2,13 @@ name: Installable OS
 
 on:
   workflow_dispatch:
+  schedule:
+    # The job is path-filtered, so nothing re-exercises it when the inputs
+    # it does not watch move: the unpinned fedora-bootc:44 base tag, the
+    # Fedora package set, and the hosted runner image. A nightly run turns
+    # those into a dated failure instead of a surprise during the next
+    # os/** change.
+    - cron: "17 4 * * *"
   push:
     branches:
       - main
@@ -30,7 +37,13 @@ jobs:
   install-update-rollback:
     name: UEFI install, first boot, update, and rollback
     runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # Must contain the harness's own step deadlines, which are checked by
+    # os/scripts/test-ci-timeout-budget.sh. Raising the job budget is the
+    # right lever rather than shortening a step: when the job is killed
+    # mid-step the evidence upload never runs and the failure reports as
+    # "cancelled" with no serial log. The inner `timeout` calls still bound
+    # each step, so a hung run fails fast *and* uploads its evidence.
+    timeout-minutes: 195
     steps:
       # Pinning policy: first-party actions/* are pinned to major tags;
       # third-party actions are pinned to a full commit SHA.
@@ -56,6 +69,7 @@ jobs:
         run: |
           shellcheck os/scripts/*.sh os/installer/*.sh os/files/usr/libexec/*
           os/scripts/test-installer-platform-guard.sh
+          os/scripts/test-ci-timeout-budget.sh
           # Static Containerfile layer-COUNT floor only; no image exists yet.
           # The layer-SIZE budget runs post-build below against real history.
           ANDROMEDA_LAYER_BUDGET_MODE=count \
