@@ -1,6 +1,7 @@
 //! Local HTTP API for the Andromeda task control plane.
 
 pub mod auth;
+mod wire;
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -20,6 +21,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 pub use auth::{AuthError, Authenticator};
+use wire::{EvaluationReportView, TaskListingView, TaskView};
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -244,15 +246,15 @@ async fn create_task(
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let record = run_blocking(&state, move |service| service.create(request)).await?;
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(record)?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(TaskView::from(&record))?),
+    ))
 }
 
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let listing = run_blocking(&state, TaskService::list_detailed).await?;
-    Ok(Json(json!({
-        "tasks": serde_json::to_value(listing.records)?,
-        "warnings": serde_json::to_value(listing.warnings)?,
-    })))
+    Ok(Json(serde_json::to_value(TaskListingView::from(&listing))?))
 }
 
 async fn get_task(
@@ -261,7 +263,7 @@ async fn get_task(
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
     let record = run_blocking(&state, move |service| service.get(task_id)).await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 async fn grant_capabilities(
@@ -274,7 +276,7 @@ async fn grant_capabilities(
         service.grant_capabilities(task_id, request)
     })
     .await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 async fn record_outcome(
@@ -287,7 +289,7 @@ async fn record_outcome(
         service.record_outcome(task_id, request)
     })
     .await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 async fn evaluate_task(
@@ -297,7 +299,9 @@ async fn evaluate_task(
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
     let report = run_blocking(&state, move |service| service.evaluate(task_id, &request)).await?;
-    Ok(Json(serde_json::to_value(report)?))
+    Ok(Json(serde_json::to_value(EvaluationReportView::from(
+        &report,
+    ))?))
 }
 
 async fn transition_task(
@@ -307,7 +311,7 @@ async fn transition_task(
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
     let record = run_blocking(&state, move |service| service.transition(task_id, request)).await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 fn parse_task_id(value: &str) -> Result<TaskId, ApiError> {
