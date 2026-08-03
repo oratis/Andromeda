@@ -21,5 +21,21 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Connected mode (`--connect`) speaks HTTP/1.1 to andromeda-taskd over a
+# loopback socket using `std::net` only. No HTTP client crate is pulled in on
+# purpose: hyper's `client` feature adds `want` and `try-lock` to the lockfile
+# and would make this one-shot CLI async for a single bounded request. See the
+# module docs in `src/taskd.rs`.
+
+[dev-dependencies]
+# The connected-mode tests run taskd's real router on a real loopback socket,
+# so they exercise the bytes this client puts on the wire (the Authorization
+# header included) rather than a stub that could agree with a wrong client.
+# Every entry below is already in the lockfile, so this adds no package.
+andromeda-taskd.workspace = true
+axum.workspace = true
+tempfile = "3.20.0"
+tokio.workspace = true
+
 [lints]
 workspace = true

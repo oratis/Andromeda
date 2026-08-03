@@ -444,13 +444,36 @@ stateDiagram-v2
 
 ## CLI 参考
 
-全局参数：`--state-dir <PATH>`（环境变量 `ANDROMEDA_STATE_DIR`，默认 `.andromeda/state`）。
+每条 `andromeda task` 命令都必须说明**操作哪一份任务**，没有默认值：
+
+| 全局参数 | 环境变量 | 作用对象 |
+|---|---|---|
+| `--connect <URL>` | `ANDROMEDA_TASKD_URL` | 运行中的 `andromeda-taskd`，走其 HTTP API——装机后的单一真相源 |
+| `--state-dir <PATH>` | `ANDROMEDA_STATE_DIR` | 在本进程内直接打开的任务 store，不经过守护进程 |
+| `--auth-token-file <PATH>` | `ANDROMEDA_AUTH_TOKEN_FILE` | 仅用于 `--connect`：taskd 本地 bearer 令牌文件。不给时按序取 `/run/andromeda-taskd/token`、`.andromeda/taskd-token` 中先存在的那个 |
+
+两者互斥：都不给则报错并同时给出两条命令，都给也报错且**不设优先级**（替调用方选一个正是要改掉
+的习惯），并提示这两个值可能来自各自的环境变量。这是刻意的：旧版默认打开 cwd 下的 `.andromeda/state`，
+而装机后的 `andromeda-taskd` 把记录放在 `/var/lib/andromeda-taskd/state`（systemd `DynamicUser`、
+`0700`）——于是 `andromeda task list` 打开的是**另一个空的、且在此处根本读不到的** store，唯一的
+症状是一个与"确实没有任务"无法区分的空列表。每条 task 命令还会把目标打到 stderr（stdout 仍是纯
+JSON）：
+
+```console
+$ andromeda --state-dir .andromeda/state task list
+andromeda task: reading the local task store at /home/you/project/.andromeda/state (in process;
+this is NOT andromeda-taskd's store — pass --connect <URL> for the daemon's tasks)
+[]
+```
+
+**没有任何接受令牌值本身的开关或环境变量**：`argv` 可被本机任意进程通过 `/proc` 读到。`--connect`
+只接受回环地址，因为请求携带该令牌；非回环 URL 在发出任何字节之前就被拒绝。
 
 | 命令 | 作用 |
 |---|---|
 | `andromeda task create-inspection <PATH> [--requested-by <ACTOR>]` | 创建只读目录检查计划并显式授予其范围 |
-| `andromeda task list` | 列出全部持久化任务记录 |
-| `andromeda task show <TASK_ID>` | 显示单个任务记录 |
+| `andromeda task list` | 列出持久化任务。连接模式返回 taskd 的**摘要**（无 plan、无事件体），本地模式打印完整记录 |
+| `andromeda task show <TASK_ID> [--events <N>]` | 显示单个任务记录。连接模式返回 taskd 的有界事件窗口并报告被截断了多少历史；`--events` 用于放宽窗口，仅适用于 `--connect` |
 | `andromeda task evaluate <TASK_ID> [--isolation <LEVEL>] [--confirm-external]` | 只评估策略，不执行任何动作 |
 | `andromeda task record-outcome <TASK_ID> --action-id <ID> --status <STATUS> --evidence <TEXT> --expected-revision <N>` | 记录单个 action 的执行结果与证据（`--evidence` 可重复给出多条） |
 | `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | 带乐观并发的受检状态转换 |

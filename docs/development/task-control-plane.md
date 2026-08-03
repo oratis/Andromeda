@@ -158,6 +158,76 @@ Authorization: Bearer <令牌>
 真正的确认代理（把参数摘要绑定到用户确认，防止批准后调包）属于 host broker 的职责，
 见下方"明确未实现"。
 
+## CLI 的两种模式（连接守护进程 / 本地 store）
+
+`andromeda task` 必须**显式**说明操作哪一份任务，二选一，没有默认值：
+
+| 模式 | 选项 | 读到什么 |
+|---|---|---|
+| 连接守护进程 | `--connect <URL>`（`ANDROMEDA_TASKD_URL`） | 走上表的 HTTP API，任务真相由 `taskd` 单点持有 |
+| 本地 store | `--state-dir <PATH>`（`ANDROMEDA_STATE_DIR`） | 在本进程内直接打开 `FileTaskStore`，不经过任何守护进程 |
+
+都不给就直接拒绝执行并把两条命令都打出来；两个都给同样拒绝，且**不设优先级**——替调用方选一个，
+正是这次要改掉的习惯。该冲突不用 clap 的 `conflicts_with`：clap 把环境变量提供的值也算作"已给
+出"，于是一个 export 了 `ANDROMEDA_STATE_DIR` 的开发者只敲了 `--connect` 却被告知"不能与
+--state-dir 同用"。现在的报错会把两个值都列出来，并指出它们可能来自这两个环境变量。
+
+**为什么删掉默认值。** 旧版 CLI 默认打开 cwd 下的 `.andromeda/state`，而装机后 `taskd` 的
+state 在 `/var/lib/andromeda-taskd/state`，由 systemd `DynamicUser` 以 `0700` 持有。于是普通
+用户执行 `andromeda task list` 打开的是**另一个空 store**，而且因权限**根本读不到** taskd 那
+一份——唯一的症状是一个空列表，看起来和"确实没有任务"一模一样（架构评审 #5）。把选择变成必填，
+这种沉默就不可表示了；这与本仓库其余"把约定变成机制"的做法一致（`Authenticator` 没有匿名变体、
+`ensure_loopback_bind` 在启动时拒绝、`hardware check` 直接拒绝危险组合）。
+
+**每条 task 命令都会先在 stderr 打印目标**，因此即使选对了模式，也不存在"看不出读的是哪一份"
+的情况（stdout 仍只有 JSON，`| jq` 不受影响）：
+
+```text
+andromeda task: reading andromeda-taskd at http://127.0.0.1:7777 (token /run/andromeda-taskd/token)
+andromeda task: reading the local task store at /home/you/.andromeda/state (in process; this is
+NOT andromeda-taskd's store — pass --connect <URL> for the daemon's tasks)
+```
+
+### 连接模式的鉴权
+
+CLI 只从**文件**读取 bearer 令牌：`--auth-token-file`（`ANDROMEDA_AUTH_TOKEN_FILE`）。不给时按
+顺序查找 `/run/andromeda-taskd/token`（镜像内的路径）与 `.andromeda/taskd-token`（手工启动的
+守护进程的默认值），并在 banner 里报告实际用的是哪一个。
+
+**没有任何接受令牌值本身的开关或环境变量**：`argv` 可以被本机任意进程通过 `/proc` 读到，那正好
+是 `0700` 运行目录要挡住的东西。`os/files/usr/libexec/andromeda-ci-verify` 确实把令牌传给了
+`curl` 的命令行，并在注释里写明为什么**只有那里**可以这么做（一次性 CI 虚机、无交互用户、SSH
+关闭）——用户会跑的命令不适用该豁免。
+
+令牌文件通常只有服务账号与 root 可读，所以装机后的正常用法是 `sudo andromeda --connect ...`。
+读不到时 CLI 直接说明这一点（`PermissionDenied` 会附上"这是设计中的边界，不是配置错误，请用
+sudo"），而不是把 IO 错误原样抛出。
+
+`--connect` 只接受回环地址（`localhost` 与字面回环 IP）。这不只是复述服务端的 Host 校验：指向
+外部主机意味着把本地令牌发给对方，所以在**发出任何字节之前**就拒绝。
+
+### 连接模式如何呈现"读取形状与事件上界"
+
+CLI 不假装自己拿到了完整历史：
+
+- `task list` 打印的就是 `GET /v1/tasks` 的**摘要**（无 plan、无事件体），并在 stderr 提示要历史
+  就去读具体某个任务；本地模式打印的是完整记录（它是库调用，不是 API 响应），banner 已经说明了
+  当前是哪一种。
+- `task show` 走 `GET /v1/tasks/{id}`，默认拿到最近 50 条；返回条数少于 `event_count` 时在
+  stderr 打印 `showing 50 of 137 events; pass --events 137 for the rest`。总数超过硬上限 1000
+  时改为说明"最老的 N 条通过 API 根本取不到"，而不是建议一个会被静默钳制的 `--events` 值。
+- `--events <n>` 只属于连接模式；本地模式传它会被拒绝（本地读没有窗口可设），而不是被悄悄忽略。
+
+CLI 复述的两个常量（令牌路径、事件上限）由 `andromeda-cli` 的单元测试对
+`andromeda_taskd::auth::SYSTEM_TOKEN_PATH` 与 `andromeda_taskd::MAX_EVENT_LIMIT` 断言相等，
+不会漂移。
+
+### 传输层
+
+连接模式用 `std::net` 手写的阻塞 HTTP/1.1 客户端，**没有引入任何 HTTP crate**：`hyper` 的
+`client` feature 会给 lockfile 添加 `want` 与 `try-lock`，还会为了一次回环请求把这个一次性 CLI
+变成 async。请求都是小 JSON，响应由上面的 wire 契约天然定界，因此不值得这个代价。
+
 ## 持久化
 
 - 每个 task revision 一个格式化 JSON 文件；每次写入后做 **compaction**，只保留最新 revision 文件（详见下）；
@@ -196,6 +266,9 @@ Authorization: Bearer <令牌>
 - rollback/compensation executor；
 - **capability 签发方**：验签、keyring 与 fail-closed 拒绝已实现，但**没有任何组件签发 capability**。在受信宿主组件持有私钥（且调用方够不到）之前，签名只证明"某人签过"，不证明"调用方无权自签"；
 - 用户身份、远程认证和多租户：本地 bearer 令牌是**单一共享秘密**，只区分"服务账号/root"与"其他本地用户"，不能区分多个调用方，因此还不能作为策略评估的 `subject`；
+- **本地 store 与守护进程之间的迁移**：CLI 现在可以连接 `taskd`（单一真相源），也可以打开本地
+  store，但没有任何工具把一份本地 store 导入守护进程，两者也不会同步。它们仍是两份数据，只是
+  不再可能在不知情的情况下读错；
 - Task Center 图形界面。
 
 在这些能力实现前，`taskd` 只能作为 loopback 开发服务。

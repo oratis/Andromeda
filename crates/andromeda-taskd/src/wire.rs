@@ -47,7 +47,7 @@ use uuid::Uuid;
 /// edges, one outcome per action) so the common case is not truncated at all,
 /// while capping the pathological one. Callers that need more ask for it
 /// explicitly and learn the total from `event_count`.
-pub(crate) const DEFAULT_EVENT_LIMIT: usize = 50;
+pub const DEFAULT_EVENT_LIMIT: usize = 50;
 
 /// Hard ceiling on `?events=`, whatever the caller asks for.
 ///
@@ -55,7 +55,7 @@ pub(crate) const DEFAULT_EVENT_LIMIT: usize = 50;
 /// rejecting, and `event_count` still reports the true total, so a caller can
 /// always tell that more history exists. It bounds the response even when the
 /// caller is the one being unreasonable.
-pub(crate) const MAX_EVENT_LIMIT: usize = 1_000;
+pub const MAX_EVENT_LIMIT: usize = 1_000;
 
 /// One task as the API presents it.
 ///

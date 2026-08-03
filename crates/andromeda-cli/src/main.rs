@@ -1,3 +1,5 @@
+mod taskd;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -23,13 +25,44 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[derive(Debug, Parser)]
 #[command(name = "andromeda", about = "Andromeda developer control plane")]
 struct Cli {
+    /// Read and drive the tasks of a running andromeda-taskd over its HTTP
+    /// API, for example `http://127.0.0.1:7777`.
+    ///
+    /// This is the mode that matches an installed system: the daemon owns
+    /// `/var/lib/andromeda-taskd/state` under a systemd `DynamicUser`, so its
+    /// records are not merely elsewhere, they are unreadable to anyone else.
+    /// Only loopback endpoints are accepted, because the request carries the
+    /// local bearer token.
+    ///
+    /// Not a clap `conflicts_with = "state_dir"`: clap counts an
+    /// environment-supplied value as present, so a developer who exports
+    /// `ANDROMEDA_STATE_DIR` would be told that `--connect` "cannot be used
+    /// with --state-dir" after typing only `--connect`. The conflict is
+    /// reported by [`resolve_task_target`] instead, which can name the
+    /// variables as the likely source.
+    #[arg(long, value_name = "URL", env = "ANDROMEDA_TASKD_URL", global = true)]
+    connect: Option<String>,
+    /// Open a task store directly, in process, with no daemon involved.
+    ///
+    /// Useful for development and for inspecting a store by hand. It is a
+    /// *different* set of tasks from the daemon's unless the path happens to be
+    /// the daemon's own state directory and this process can read it.
+    #[arg(long, value_name = "PATH", env = "ANDROMEDA_STATE_DIR", global = true)]
+    state_dir: Option<PathBuf>,
+    /// File holding andromeda-taskd's local bearer token; only meaningful with
+    /// `--connect`.
+    ///
+    /// Defaults to the first of `/run/andromeda-taskd/token` (what the shipped
+    /// unit uses) and `.andromeda/taskd-token` (what a hand-started daemon
+    /// uses) that exists. There is deliberately no flag or variable that takes
+    /// the token *value*: `argv` is world-readable through `/proc`.
     #[arg(
         long,
-        env = "ANDROMEDA_STATE_DIR",
-        default_value = ".andromeda/state",
+        value_name = "PATH",
+        env = "ANDROMEDA_AUTH_TOKEN_FILE",
         global = true
     )]
-    state_dir: PathBuf,
+    auth_token_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -57,9 +90,30 @@ enum TaskCommand {
         requested_by: String,
     },
     /// List all durable task records.
+    ///
+    /// Connected mode lists what `GET /v1/tasks` returns: **summaries** with
+    /// counts and no event bodies. Local mode prints whole records, because it
+    /// reads them out of the store directly. The banner on stderr says which
+    /// one you got.
     List,
     /// Show one task record.
-    Show { task_id: String },
+    Show {
+        task_id: String,
+        /// How many of the most recent events to ask taskd for. Connected mode
+        /// only: a local store read is unbounded because it is a library call,
+        /// not an API response.
+        ///
+        /// Without it the daemon returns its own default window and the CLI
+        /// reports how much history was left behind.
+        ///
+        /// Not a clap `requires = "connect"`: `--connect` is a global argument,
+        /// and clap only satisfies `requires` when the required argument
+        /// appears at the *same* level, so that would reject the natural
+        /// `andromeda --connect <URL> task show <ID> --events <N>`. The local
+        /// path refuses it instead.
+        #[arg(long, value_name = "N")]
+        events: Option<usize>,
+    },
     /// Evaluate policy without executing any action.
     Evaluate {
         task_id: String,
@@ -382,22 +436,176 @@ impl From<CliTaskState> for TaskState {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// Which set of tasks a `task` subcommand acts on, decided before anything is
+/// opened or connected.
+///
+/// There is no third option and no default. Architecture review #5 records what
+/// a default cost: the CLI opened `.andromeda/state` under the working
+/// directory while the installed daemon kept its records in
+/// `/var/lib/andromeda-taskd/state` under a `DynamicUser` at mode 0700, so
+/// `andromeda task list` on a real machine printed an empty list that looked
+/// exactly like "there are no tasks". Requiring the choice makes that
+/// particular silence unreachable; naming the resolved target on every command
+/// makes any remaining confusion visible.
+#[derive(Debug, PartialEq, Eq)]
+enum TaskTargetChoice {
+    Local(PathBuf),
+    Connected {
+        url: String,
+        token_file: Option<PathBuf>,
+    },
+}
+
+/// Resolves the mode from the two flags, without touching the filesystem or the
+/// network, so every arm is directly testable.
+fn resolve_task_target(
+    connect: Option<String>,
+    state_dir: Option<PathBuf>,
+    auth_token_file: Option<PathBuf>,
+) -> Result<TaskTargetChoice, String> {
+    match (connect, state_dir) {
+        // Naming both is a contradiction, and there is no sane precedence to
+        // pick: silently preferring one would reintroduce the very thing this
+        // command refuses to do, which is decide for the caller which set of
+        // tasks they meant. Either value may have come from the environment,
+        // so the message says so rather than insisting the caller typed it.
+        (Some(url), Some(state_dir)) => Err(format!(
+            "--connect {url} and --state-dir {} name two different sets of tasks; pass exactly \
+             one. Either value can also come from the environment, so check \
+             ANDROMEDA_TASKD_URL and ANDROMEDA_STATE_DIR if you did not type both",
+            state_dir.display()
+        )),
+        (Some(url), None) => Ok(TaskTargetChoice::Connected {
+            url,
+            token_file: auth_token_file,
+        }),
+        (None, Some(state_dir)) => {
+            // Silently ignoring an input the caller went out of their way to
+            // supply is how the two-store confusion started; say so instead.
+            if let Some(path) = auth_token_file {
+                return Err(format!(
+                    "--auth-token-file {} only applies to --connect: a local store is opened \
+                     directly and authenticates nobody. Drop it (or unset \
+                     ANDROMEDA_AUTH_TOKEN_FILE), or pass --connect <URL> to talk to the daemon",
+                    path.display()
+                ));
+            }
+            Ok(TaskTargetChoice::Local(state_dir))
+        }
+        (None, None) => Err(format!(
+            "choose which tasks to act on: --connect <URL> (ANDROMEDA_TASKD_URL) drives a \
+             running andromeda-taskd, and --state-dir <PATH> (ANDROMEDA_STATE_DIR) opens a task \
+             store in this process.\n\nThere is no default. An installed system keeps its tasks \
+             in /var/lib/andromeda-taskd/state, owned by the daemon's DynamicUser and readable \
+             by nobody else, so a defaulted local store answered `task list` with an empty list \
+             that meant \"you are looking at the wrong store\", not \"there are no tasks\".\n\n\
+             On an installed system:   andromeda --connect http://127.0.0.1:{DEFAULT_TASKD_PORT} \
+             task list   (as root, for the token)\nFor local development:     andromeda \
+             --state-dir .andromeda/state task list"
+        )),
+    }
+}
+
+/// Port used in the guidance above; `andromeda-taskd`'s own `--listen` default.
+const DEFAULT_TASKD_PORT: u16 = 7777;
+
+/// What the CLI acts on once the choice has been carried out.
+enum TaskTarget {
+    Local {
+        service: TaskService,
+        state_dir: PathBuf,
+    },
+    Connected(taskd::Client),
+}
+
+impl TaskTarget {
+    fn open(choice: TaskTargetChoice) -> Result<Self, Box<dyn std::error::Error>> {
+        match choice {
+            TaskTargetChoice::Local(state_dir) => {
+                let store = FileTaskStore::open(&state_dir)?;
+                // The store is reported by its absolute path, because the whole
+                // failure being fixed here is a relative path resolving
+                // somewhere the reader did not expect.
+                let state_dir = std::fs::canonicalize(&state_dir).unwrap_or(state_dir);
+                Ok(Self::Local {
+                    // A local store has no daemon, no network, and no caller to
+                    // authenticate: whoever runs this can already write the
+                    // state directory. Requiring issuer signatures here would
+                    // protect nothing the filesystem does not already decide,
+                    // so the permissive posture is named rather than pretending
+                    // to a guarantee it cannot make.
+                    service: TaskService::new(
+                        store,
+                        PolicyEngine::default(),
+                        CapabilityAdmission::unsigned_for_development(),
+                    ),
+                    state_dir,
+                })
+            }
+            TaskTargetChoice::Connected { url, token_file } => {
+                let endpoint = taskd::Endpoint::parse(&url)?;
+                Ok(Self::Connected(taskd::Client::connect(
+                    endpoint,
+                    token_file.as_deref(),
+                )?))
+            }
+        }
+    }
+}
+
+/// The one line printed to stderr before every `task` subcommand's output.
+///
+/// stderr, not stdout, so `andromeda task list | jq` still sees only JSON. An
+/// empty result is now always accompanied by the identity of the thing that was
+/// empty.
+fn target_banner(target: &TaskTarget) -> String {
+    match target {
+        TaskTarget::Local { state_dir, .. } => format!(
+            "reading the local task store at {} (in process; this is NOT andromeda-taskd's \
+             store — pass --connect <URL> for the daemon's tasks)",
+            state_dir.display()
+        ),
+        TaskTarget::Connected(client) => format!(
+            "reading andromeda-taskd at {} (token {})",
+            client.endpoint().url(),
+            client.token_path().display()
+        ),
+    }
+}
+
+/// Runs the CLI, reporting a failure as a *readable* message.
+///
+/// `fn main() -> Result<_, _>` prints the error's `Debug`, so a message built
+/// from a `String` arrives wrapped in quotes with its newlines escaped. The
+/// errors here — above all the one that explains the two task stores — exist to
+/// be read, so `main` prints `Display` and walks the `source()` chain, the same
+/// way `andromeda-taskd`'s entry point does.
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            let mut source = error.source();
+            while let Some(cause) = source {
+                eprintln!("  caused by: {cause}");
+                source = cause.source();
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.command {
         Command::Task { command } => {
-            // The developer CLI drives a local store directly, with no daemon,
-            // no network, and no caller to authenticate: whoever runs it can
-            // already write the state directory. Requiring issuer signatures
-            // here would protect nothing the filesystem does not already
-            // decide, so it names the permissive posture explicitly rather
-            // than pretending to a guarantee it cannot make.
-            let service = TaskService::new(
-                FileTaskStore::open(cli.state_dir)?,
-                PolicyEngine::default(),
-                CapabilityAdmission::unsigned_for_development(),
-            );
-            handle_task(&service, command)?;
+            let choice = resolve_task_target(cli.connect, cli.state_dir, cli.auth_token_file)?;
+            let target = TaskTarget::open(choice)?;
+            eprintln!("andromeda task: {}", target_banner(&target));
+            match &target {
+                TaskTarget::Local { service, .. } => handle_task(service, command)?,
+                TaskTarget::Connected(client) => handle_task_connected(client, command)?,
+            }
         }
         Command::Hardware { command } => handle_hardware(command)?,
     }
@@ -546,7 +754,18 @@ fn handle_task(
             print_json(&service.create(request)?)?;
         }
         TaskCommand::List => print_json(&service.list()?)?,
-        TaskCommand::Show { task_id } => {
+        TaskCommand::Show { task_id, events } => {
+            // Refused rather than ignored: an `--events 5` that quietly
+            // returned every event would tell the caller the opposite of the
+            // truth about how much history they are looking at.
+            if events.is_some() {
+                return Err(
+                    "--events applies to --connect only: it asks taskd for a window of \
+                            its bounded event history, and a local store read returns the whole \
+                            record, with no window to set"
+                        .into(),
+                );
+            }
             print_json(&service.get(TaskId::from_str(&task_id)?)?)?;
         }
         TaskCommand::Evaluate {
@@ -570,26 +789,10 @@ fn handle_task(
             expected_revision,
             actor,
         } => {
-            let now = Utc::now();
-            let outcome = ActionOutcome {
-                action_id: ActionId::from_str(&action_id)?,
-                status: status.into(),
-                started_at: now,
-                finished_at: now,
-                evidence: evidence
-                    .into_iter()
-                    .map(|summary| Evidence {
-                        kind: "operator-assertion".into(),
-                        summary,
-                        attributes: BTreeMap::new(),
-                    })
-                    .collect(),
-                error: None,
-            };
             print_json(&service.record_outcome(
                 TaskId::from_str(&task_id)?,
                 RecordOutcomeRequest {
-                    outcome,
+                    outcome: operator_outcome(&action_id, status, evidence)?,
                     actor,
                     expected_revision,
                 },
@@ -614,6 +817,140 @@ fn handle_task(
         }
     }
     Ok(())
+}
+
+/// Runs one `task` subcommand against a running daemon.
+///
+/// Every arm posts or gets the same request types the local path builds, so the
+/// two modes cannot drift into two different contracts: `taskd` deserializes
+/// exactly these structs.
+fn handle_task_connected(
+    client: &taskd::Client,
+    command: TaskCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        TaskCommand::CreateInspection { path, requested_by } => {
+            let request = create_inspection_request(&path, &requested_by)?;
+            print_json(&client.post("/v1/tasks", &request)?)?;
+        }
+        TaskCommand::List => {
+            let listing = client.get("/v1/tasks")?;
+            print_json(&listing)?;
+            eprintln!(
+                "andromeda task: taskd lists summaries only — no plan and no events. Read one \
+                 task with `task show <TASK_ID>` for its history."
+            );
+        }
+        TaskCommand::Show { task_id, events } => {
+            let task_id = TaskId::from_str(&task_id)?;
+            let path = match events {
+                Some(events) => format!("/v1/tasks/{task_id}?events={events}"),
+                None => format!("/v1/tasks/{task_id}"),
+            };
+            let record = client.get(&path)?;
+            print_json(&record)?;
+            if let Some(note) = truncation_note(&record) {
+                eprintln!("andromeda task: {note}");
+            }
+        }
+        TaskCommand::Evaluate {
+            task_id,
+            isolation,
+            confirm_external,
+        } => {
+            let task_id = TaskId::from_str(&task_id)?;
+            let request = EvaluationRequest {
+                isolation: isolation.map(Into::into),
+                overrides: BTreeMap::new(),
+                external_side_effect_confirmed: confirm_external,
+                subject: None,
+            };
+            print_json(&client.post(&format!("/v1/tasks/{task_id}/evaluate"), &request)?)?;
+        }
+        TaskCommand::RecordOutcome {
+            task_id,
+            action_id,
+            status,
+            evidence,
+            expected_revision,
+            actor,
+        } => {
+            let task_id = TaskId::from_str(&task_id)?;
+            let request = RecordOutcomeRequest {
+                outcome: operator_outcome(&action_id, status, evidence)?,
+                actor,
+                expected_revision,
+            };
+            print_json(&client.post(&format!("/v1/tasks/{task_id}/outcomes"), &request)?)?;
+        }
+        TaskCommand::Transition {
+            task_id,
+            to,
+            expected_revision,
+            actor,
+            confirm_external,
+        } => {
+            let task_id = TaskId::from_str(&task_id)?;
+            let request = StateTransitionRequest {
+                to: to.into(),
+                actor,
+                expected_revision,
+                external_side_effect_confirmed: confirm_external,
+            };
+            print_json(&client.post(&format!("/v1/tasks/{task_id}/transition"), &request)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// Says how much event history a task read did *not* return.
+///
+/// `GET /v1/tasks/{id}` answers with a bounded window plus `event_count`, the
+/// true total. Printing the record alone would let a reader take the window for
+/// the whole history, which is the same class of mistake as taking an empty
+/// local store for an empty system. Returns `None` when nothing was withheld.
+fn truncation_note(record: &serde_json::Value) -> Option<String> {
+    let total = record.get("event_count")?.as_u64()?;
+    let shown = record.get("events")?.as_array()?.len() as u64;
+    if shown >= total {
+        return None;
+    }
+    let ceiling = taskd::MAX_EVENTS as u64;
+    if total > ceiling {
+        return Some(format!(
+            "showing {shown} of {total} events; taskd bounds a task read at {ceiling}, so the \
+             oldest {} are not reachable through the API at all",
+            total - ceiling
+        ));
+    }
+    Some(format!(
+        "showing {shown} of {total} events; pass --events {total} for the rest (taskd's ceiling \
+         is {ceiling})"
+    ))
+}
+
+/// Builds the operator-asserted outcome both modes record.
+fn operator_outcome(
+    action_id: &str,
+    status: CliOutcomeStatus,
+    evidence: Vec<String>,
+) -> Result<ActionOutcome, Box<dyn std::error::Error>> {
+    let now = Utc::now();
+    Ok(ActionOutcome {
+        action_id: ActionId::from_str(action_id)?,
+        status: status.into(),
+        started_at: now,
+        finished_at: now,
+        evidence: evidence
+            .into_iter()
+            .map(|summary| Evidence {
+                kind: "operator-assertion".into(),
+                summary,
+                attributes: BTreeMap::new(),
+            })
+            .collect(),
+        error: None,
+    })
 }
 
 fn create_inspection_request(
@@ -667,6 +1004,211 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The two mode variables clap reads from the real process environment. A
+    /// developer who exports one of them would otherwise see the parse-level
+    /// tests below fail for a reason that has nothing to do with the code.
+    fn mode_env_is_clean() -> bool {
+        ["ANDROMEDA_TASKD_URL", "ANDROMEDA_STATE_DIR"]
+            .iter()
+            .all(|name| std::env::var_os(name).is_none())
+    }
+
+    /// The finding this whole change exists for: with neither mode named, the
+    /// CLI must refuse rather than quietly open a store that is not the
+    /// daemon's.
+    #[test]
+    fn neither_mode_is_refused_with_both_options_spelled_out() {
+        let error = resolve_task_target(None, None, None)
+            .expect_err("an unnamed task store is what caused the two-universe failure");
+        for expected in [
+            "--connect",
+            "--state-dir",
+            "ANDROMEDA_TASKD_URL",
+            "ANDROMEDA_STATE_DIR",
+            "/var/lib/andromeda-taskd/state",
+            "There is no default",
+        ] {
+            assert!(error.contains(expected), "{expected} missing from: {error}");
+        }
+    }
+
+    #[test]
+    fn each_mode_resolves_to_itself() {
+        assert_eq!(
+            resolve_task_target(None, Some(PathBuf::from("/tmp/store")), None),
+            Ok(TaskTargetChoice::Local(PathBuf::from("/tmp/store")))
+        );
+        assert_eq!(
+            resolve_task_target(Some("http://127.0.0.1:7777".to_owned()), None, None),
+            Ok(TaskTargetChoice::Connected {
+                url: "http://127.0.0.1:7777".to_owned(),
+                token_file: None,
+            })
+        );
+        assert_eq!(
+            resolve_task_target(
+                Some("http://127.0.0.1:7777".to_owned()),
+                None,
+                Some(PathBuf::from("/run/andromeda-taskd/token")),
+            ),
+            Ok(TaskTargetChoice::Connected {
+                url: "http://127.0.0.1:7777".to_owned(),
+                token_file: Some(PathBuf::from("/run/andromeda-taskd/token")),
+            })
+        );
+    }
+
+    /// A token file cannot authenticate a local store, so supplying one is a
+    /// misunderstanding worth reporting rather than dropping.
+    #[test]
+    fn a_token_file_without_connect_is_refused_rather_than_ignored() {
+        let error = resolve_task_target(
+            None,
+            Some(PathBuf::from("/tmp/store")),
+            Some(PathBuf::from("/run/andromeda-taskd/token")),
+        )
+        .expect_err("a token means nothing to a local store");
+        assert!(error.contains("--auth-token-file"), "{error}");
+        assert!(error.contains("--connect"), "{error}");
+    }
+
+    /// Naming both stores is refused with neither one silently winning, and the
+    /// message points at the environment, which is where the value the caller
+    /// did not type comes from.
+    #[test]
+    fn naming_both_stores_is_refused_without_a_silent_precedence() {
+        let error = resolve_task_target(
+            Some("http://127.0.0.1:7777".to_owned()),
+            Some(PathBuf::from(".andromeda/state")),
+            None,
+        )
+        .expect_err("two different sets of tasks cannot both be the target");
+        for expected in [
+            "--connect http://127.0.0.1:7777",
+            "--state-dir .andromeda/state",
+            "ANDROMEDA_TASKD_URL",
+            "ANDROMEDA_STATE_DIR",
+        ] {
+            assert!(error.contains(expected), "{expected} missing from: {error}");
+        }
+    }
+
+    /// `--events` describes a bound the API applies; a local store read has no
+    /// such bound, so the local path refuses it instead of quietly returning
+    /// every event under a flag that asked for five.
+    #[test]
+    fn events_is_refused_by_the_local_path() {
+        let temp = tempfile::TempDir::new().expect("state dir");
+        let service = TaskService::new(
+            FileTaskStore::open(temp.path()).expect("store"),
+            PolicyEngine::default(),
+            CapabilityAdmission::unsigned_for_development(),
+        );
+        let error = handle_task(
+            &service,
+            TaskCommand::Show {
+                task_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                events: Some(5),
+            },
+        )
+        .expect_err("--events must not be silently dropped");
+        let message = error.to_string();
+        assert!(
+            message.contains("--events applies to --connect only"),
+            "{message}"
+        );
+
+        // The same command without it reaches the store, which is the real
+        // proof that the refusal is about the flag and nothing else.
+        let error = handle_task(
+            &service,
+            TaskCommand::Show {
+                task_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+                events: None,
+            },
+        )
+        .expect_err("the task does not exist");
+        assert!(!error.to_string().contains("--events"), "{error}");
+    }
+
+    /// Both orderings of the global mode flags parse, so the documented
+    /// `andromeda --connect <URL> task ...` form keeps working alongside
+    /// `andromeda task ... --connect <URL>`.
+    #[test]
+    fn the_mode_flags_are_accepted_at_either_level() {
+        if !mode_env_is_clean() {
+            return;
+        }
+        for arguments in [
+            vec![
+                "andromeda",
+                "--connect",
+                "http://127.0.0.1:7777",
+                "task",
+                "show",
+                "11111111-1111-4111-8111-111111111111",
+                "--events",
+                "100",
+            ],
+            vec![
+                "andromeda",
+                "task",
+                "show",
+                "11111111-1111-4111-8111-111111111111",
+                "--events",
+                "100",
+                "--connect",
+                "http://127.0.0.1:7777",
+            ],
+        ] {
+            let cli = Cli::try_parse_from(&arguments)
+                .unwrap_or_else(|error| panic!("{arguments:?}: {error}"));
+            assert_eq!(cli.connect.as_deref(), Some("http://127.0.0.1:7777"));
+        }
+    }
+
+    /// Whichever mode runs, the banner names the exact thing that was read, so
+    /// an empty answer can never be mistaken for "there are no tasks".
+    #[test]
+    fn the_banner_names_the_store_or_the_endpoint() {
+        let local = TaskTarget::open(TaskTargetChoice::Local(
+            std::env::temp_dir().join(format!("andromeda-cli-banner-{}", std::process::id())),
+        ))
+        .expect("open local store");
+        let banner = target_banner(&local);
+        assert!(banner.contains("local task store"), "{banner}");
+        assert!(banner.contains("andromeda-cli-banner"), "{banner}");
+        assert!(
+            banner.contains("NOT andromeda-taskd's store"),
+            "the local banner must deny being the daemon's store: {banner}"
+        );
+        if let TaskTarget::Local { state_dir, .. } = &local {
+            let _ = std::fs::remove_dir_all(state_dir);
+        }
+    }
+
+    /// A bounded task read must announce what it did not return.
+    #[test]
+    fn a_bounded_read_reports_the_history_it_did_not_return() {
+        let full = json!({"event_count": 3, "events": [1, 2, 3]});
+        assert_eq!(truncation_note(&full), None, "nothing was withheld");
+
+        let bounded = json!({"event_count": 137, "events": [1, 2]});
+        let note = truncation_note(&bounded).expect("truncation must be reported");
+        assert!(note.contains("showing 2 of 137 events"), "{note}");
+        assert!(note.contains("--events 137"), "{note}");
+
+        // Beyond the daemon's ceiling, telling the caller to ask for more would
+        // be a lie: the API clamps and those events are unreachable.
+        let beyond = json!({"event_count": 4000, "events": [1]});
+        let note = truncation_note(&beyond).expect("truncation must be reported");
+        assert!(note.contains("3000 are not reachable"), "{note}");
+        assert!(!note.contains("--events 4000"), "{note}");
+
+        // A local record carries no `event_count`, so there is nothing to say.
+        assert_eq!(truncation_note(&json!({"events": [1, 2]})), None);
+    }
 
     fn manifest_value(schema_version: &serde_json::Value) -> serde_json::Value {
         json!({
