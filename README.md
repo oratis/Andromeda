@@ -477,9 +477,13 @@ Every `andromeda task` command must name **which tasks it acts on**. There is no
 | `--state-dir <PATH>` | `ANDROMEDA_STATE_DIR` | A task store opened directly in this process, with no daemon involved |
 | `--auth-token-file <PATH>` | `ANDROMEDA_AUTH_TOKEN_FILE` | `--connect` only: the file holding taskd's local bearer token. Defaults to the first of `/run/andromeda-taskd/token` and `.andromeda/taskd-token` that exists |
 
-The two modes conflict, and naming neither is an error that prints both commands. This is
-deliberate: the CLI used to default to `.andromeda/state` under the working directory while an
-installed `andromeda-taskd` keeps its records in `/var/lib/andromeda-taskd/state` under a systemd
+Naming neither mode is an error that prints both commands; naming both is an error too, with no
+precedence between them, because picking one would be the CLI deciding which set of tasks you meant.
+Either value can arrive from the environment, so that error says so rather than insisting you typed
+it.
+
+This is deliberate: the CLI used to default to `.andromeda/state` under the working directory while
+an installed `andromeda-taskd` keeps its records in `/var/lib/andromeda-taskd/state` under a systemd
 `DynamicUser` at mode `0700` — so `andromeda task list` opened a *different, empty, and
 unreadable-from-here* store, and the only symptom was an empty list indistinguishable from "there
 are no tasks". Every task command also prints its target to stderr (stdout stays pure JSON):

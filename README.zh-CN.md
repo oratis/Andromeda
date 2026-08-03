@@ -452,7 +452,8 @@ stateDiagram-v2
 | `--state-dir <PATH>` | `ANDROMEDA_STATE_DIR` | 在本进程内直接打开的任务 store，不经过守护进程 |
 | `--auth-token-file <PATH>` | `ANDROMEDA_AUTH_TOKEN_FILE` | 仅用于 `--connect`：taskd 本地 bearer 令牌文件。不给时按序取 `/run/andromeda-taskd/token`、`.andromeda/taskd-token` 中先存在的那个 |
 
-两者互斥，都不给则报错并同时给出两条命令。这是刻意的：旧版默认打开 cwd 下的 `.andromeda/state`，
+两者互斥：都不给则报错并同时给出两条命令，都给也报错且**不设优先级**（替调用方选一个正是要改掉
+的习惯），并提示这两个值可能来自各自的环境变量。这是刻意的：旧版默认打开 cwd 下的 `.andromeda/state`，
 而装机后的 `andromeda-taskd` 把记录放在 `/var/lib/andromeda-taskd/state`（systemd `DynamicUser`、
 `0700`）——于是 `andromeda task list` 打开的是**另一个空的、且在此处根本读不到的** store，唯一的
 症状是一个与"确实没有任务"无法区分的空列表。每条 task 命令还会把目标打到 stderr（stdout 仍是纯

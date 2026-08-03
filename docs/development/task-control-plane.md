@@ -167,7 +167,10 @@ Authorization: Bearer <令牌>
 | 连接守护进程 | `--connect <URL>`（`ANDROMEDA_TASKD_URL`） | 走上表的 HTTP API，任务真相由 `taskd` 单点持有 |
 | 本地 store | `--state-dir <PATH>`（`ANDROMEDA_STATE_DIR`） | 在本进程内直接打开 `FileTaskStore`，不经过任何守护进程 |
 
-两者互斥（clap 层 `conflicts_with`），都不给就直接拒绝执行并把两条命令都打出来。
+都不给就直接拒绝执行并把两条命令都打出来；两个都给同样拒绝，且**不设优先级**——替调用方选一个，
+正是这次要改掉的习惯。该冲突不用 clap 的 `conflicts_with`：clap 把环境变量提供的值也算作"已给
+出"，于是一个 export 了 `ANDROMEDA_STATE_DIR` 的开发者只敲了 `--connect` 却被告知"不能与
+--state-dir 同用"。现在的报错会把两个值都列出来，并指出它们可能来自这两个环境变量。
 
 **为什么删掉默认值。** 旧版 CLI 默认打开 cwd 下的 `.andromeda/state`，而装机后 `taskd` 的
 state 在 `/var/lib/andromeda-taskd/state`，由 systemd `DynamicUser` 以 `0700` 持有。于是普通
