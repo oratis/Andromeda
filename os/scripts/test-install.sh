@@ -505,44 +505,34 @@ while (( SECONDS < deadline )); do
         LC_ALL=C grep -aE \
             'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
             "${BOOT_LOG_NORMALIZED}"
-        # The validator is fed the already-normalized log; it repeats the
-        # stripping because the transform is idempotent and it must stay correct
-        # if it is ever pointed at a raw log.
-        python3 - "${BOOT_LOG_NORMALIZED}" <<'PY'
-import pathlib
-import re
-import sys
-
-log = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\0", b"").decode(errors="replace")
-log = log.replace("\r", "")
-log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
-# Rejoin markers cut in half by a kernel printk sharing the UART; see
-# repair_spliced_kernel_lines in os/scripts/lib/markers.sh for the mechanism and
-# the run that exposed it. Kept in step with that function because this
-# validator must stay correct if it is ever pointed at a raw log.
-log = re.sub(r"(?<!\n)\[ *\d+\.\d+\][^\n]*\n", "", log)
-markers = [
-    "ANDROMEDA_SELINUX_LABELS_OK",
-    "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",
-    "ANDROMEDA_FIRST_BOOT_OK revision=1",
-    "ANDROMEDA_UPDATE_STAGED_OK revision=2",
-    "ANDROMEDA_DAILY_DRIVER_OK phase=updating revision=2",
-    "ANDROMEDA_UPDATE_BOOT_OK revision=2",
-    "ANDROMEDA_ROLLBACK_STAGED_OK revision=1",
-    "ANDROMEDA_DAILY_DRIVER_OK phase=rolling-back revision=1",
-    "ANDROMEDA_ROLLBACK_BOOT_OK revision=1",
-    "ANDROMEDA_E2E_OK",
-]
-failures = re.findall(r"ANDROMEDA_[A-Z0-9_]*FAILED[^\n]*", log)
-if failures:
-    raise SystemExit(f"Failure marker present: {failures}")
-counts = [log.count(marker) for marker in markers]
-if counts != [1] * len(markers):
-    raise SystemExit(f"Daily-driver markers must occur exactly once: {counts}")
-positions = [log.find(marker) for marker in markers]
-if positions != sorted(positions):
-    raise SystemExit(f"Daily-driver marker sequence invalid: {positions}")
-PY
+        # The strictest gate in the pipeline: each marker exactly once, in this
+        # order. It used to be an inline Python validator that re-implemented
+        # lib/markers.sh's NUL/CR/ANSI/printk stripping in a second language --
+        # a second copy of the transform whose FIRST copy had already drifted
+        # once (review P0 #3). The shared helper takes the log this loop has
+        # already normalized, so there is now exactly one normalizer and exactly
+        # one implementation of "exactly once and in order", which
+        # test-hardware-matrix.sh and test-gcp-nested.sh also call.
+        #
+        # The list stays here: it describes THIS harness's lifecycle, and
+        # test-ci-timeout-budget.sh counts the ANDROMEDA_DAILY_DRIVER_OK entries
+        # below to derive the guest boot count. A fourth lifecycle boot cannot
+        # be added without appearing in this list.
+        #
+        # No failure-marker check is needed here: the branch above runs first on
+        # every poll and exits on any ANDROMEDA_*_FAILED in the same file.
+        require_marker_sequence "${BOOT_LOG_NORMALIZED}" \
+            'the guest lifecycle did not produce its ten markers exactly once each in install -> first-boot -> update -> rollback order; a repeated marker means the guest re-entered a phase instead of progressing, and an out-of-order one means the state machine advanced in a way andromeda-ci-verify does not model' \
+            "ANDROMEDA_SELINUX_LABELS_OK" \
+            "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1" \
+            "ANDROMEDA_FIRST_BOOT_OK revision=1" \
+            "ANDROMEDA_UPDATE_STAGED_OK revision=2" \
+            "ANDROMEDA_DAILY_DRIVER_OK phase=updating revision=2" \
+            "ANDROMEDA_UPDATE_BOOT_OK revision=2" \
+            "ANDROMEDA_ROLLBACK_STAGED_OK revision=1" \
+            "ANDROMEDA_DAILY_DRIVER_OK phase=rolling-back revision=1" \
+            "ANDROMEDA_ROLLBACK_BOOT_OK revision=1" \
+            "ANDROMEDA_E2E_OK"
         exit 0
     fi
     # The UEFI Shell prompt is written by firmware that also emits cursor

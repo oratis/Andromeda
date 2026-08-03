@@ -131,34 +131,137 @@ require_marker() {
     exit 1
 }
 
-# require_marker_fixed <logfile> <fixed-string> <human description>
+# require_marker_sequence <logfile> <human description> <marker>...
 #
-# Fixed-string variant of require_marker: matches with --fixed-strings, so use
-# it whenever the expected marker is a literal (especially one interpolating a
-# runtime value such as scenario=${scenario}) -- with --extended-regexp an
-# unescaped interpolated value could silently change what is asserted.
-require_marker_fixed() {
+# The strictest marker check in the pipeline: every <marker> must occur in
+# <logfile> EXACTLY ONCE, and their occurrences must appear in the order given.
+#
+# Markers are matched as FIXED strings, never as regular expressions. That is
+# deliberate rather than incidental: a caller interpolates runtime values into
+# these (test-hardware-matrix.sh asserts scenario=${scenario}), and under
+# --extended-regexp an unescaped interpolated value would silently change what
+# is being asserted. Use require_marker when a pattern is genuinely wanted.
+#
+# Why exactly once AND ordered, rather than mere presence: presence cannot tell
+# a guest that completed its lifecycle apart from one that crash-looped through
+# the same phase twice, and counting alone cannot tell a real first-boot ->
+# update -> rollback progression apart from markers arriving in a nonsensical
+# order. docs/reviews/e2e-pipeline-review.md evaluation 7 records that the three
+# harnesses each checked a DIFFERENT one of these properties; this is the single
+# implementation they now share, so the strictness of one cannot drift from the
+# strictness of another.
+#
+# The marker LIST stays at the call site. It describes what that specific
+# harness boots, and test-ci-timeout-budget.sh derives the guest boot count by
+# counting the ANDROMEDA_DAILY_DRIVER_OK entries in test-install.sh's list --
+# hoisting the list in here would move that bound away from the script that
+# enforces it.
+#
+# Note the argument order: the description precedes the markers because the
+# marker list is variadic. Like require_marker, this expects an ALREADY
+# NORMALIZED log (lib/markers.sh normalize_serial_log); a marker split by serial
+# cursor-control residue or by a kernel printk sharing the UART would otherwise
+# count as zero.
+require_marker_sequence() {
     local logfile="$1"
-    local pattern="$2"
-    local description="${3:-marker ${pattern}}"
+    local description="$2"
+    shift 2
 
-    if [[ -f "${logfile}" ]] \
-        && LC_ALL=C grep --text --quiet --fixed-strings \
-            -- "${pattern}" "${logfile}"; then
+    local marker
+    local count
+    local offset
+    local raw
+    local index
+    local previous=-1
+    local counts_ok=1
+    local order_ok=1
+    local -a markers=("$@")
+    local -a counts=()
+    local -a offsets=()
+
+    if (( ${#markers[@]} == 0 )); then
+        assert_banner "${description}"
+        printf '  require_marker_sequence() was called without any markers.\n' >&2
+        exit 2
+    fi
+
+    if [[ ! -f "${logfile}" ]]; then
+        assert_banner "${description}"
+        printf '  the log file does not exist: %s\n\n' "${logfile}" >&2
+        exit 1
+    fi
+
+    for marker in "${markers[@]}"; do
+        # grep -c counts LINES, not occurrences: two markers collapsed onto one
+        # physical line by CR-stripping would count as 1 and a duplicate would
+        # go unnoticed. -o then counting the emitted matches is what makes
+        # "exactly once" mean exactly once.
+        count="$(
+            LC_ALL=C grep --text --only-matching --fixed-strings \
+                -- "${marker}" "${logfile}" 2>/dev/null | wc -l
+        )" || count=0
+        # Strip the padding BSD wc emits so the value is usable in arithmetic.
+        count="${count//[^0-9]/}"
+        counts+=("${count:-0}")
+
+        # First-occurrence byte offset, for the ordering check. Captured whole
+        # and split here rather than piped through `head`, which would close
+        # grep's stdout early and make a SIGPIPE indistinguishable from "no
+        # match" -- discarding a perfectly good offset.
+        raw="$(
+            LC_ALL=C grep --text --byte-offset --only-matching --fixed-strings \
+                --max-count=1 -- "${marker}" "${logfile}" 2>/dev/null
+        )" || raw=""
+        offset="${raw%%$'\n'*}"
+        offset="${offset%%:*}"
+        [[ "${offset}" =~ ^[0-9]+$ ]] || offset=-1
+        offsets+=("${offset}")
+    done
+
+    for index in "${!markers[@]}"; do
+        if (( 10#${counts[${index}]} != 1 )); then
+            counts_ok=0
+            continue
+        fi
+        if (( offsets[index] < previous )); then
+            order_ok=0
+        fi
+        previous="${offsets[${index}]}"
+    done
+
+    if (( counts_ok == 1 && order_ok == 1 )); then
         return 0
     fi
 
     assert_banner "${description}"
-    printf '  expected fixed string: %s\n' "${pattern}" >&2
-    printf '  in log file:           %s\n' "${logfile}" >&2
-    if [[ -f "${logfile}" ]]; then
-        printf '  last %s lines of %s:\n' \
-            "${ANDROMEDA_ASSERT_LOG_TAIL}" "${logfile}" >&2
-        tail -n "${ANDROMEDA_ASSERT_LOG_TAIL}" "${logfile}" 2>&1 \
-            | sed 's/^/    /' >&2 || true
+    if (( counts_ok == 0 )); then
+        printf '  every marker below must occur exactly once.\n' >&2
     else
-        printf '  the log file does not exist.\n' >&2
+        printf '  the markers below are present exactly once each but OUT OF ORDER.\n' >&2
     fi
+    printf '  in log file: %s\n\n' "${logfile}" >&2
+    printf '    %-5s %-9s %s\n' 'COUNT' 'AT BYTE' 'MARKER' >&2
+    local shown_offset
+    local verdict
+    for index in "${!markers[@]}"; do
+        shown_offset="${offsets[${index}]}"
+        if (( offsets[index] < 0 )); then
+            shown_offset='-'
+        fi
+        verdict=''
+        if (( 10#${counts[${index}]} == 0 )); then
+            verdict='   <== never seen'
+        elif (( 10#${counts[${index}]} > 1 )); then
+            verdict='   <== duplicated'
+        fi
+        printf '    %-5s %-9s %s%s\n' \
+            "${counts[${index}]}" "${shown_offset}" \
+            "${markers[${index}]}" "${verdict}" >&2
+    done
+    printf '\n  last %s lines of %s:\n' \
+        "${ANDROMEDA_ASSERT_LOG_TAIL}" "${logfile}" >&2
+    tail -n "${ANDROMEDA_ASSERT_LOG_TAIL}" "${logfile}" 2>&1 \
+        | sed 's/^/    /' >&2 || true
     printf '\n' >&2
     exit 1
 }

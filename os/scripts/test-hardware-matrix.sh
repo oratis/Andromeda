@@ -219,14 +219,23 @@ run_profile() {
         tail -200 "${serial_log_normalized}" >&2
         return 1
     fi
-    require_marker_fixed "${serial_log_normalized}" \
+    # Same strictness as test-install.sh's lifecycle gate, via the same helper:
+    # each marker exactly once, in order. This used to be presence-only for the
+    # hardware report and count-only for ANDROMEDA_E2E_OK, which is the
+    # strictness gap docs/reviews/e2e-pipeline-review.md evaluation 7 records.
+    #
+    # The list is short because a matrix profile boots ONE time from a disk
+    # test-install.sh already drove to state=complete:1, so this is the complete
+    # marker set such a boot can produce -- nothing here is invented. The order
+    # is guaranteed by systemd, not assumed: andromeda-hardware-report.service
+    # is Type=oneshot and Before=andromeda-ci-verify.service, so it runs to
+    # completion first, and andromeda-ci-verify runs daily-driver-verify before
+    # reaching the state case that emits ANDROMEDA_E2E_OK.
+    require_marker_sequence "${serial_log_normalized}" \
+        "scenario ${scenario} did not emit the hardware report, the daily-driver pass and the end-to-end marker exactly once each in that order; a missing scenario= means the fw_cfg tag did not reach the guest, and a duplicate means the guest rebooted into the verifier again instead of settling" \
         "ANDROMEDA_HARDWARE_REPORT_OK readiness=ready boot_critical_missing=0 scenario=${scenario}" \
-        "scenario ${scenario} booted but andromeda-hardware-report did not report readiness=ready with zero boot-critical drivers missing for this exact scenario (a scenario= mismatch means the fw_cfg tag did not reach the guest)"
-    # `grep -c` counts LINES, not occurrences: two markers collapsed onto one
-    # line by CR-stripping would count as 1. -o | wc -l counts occurrences.
-    require "scenario ${scenario} must emit ANDROMEDA_E2E_OK exactly once; more than one occurrence means the guest rebooted into the verifier again instead of settling" \
-        test "$(LC_ALL=C grep --text -o 'ANDROMEDA_E2E_OK' \
-            "${serial_log_normalized}" | wc -l)" -eq 1
+        "ANDROMEDA_DAILY_DRIVER_OK phase=complete revision=1" \
+        "ANDROMEDA_E2E_OK"
 
     kill "${qemu_pid}"
     wait "${qemu_pid}" 2>/dev/null || true
