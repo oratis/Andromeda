@@ -21,6 +21,7 @@ andromeda-core = { path = "crates/andromeda-core" }
 andromeda-hardware = { path = "crates/andromeda-hardware" }
 andromeda-policy = { path = "crates/andromeda-policy" }
 andromeda-runtime = { path = "crates/andromeda-runtime" }
+andromeda-taskd = { path = "crates/andromeda-taskd" }
 axum = "0.8.4"
 chrono = { version = "0.4.41", features = ["serde"] }
 clap = { version = "4.5.38", features = ["derive", "env"] }

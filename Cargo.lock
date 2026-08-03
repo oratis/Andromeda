@@ -28,10 +28,14 @@ dependencies = [
  "andromeda-hardware",
  "andromeda-policy",
  "andromeda-runtime",
+ "andromeda-taskd",
+ "axum",
  "chrono",
  "clap",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
