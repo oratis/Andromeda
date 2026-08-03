@@ -492,8 +492,8 @@ stateDiagram-v2
 |---|---|---|
 | `GET` | `/healthz` | 服务状态、API 版本，以及当前安全姿态：`authentication`（恒为 `bearer_token`）与 `capability_admission`（`unsigned_allowed` / `require_signed`） |
 | `POST` | `/v1/tasks` | 校验并创建任务 |
-| `GET` | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
-| `GET` | `/v1/tasks/{id}` | 读取任务 |
+| `GET` | `/v1/tasks` | 列出任务**摘要**，响应为 `{"tasks": [...], "warnings": [...]}`：id、状态、revision、intent、时间戳与各类计数，**不含事件体**；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
+| `GET` | `/v1/tasks/{id}` | 读取单个任务；默认返回**最近 50 条**事件与总数 `event_count`，`?events=<n>` 可索取更多，硬上限 1000 |
 | `POST` | `/v1/tasks/{id}/capabilities` | 给已存在任务补授权；每个新 capability 必须 `issued_to == plan.task_id` 且当前有效；带 `expected_revision` |
 | `POST` | `/v1/tasks/{id}/outcomes` | 记录单个 action 的执行结果与证据；追加 `outcome_recorded` 事件并使 revision +1。只允许在 `Running`/`Verifying` 记录，每 action 至多一条（append-only），且该 action 必须属于该计划 |
 | `POST` | `/v1/tasks/{id}/evaluate` | 评估、不执行；**逐 action** 解析隔离等级，结果作为 `evaluated` 事件追加并使 revision +1 |

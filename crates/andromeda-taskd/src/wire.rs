@@ -37,7 +37,31 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use uuid::Uuid;
 
+/// Events a single-task read returns when the caller does not ask for more.
+///
+/// `TaskRecord.events` is append-only and unbounded — every `evaluate`,
+/// `transition`, `grant`, and `outcome` adds one, and an `Evaluated` event
+/// embeds a decision per action — so a long-lived task's full history is
+/// unbounded response size. Fifty is chosen to cover the whole history of an
+/// ordinary task (create, grant, a handful of evaluations, the lifecycle
+/// edges, one outcome per action) so the common case is not truncated at all,
+/// while capping the pathological one. Callers that need more ask for it
+/// explicitly and learn the total from `event_count`.
+pub(crate) const DEFAULT_EVENT_LIMIT: usize = 50;
+
+/// Hard ceiling on `?events=`, whatever the caller asks for.
+///
+/// A ceiling, not a suggestion: it is applied by clamping rather than by
+/// rejecting, and `event_count` still reports the true total, so a caller can
+/// always tell that more history exists. It bounds the response even when the
+/// caller is the one being unreasonable.
+pub(crate) const MAX_EVENT_LIMIT: usize = 1_000;
+
 /// One task as the API presents it.
+///
+/// `events` holds only the most recent [`TaskView::bounded`] slice of the
+/// history; `event_count` is always the true total, so a truncated read is
+/// visible rather than silent.
 #[derive(Debug, Serialize)]
 pub(crate) struct TaskView<'a> {
     plan: &'a ActionPlan,
@@ -45,18 +69,84 @@ pub(crate) struct TaskView<'a> {
     revision: u64,
     capabilities: &'a [Capability],
     events: Vec<EventView<'a>>,
+    event_count: usize,
     outcomes: &'a [ActionOutcome],
 }
 
-impl<'a> From<&'a TaskRecord> for TaskView<'a> {
-    fn from(record: &'a TaskRecord) -> Self {
+impl<'a> TaskView<'a> {
+    /// Builds a view carrying at most `limit` of the *most recent* events, in
+    /// the same chronological order as the full history.
+    ///
+    /// `limit` is clamped to [`MAX_EVENT_LIMIT`] here, at the single point
+    /// where the wire response is built, so no caller path can widen it.
+    pub(crate) fn bounded(record: &'a TaskRecord, limit: usize) -> Self {
+        let limit = limit.min(MAX_EVENT_LIMIT);
+        let skipped = record.events.len().saturating_sub(limit);
         Self {
             plan: &record.plan,
             state: record.state,
             revision: record.revision,
             capabilities: &record.capabilities,
-            events: record.events.iter().map(EventView::from).collect(),
+            events: record.events[skipped..]
+                .iter()
+                .map(EventView::from)
+                .collect(),
+            event_count: record.events.len(),
             outcomes: &record.outcomes,
+        }
+    }
+}
+
+impl<'a> From<&'a TaskRecord> for TaskView<'a> {
+    /// The default read: the most recent [`DEFAULT_EVENT_LIMIT`] events.
+    fn from(record: &'a TaskRecord) -> Self {
+        Self::bounded(record, DEFAULT_EVENT_LIMIT)
+    }
+}
+
+/// One task as `GET /v1/tasks` presents it: enough to identify and triage a
+/// task, with no event bodies at all.
+///
+/// The listing used to return complete [`TaskRecord`]s, so every task's entire
+/// event history — decision sets included — was multiplied by the number of
+/// tasks in a single response. Counts answer the triage questions ("how much
+/// history is there, is anything recorded yet?") in a fixed number of bytes;
+/// a caller that wants the bodies reads the one task it cares about.
+#[derive(Debug, Serialize)]
+pub(crate) struct TaskSummaryView<'a> {
+    task_id: TaskId,
+    state: TaskState,
+    revision: u64,
+    /// The captured intent, so a human can tell tasks apart without a second
+    /// request per row.
+    intent_summary: &'a str,
+    requested_by: &'a str,
+    /// When the task was created, and when it last changed. Both come from the
+    /// event history (first and last entry), and are absent only for a record
+    /// with no events at all — which the service does not produce, since
+    /// `create` writes a `created` event.
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+    action_count: usize,
+    capability_count: usize,
+    event_count: usize,
+    outcome_count: usize,
+}
+
+impl<'a> From<&'a TaskRecord> for TaskSummaryView<'a> {
+    fn from(record: &'a TaskRecord) -> Self {
+        Self {
+            task_id: record.plan.task_id,
+            state: record.state,
+            revision: record.revision,
+            intent_summary: &record.plan.intent.summary,
+            requested_by: &record.plan.intent.requested_by,
+            created_at: record.events.first().map(|event| event.occurred_at),
+            updated_at: record.events.last().map(|event| event.occurred_at),
+            action_count: record.plan.actions.len(),
+            capability_count: record.capabilities.len(),
+            event_count: record.events.len(),
+            outcome_count: record.outcomes.len(),
         }
     }
 }
@@ -197,17 +287,17 @@ impl<'a> From<&'a EvaluationReport> for EvaluationReportView<'a> {
     }
 }
 
-/// The body of `GET /v1/tasks`.
+/// The body of `GET /v1/tasks`: summaries, never full records.
 #[derive(Debug, Serialize)]
 pub(crate) struct TaskListingView<'a> {
-    tasks: Vec<TaskView<'a>>,
+    tasks: Vec<TaskSummaryView<'a>>,
     warnings: Vec<ListWarningView<'a>>,
 }
 
 impl<'a> From<&'a TaskListing> for TaskListingView<'a> {
     fn from(listing: &'a TaskListing) -> Self {
         Self {
-            tasks: listing.records.iter().map(TaskView::from).collect(),
+            tasks: listing.records.iter().map(TaskSummaryView::from).collect(),
             warnings: listing.warnings.iter().map(ListWarningView::from).collect(),
         }
     }
@@ -468,6 +558,7 @@ mod tests {
                 "single_use": false,
             }],
             "events": golden_events_json(),
+            "event_count": 5,
             "outcomes": [{
                 "action_id": ACTION_UUID,
                 "status": "succeeded",
@@ -497,17 +588,107 @@ mod tests {
         assert_eq!(encoded, golden_task_json());
     }
 
-    /// The DTO layer is a refactor, not a redesign: at the moment it was
-    /// introduced it reproduced the internal structs' serialization exactly.
-    /// Keeping the assertion documents that equivalence and marks the point
-    /// where the two representations are allowed to diverge — after this, the
-    /// wire format changes only by editing [`golden_task_json`].
+    /// The single-task view differs from the internal record in exactly one
+    /// documented way: the bounded `events` slice and the `event_count` that
+    /// makes the bound visible. Everything else is still identical, so an
+    /// internal field added or renamed in `andromeda-runtime` cannot slip onto
+    /// the wire unnoticed under cover of "the DTO layer changed something".
     #[test]
-    fn the_view_reproduces_the_internal_serialization() {
+    fn the_view_differs_from_the_record_only_by_the_event_bound() {
         let record = representative_record();
+        let mut view = serde_json::to_value(TaskView::from(&record)).expect("view");
+        let internal = serde_json::to_value(&record).expect("record");
         assert_eq!(
-            serde_json::to_value(TaskView::from(&record)).expect("view"),
-            serde_json::to_value(&record).expect("record"),
+            view.as_object_mut()
+                .expect("object")
+                .remove("event_count")
+                .expect("event_count"),
+            json!(record.events.len()),
+        );
+        assert_eq!(view, internal);
+    }
+
+    /// Truncation keeps the *most recent* events, in order, and reports the
+    /// true total rather than the truncated length.
+    #[test]
+    fn a_bounded_read_keeps_the_newest_events() {
+        let record = representative_record();
+        let view = serde_json::to_value(TaskView::bounded(&record, 2)).expect("view");
+        let events = view["events"].as_array().expect("events");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["actor"], "runner");
+        assert_eq!(events[1]["actor"], "executor");
+        assert_eq!(view["event_count"], json!(5));
+
+        // A caller cannot widen the window past the ceiling.
+        let view = serde_json::to_value(TaskView::bounded(&record, usize::MAX)).expect("view");
+        assert_eq!(view["events"].as_array().expect("events").len(), 5);
+    }
+
+    /// The listing projection, written out in full: no event bodies, no plan,
+    /// no capabilities — only what triage needs.
+    #[test]
+    fn task_summary_json_shape_is_locked() {
+        let record = representative_record();
+        let encoded =
+            serde_json::to_value(TaskSummaryView::from(&record)).expect("serialize summary");
+        assert_eq!(
+            encoded,
+            json!({
+                "task_id": TASK_UUID,
+                "state": "verifying",
+                "revision": 4,
+                "intent_summary": "Inspect the workspace",
+                "requested_by": "operator",
+                "created_at": TIMESTAMP,
+                "updated_at": TIMESTAMP,
+                "action_count": 1,
+                "capability_count": 1,
+                "event_count": 5,
+                "outcome_count": 1,
+            })
+        );
+    }
+
+    /// Measures what the projection is for. `GET /v1/tasks` used to serialize
+    /// whole `TaskRecord`s, so a task's entire history rode along in the
+    /// listing — once per task. The summary is constant-size in the number of
+    /// events, so the listing no longer grows as tasks are evaluated.
+    #[test]
+    fn the_listing_projection_is_constant_in_the_event_count() {
+        let mut sizes = Vec::new();
+        for events in [1_usize, 1_000] {
+            let mut record = representative_record();
+            let action_id: ActionId = id(ACTION_UUID);
+            let capability_id: CapabilityId = id(CAPABILITY_UUID);
+            record.events = std::iter::repeat_with(|| {
+                representative_events(action_id, capability_id).into_iter()
+            })
+            .flatten()
+            .take(events)
+            .collect();
+
+            // What the endpoint returned before this change: the whole record.
+            let before = serde_json::to_vec(&record).expect("record").len();
+            let after = serde_json::to_vec(&TaskSummaryView::from(&record))
+                .expect("summary")
+                .len();
+            eprintln!("events={events:>5}  full record={before:>8} B  summary={after:>4} B");
+            sizes.push((events, before, after));
+        }
+
+        let (_, small_before, small_after) = sizes[0];
+        let (_, large_before, large_after) = sizes[1];
+        // The summary does not grow with history (only `event_count`'s digits
+        // change), while the full record grows without bound.
+        assert!(
+            large_after < small_after + 8,
+            "summary grew with the event history: {small_after} -> {large_after}"
+        );
+        assert!(large_before > small_before * 100);
+        assert!(
+            large_before > large_after * 100,
+            "expected a >100x reduction, got {large_before} -> {large_after}"
         );
     }
 

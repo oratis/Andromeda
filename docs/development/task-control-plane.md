@@ -36,14 +36,31 @@ ActionKind 决定不可降低的风险下限。模型可以把动作声明得更
 |---|---|---|
 | GET | `/healthz` | 服务状态、API 版本，以及当前安全姿态：`authentication`（恒为 `bearer_token`）与 `capability_admission`（`unsigned_allowed` / `require_signed`） |
 | POST | `/v1/tasks` | 校验并创建任务（重复 task_id 返回 409 `already_exists`） |
-| GET | `/v1/tasks` | 列出任务，响应为 `{"tasks": [...], "warnings": [...]}`；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
-| GET | `/v1/tasks/{id}` | 读取任务 |
+| GET | `/v1/tasks` | 列出任务**摘要**，响应为 `{"tasks": [...], "warnings": [...]}`；**不返回事件史**（见下方"读取形状与事件上界"）；损坏的记录文件被跳过并记入 `warnings`，不会让整个列表失败 |
+| GET | `/v1/tasks/{id}` | 读取单个任务；默认只返回**最近 50 条**事件与总数 `event_count`，可用 `?events=<n>` 索取更多（硬上限 1000） |
 | POST | `/v1/tasks/{id}/capabilities` | 给已存在的任务补授权：追加 capability，记 `granted` 事件并使 revision +1。每个新 capability 必须 `issued_to == plan.task_id` 且当前有效（未过期、已到 `issued_at`），否则返回 422；带 `expected_revision` 做乐观并发 |
 | POST | `/v1/tasks/{id}/outcomes` | 记录单个 action 的执行结果与证据；追加 `outcome_recorded` 事件并使 revision +1。只允许在 `Running`/`Verifying` 状态记录，每个 action 至多一条（重复返回 422），action 必须属于该计划 |
 | POST | `/v1/tasks/{id}/evaluate` | 评估、不执行；**逐 action** 解析隔离等级，结果作为 `evaluated` 事件追加到任务事件史并使 revision +1 |
 | POST | `/v1/tasks/{id}/transition` | 带 revision 的状态转换；`Ready`/`Running`/`Succeeded` 三条边受门控（见下） |
 
 所有 `TaskService` 调用在 `tokio::task::spawn_blocking` 中执行，阻塞的文件锁和 fsync 不会占用 async worker，`/healthz` 在锁竞争时依旧可响应。
+
+### wire 契约与内部类型分离
+
+handler **只**序列化 `crates/andromeda-taskd/src/wire.rs` 里的 DTO，绝不直接序列化 `TaskRecord`/`TaskEvent`/`EvaluationReport`。此前 handler 直接 `serde_json::to_value(record)`，等于把"持久化/进程内表示"当成了对外 API：重命名一个内部字段就是一次静默的破坏性 API 变更（架构评审 #3）。
+
+DTO 层是**唯一**需要落笔改动 wire 格式的地方：映射函数逐字段显式书写，内部重命名会变成该文件里的编译错误；`wire::tests::task_json_shape_is_locked` 用手写的完整文档锁定序列化结果，`task_summary_json_shape_is_locked` 锁定列表投影。改变 wire 格式必须同时改这两个字面量与本文档。
+
+plan、capability、outcome 仍以 `andromeda-core` 契约类型原样出现：它们本就是全系统共享的词汇且自带版本（`ActionPlan.schema_version`），再镜像一层只会复制契约而不是隔离契约——golden 测试覆盖的是**整篇文档**，嵌套的 core 字段同样被锁定。
+
+### 读取形状与事件上界
+
+`TaskRecord.events` 只增不减（每次 `evaluate`/`transition`/`grant`/`outcome` 各追加一条，`evaluated` 事件还内嵌逐 action 的完整决策集），所以"读取时返回全部事件"等于响应大小无界：
+
+- `GET /v1/tasks/{id}` 默认只返回**最近 `50`** 条事件（`wire::DEFAULT_EVENT_LIMIT`），并附带 `event_count`（真实总数，不是本次返回的条数），因此截断是**可见**的，不是静默的。需要更多时用 `?events=<n>`：`n` 被钳到硬上限 `1000`（`wire::MAX_EVENT_LIMIT`），钳制不会报错但 `event_count` 仍是真实总数，调用方总能判断还有多少历史。`?events=0` 合法，表示"只要记录不要历史"。参数名拼错（例如 `?event=5`）返回 400 `bad_request`，不会被丢弃后按默认值应答。
+- `GET /v1/tasks` **不返回**任何事件体，只返回摘要投影：`task_id`、`state`、`revision`、`intent_summary`、`requested_by`、`created_at`/`updated_at`（取自事件史首尾）、`action_count`、`capability_count`、`event_count`、`outcome_count`。列表响应因此与事件数量无关：实测同一个任务在 1000 条事件时，整条记录 224 390 B，摘要 297 B。要事件体就去读**具体那一个**任务。
+
+其余返回完整任务的端点（create/grant/outcome/transition）同样走默认上界与 `event_count`。
 
 ### 本地鉴权（强制，不可关闭）
 
