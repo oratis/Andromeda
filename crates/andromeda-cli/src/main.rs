@@ -33,13 +33,14 @@ struct Cli {
     /// records are not merely elsewhere, they are unreadable to anyone else.
     /// Only loopback endpoints are accepted, because the request carries the
     /// local bearer token.
-    #[arg(
-        long,
-        value_name = "URL",
-        env = "ANDROMEDA_TASKD_URL",
-        global = true,
-        conflicts_with = "state_dir"
-    )]
+    ///
+    /// Not a clap `conflicts_with = "state_dir"`: clap counts an
+    /// environment-supplied value as present, so a developer who exports
+    /// `ANDROMEDA_STATE_DIR` would be told that `--connect` "cannot be used
+    /// with --state-dir" after typing only `--connect`. The conflict is
+    /// reported by [`resolve_task_target`] instead, which can name the
+    /// variables as the likely source.
+    #[arg(long, value_name = "URL", env = "ANDROMEDA_TASKD_URL", global = true)]
     connect: Option<String>,
     /// Open a task store directly, in process, with no daemon involved.
     ///
@@ -463,7 +464,18 @@ fn resolve_task_target(
     auth_token_file: Option<PathBuf>,
 ) -> Result<TaskTargetChoice, String> {
     match (connect, state_dir) {
-        (Some(url), _) => Ok(TaskTargetChoice::Connected {
+        // Naming both is a contradiction, and there is no sane precedence to
+        // pick: silently preferring one would reintroduce the very thing this
+        // command refuses to do, which is decide for the caller which set of
+        // tasks they meant. Either value may have come from the environment,
+        // so the message says so rather than insisting the caller typed it.
+        (Some(url), Some(state_dir)) => Err(format!(
+            "--connect {url} and --state-dir {} name two different sets of tasks; pass exactly \
+             one. Either value can also come from the environment, so check \
+             ANDROMEDA_TASKD_URL and ANDROMEDA_STATE_DIR if you did not type both",
+            state_dir.display()
+        )),
+        (Some(url), None) => Ok(TaskTargetChoice::Connected {
             url,
             token_file: auth_token_file,
         }),
@@ -1061,20 +1073,25 @@ mod tests {
         assert!(error.contains("--connect"), "{error}");
     }
 
-    /// Both modes at once is a contradiction clap catches before anything runs.
+    /// Naming both stores is refused with neither one silently winning, and the
+    /// message points at the environment, which is where the value the caller
+    /// did not type comes from.
     #[test]
-    fn the_two_modes_conflict_at_parse_time() {
-        let error = Cli::try_parse_from([
-            "andromeda",
-            "--connect",
-            "http://127.0.0.1:7777",
-            "--state-dir",
-            ".andromeda/state",
-            "task",
-            "list",
-        ])
-        .expect_err("naming both stores must not parse");
-        assert!(error.to_string().contains("cannot be used with"), "{error}");
+    fn naming_both_stores_is_refused_without_a_silent_precedence() {
+        let error = resolve_task_target(
+            Some("http://127.0.0.1:7777".to_owned()),
+            Some(PathBuf::from(".andromeda/state")),
+            None,
+        )
+        .expect_err("two different sets of tasks cannot both be the target");
+        for expected in [
+            "--connect http://127.0.0.1:7777",
+            "--state-dir .andromeda/state",
+            "ANDROMEDA_TASKD_URL",
+            "ANDROMEDA_STATE_DIR",
+        ] {
+            assert!(error.contains(expected), "{expected} missing from: {error}");
+        }
     }
 
     /// `--events` describes a bound the API applies; a local store read has no
