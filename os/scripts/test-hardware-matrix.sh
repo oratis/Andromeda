@@ -13,36 +13,32 @@ readonly ANDROMEDA_SCRIPT_DIR
 # shellcheck source=os/scripts/lib/markers.sh
 # shellcheck disable=SC1091
 . "${ANDROMEDA_SCRIPT_DIR}/lib/markers.sh"
+# Sourced after assert.sh, which it uses. It owns OVMF_CODE/OVMF_VARS_TEMPLATE,
+# the KVM-vs-TCG gate and the pflash wiring, all shared with test-install.sh;
+# see its header for what is shared and what is deliberately not.
+# shellcheck source=os/scripts/lib/qemu.sh
+# shellcheck disable=SC1091
+. "${ANDROMEDA_SCRIPT_DIR}/lib/qemu.sh"
 readonly OUTPUT_DIR="${1:-${REPOSITORY_ROOT}/output}"
 readonly BASE_DISK="${OUTPUT_DIR}/andromeda-test.qcow2"
 readonly MATRIX_DIR="${OUTPUT_DIR}/hardware-matrix"
-readonly OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
-readonly OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 
 qemu_pid=""
 
 cleanup() {
-    if [[ -n "${qemu_pid}" ]]; then
-        kill "${qemu_pid}" 2>/dev/null || true
-        wait "${qemu_pid}" 2>/dev/null || true
-    fi
+    stop_child_process "${qemu_pid}"
 }
 trap cleanup EXIT
 
 require_file "${BASE_DISK}" \
     'the matrix boots overlays on the disk test-install.sh leaves behind; run os/scripts/test-install.sh first (its qcow2 is the backing file for every profile)'
-require_file "${OVMF_CODE}" \
-    'the OVMF firmware image is required for the UEFI boot path; install the ovmf package or set OVMF_CODE'
-require_file "${OVMF_VARS_TEMPLATE}" \
-    'the OVMF variable-store template is required to give each profile fresh NVRAM; install the ovmf package or set OVMF_VARS_TEMPLATE'
+require_ovmf_firmware
 
 rm -rf "${MATRIX_DIR}"
 mkdir -p "${MATRIX_DIR}"
 qemu-system-x86_64 --version > "${MATRIX_DIR}/qemu-version.txt"
 qemu-img --version > "${MATRIX_DIR}/qemu-img-version.txt"
 
-accel=tcg
-cpu=max
 # TIMEOUT BUDGET INVARIANT (docs/reviews/e2e-pipeline-review.md P0 #4,
 # re-derived for the P1 #7 job split).
 # This is the matrix stage budget: 3 profiles x 600 s = 30 min, one term of
@@ -67,25 +63,20 @@ cpu=max
 #   - a genuinely hung profile is diagnosed by THIS host-side timeout plus the
 #     normalized serial log it dumps, not by waiting out the unit timeout.
 profile_timeout_seconds=600
-if [[ -c /dev/kvm ]]; then
-    accel=kvm
-    cpu=host
-elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
-    # Mirror test-gcp-nested.sh's `test -c /dev/kvm` precheck. Full-system TCG
-    # emulation is ~10x slower; the TCG matrix budget (3600s x 3 profiles =
-    # 180 min) alone exceeds the os-e2e lifecycle job `timeout-minutes: 140`,
-    # turning a missing /dev/kvm into confusing timeouts rather than a clear
-    # failure. Fail fast; set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path
-    # for local debugging.
-    printf 'test-hardware-matrix.sh: /dev/kvm is unavailable.\n' >&2
-    printf 'Full-system TCG emulation is ~10x slower and its per-profile budget (3 x 3600s = 180m) exceeds the os-e2e lifecycle job timeout (140m).\n' >&2
-    printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
-    exit 1
-else
-    # Full-system TCG emulation is roughly an order of magnitude slower than
-    # KVM; the 600 s per-profile budget would always time out.
+# The accelerator gate itself is shared with test-install.sh (lib/qemu.sh); it
+# mirrors test-gcp-nested.sh's `test -c /dev/kvm` precheck. Only the second
+# argument is this harness's own: what TCG would cost HERE, which is the TCG
+# matrix budget (3600s x 3 profiles = 180 min) against the lifecycle job's
+# timeout-minutes.
+select_qemu_acceleration 'test-hardware-matrix.sh' \
+    'Full-system TCG emulation is ~10x slower and its per-profile budget (3 x 3600s = 180m) exceeds the os-e2e lifecycle job timeout (140m).'
+if [[ "${ANDROMEDA_QEMU_ACCEL}" == tcg ]]; then
+    # The per-profile budget is NOT shared: it belongs to this file, which is
+    # where test-ci-timeout-budget.sh parses it back out. Full-system TCG is
+    # roughly an order of magnitude slower than KVM, so the 600 s KVM budget
+    # would always time out.
     profile_timeout_seconds=3600
-    printf 'WARNING: /dev/kvm is unavailable; ANDROMEDA_ALLOW_TCG=1 is set, falling back to TCG emulation with a %s s per-profile timeout. Expect a very slow run.\n' \
+    printf 'Widening the per-profile timeout to %s s for the TCG path.\n' \
         "${profile_timeout_seconds}" >&2
 fi
 readonly profile_timeout_seconds
@@ -168,17 +159,20 @@ run_profile() {
             ;;
     esac
 
+    # Firmware wiring is shared with test-install.sh; the machine type, CPU
+    # topology, memory and the ${devices[@]} block above are deliberately not --
+    # varying them across profiles is the entire point of this harness.
+    ovmf_pflash_args "${ovmf_vars}"
     qemu_command=(
         qemu-system-x86_64
-        -machine "${machine},accel=${accel}"
-        -cpu "${cpu}"
+        -machine "${machine},accel=${ANDROMEDA_QEMU_ACCEL}"
+        -cpu "${ANDROMEDA_QEMU_CPU}"
         -smp "${topology}"
         -m "${memory_mib}"
         -nodefaults
         -no-user-config
         -fw_cfg "name=opt/andromeda/scenario,string=${scenario}"
-        -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
-        -drive "if=pflash,format=raw,file=${ovmf_vars}"
+        "${ANDROMEDA_OVMF_PFLASH_ARGS[@]}"
         -boot "order=c,strict=on"
         -display none
         -monitor none
