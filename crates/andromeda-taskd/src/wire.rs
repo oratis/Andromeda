@@ -698,7 +698,6 @@ mod tests {
     #[test]
     fn state_and_effect_names_are_pinned() {
         for (state, name) in [
-            (TaskState::Draft, "draft"),
             (TaskState::AwaitingApproval, "awaiting_approval"),
             (TaskState::Ready, "ready"),
             (TaskState::Running, "running"),
@@ -719,5 +718,10 @@ mod tests {
         ] {
             assert_eq!(serde_json::to_value(effect).expect("effect"), json!(name));
         }
+
+        // `draft` was a state nothing produced and no edge reached. It is gone
+        // from the vocabulary, in both directions: a client will never be sent
+        // it, and `{"to": "draft"}` no longer parses at all.
+        assert!(serde_json::from_value::<TaskState>(json!("draft")).is_err());
     }
 }

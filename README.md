@@ -422,10 +422,8 @@ cannot be normalized (relative paths, `..` past the root) are denied outright.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Draft
-    Draft --> AwaitingApproval
-    Draft --> Ready
-    Draft --> Cancelled
+    [*] --> AwaitingApproval
+    [*] --> Ready
     AwaitingApproval --> Ready
     AwaitingApproval --> Cancelled
     Ready --> Running
@@ -448,6 +446,8 @@ stateDiagram-v2
 
 Key invariants:
 
+- **the only entry states are `AwaitingApproval` and `Ready`** — creation evaluates the whole
+  plan and picks one of them, and nothing reaches them from outside;
 - **`Running` cannot jump straight to `Succeeded`** — it must pass through `Verifying`;
 - `Failed` is terminal but keeps one outgoing edge, `Failed → Compensating`, so recovery
   semantics can reopen it;

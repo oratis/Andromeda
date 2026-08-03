@@ -105,6 +105,14 @@ Authorization: Bearer <令牌>
 
 生产部署另有内核级纵深防御：`andromeda-taskd.service` 设置 `IPAddressAllow=localhost` / `IPAddressDeny=any`。
 
+### 状态机的入口只有两个
+
+`create` 对整盘计划求值后二选一：完全授权则 `Ready`，否则 `AwaitingApproval`。除此之外**没有**第三个入口——任务状态机不存在 `Draft`。`Draft` 曾经存在过：没有任何代码路径产生它，也没有任何边指向它，`{"to": "draft"}` 必然被拒。一个安全相关状态机里"永远不可能处于"的状态是纯粹的契约噪声——每个读 `state` 的客户端仍要为它写分支——所以它连同三条出边一起被删除。
+
+状态机的**完整**边集由 `crates/andromeda-core/src/task.rs` 的 `the_transition_matrix_is_pinned` 逐对锁定（对所有有序状态对断言允许/拒绝），`the_state_list_covers_the_whole_machine` 再保证新增状态无法漏出该矩阵。
+
+升级影响：磁盘上不可能存在 `"state": "draft"` 的记录（没有任何代码写得出来），因此删除该变体不会作废已持久化的任务；手工构造的此类文件在 `list` 中会作为损坏记录进入 `warnings`。
+
 ### `Ready` 状态的语义
 
 创建时，任务进入 `Ready` 当且仅当计划中每个 action 在"最宽松执行假设"（隔离恰好等于该 action 风险等级要求的最低隔离、外部副作用视为已确认）下会被确定性策略引擎判为 Allow。这保证了：

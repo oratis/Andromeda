@@ -402,10 +402,8 @@ Capability 是资源范围化的权限，**独立过期，且从不存放任何�
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Draft
-    Draft --> AwaitingApproval
-    Draft --> Ready
-    Draft --> Cancelled
+    [*] --> AwaitingApproval
+    [*] --> Ready
     AwaitingApproval --> Ready
     AwaitingApproval --> Cancelled
     Ready --> Running
@@ -428,6 +426,8 @@ stateDiagram-v2
 
 关键不变式：
 
+- **入口状态只有 `AwaitingApproval` 与 `Ready`**——创建时对整盘计划求值后二选一，外部无法进入
+  其他状态；
 - **`Running` 不能直接跳到 `Succeeded`**——必须经过 `Verifying`；
 - `Failed` 是终态，但保留唯一一条出边 `Failed → Compensating`，供恢复语义重新打开；
 - 两条授权敏感的边额外做策略复检：
