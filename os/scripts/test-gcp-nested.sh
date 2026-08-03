@@ -9,6 +9,13 @@ readonly ANDROMEDA_SCRIPT_DIR
 # shellcheck source=os/scripts/lib/assert.sh
 # shellcheck disable=SC1091
 . "${ANDROMEDA_SCRIPT_DIR}/lib/assert.sh"
+# This script used to grep the RAW boot serial log -- the third and last
+# un-normalized marker path in the pipeline (docs/reviews/e2e-pipeline-review.md
+# evaluation 7 counts three copies of the normalization: bash, Python, gcp).
+# It now runs the same transform as both host pollers.
+# shellcheck source=os/scripts/lib/markers.sh
+# shellcheck disable=SC1091
+. "${ANDROMEDA_SCRIPT_DIR}/lib/markers.sh"
 
 SOURCE_DIR="${1:-$(pwd)}"
 OUTPUT_DIR="${2:-${SOURCE_DIR}/output}"
@@ -95,15 +102,35 @@ require "at least 100 GiB free is required in ${OUTPUT_DIR} (4 GiB ISO + 4 GiB O
 ) 2>&1 | tee "${EVIDENCE_DIR}/hardware-matrix.log"
 
 sha256sum "${OUTPUT_DIR}"/*.iso > "${EVIDENCE_DIR}/iso.sha256"
+
+# Normalize once, then read only the normalized copy -- exactly what the two
+# host pollers do. The raw log is preserved beside it by the EXIT trap above, so
+# no evidence is lost.
+readonly BOOT_LOG_NORMALIZED="${EVIDENCE_DIR}/boot-serial.normalized.log"
+normalize_serial_log "${OUTPUT_DIR}/boot-serial.log" "${BOOT_LOG_NORMALIZED}"
+# `|| true` because the redirect has already created the file: a grep that
+# matches nothing must reach the assertion below, which says WHAT was missing
+# and shows the log, rather than aborting the script on grep's exit 1 with the
+# bare exit code this review pass exists to eliminate.
 LC_ALL=C grep -aoE \
     'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)[[:print:]]*' \
-    "${OUTPUT_DIR}/boot-serial.log" \
-    > "${EVIDENCE_DIR}/lifecycle-markers.txt"
-# Anchor as a prefix match: trailing printable junk on the same physical
-# serial line (cursor-control residue) must not turn success into a false
-# negative again.
-require_marker "${EVIDENCE_DIR}/lifecycle-markers.txt" '^ANDROMEDA_E2E_OK' \
-    'the guest never reached the end of the install/update/rollback lifecycle on this nested-KVM host'
+    "${BOOT_LOG_NORMALIZED}" \
+    > "${EVIDENCE_DIR}/lifecycle-markers.txt" || true
+
+# Exactly once, not merely present: this was the loosest of the pipeline's three
+# marker checks (review evaluation 7). A second ANDROMEDA_E2E_OK would mean the
+# guest re-entered the verifier instead of settling, which mere existence cannot
+# see.
+#
+# It asserts ONE marker rather than restating test-install.sh's ten-marker
+# sequence on purpose. test-install.sh ran that check itself a few lines above
+# -- under `set -Eeuo pipefail` its failure aborts this script, so this line is
+# unreachable unless the strict validator already passed. A second copy of that
+# list here would be a second thing to keep in step with the guest, which is the
+# drift this whole change is removing.
+require_marker_sequence "${BOOT_LOG_NORMALIZED}" \
+    'the guest never reached the end of the install/update/rollback lifecycle on this nested-KVM host, or reached it more than once' \
+    "ANDROMEDA_E2E_OK"
 require_marker "${EVIDENCE_DIR}/hardware-matrix.log" \
     '^ANDROMEDA_HARDWARE_MATRIX_OK scenarios=3$' \
     'the hardware matrix did not complete all three controller profiles on this nested-KVM host'
