@@ -13,6 +13,12 @@ readonly ANDROMEDA_SCRIPT_DIR
 # shellcheck source=os/scripts/lib/markers.sh
 # shellcheck disable=SC1091
 . "${ANDROMEDA_SCRIPT_DIR}/lib/markers.sh"
+# Sourced after assert.sh, which it uses. It owns OVMF_CODE/OVMF_VARS_TEMPLATE,
+# the KVM-vs-TCG gate and the pflash wiring, all shared with
+# test-hardware-matrix.sh; see its header for what is shared and what is not.
+# shellcheck source=os/scripts/lib/qemu.sh
+# shellcheck disable=SC1091
+. "${ANDROMEDA_SCRIPT_DIR}/lib/qemu.sh"
 readonly OUTPUT_DIR="${1:-${REPOSITORY_ROOT}/output}"
 readonly ISO_PATH="${OUTPUT_DIR}/Andromeda-Developer-Preview-x86_64-ci.iso"
 
@@ -30,8 +36,8 @@ readonly DIAGNOSTICS_DIR="${OUTPUT_DIR}/diagnostics"
 # gates actually saw.
 readonly INSTALL_LOG_NORMALIZED="${DIAGNOSTICS_DIR}/host/install-serial.normalized.log"
 readonly BOOT_LOG_NORMALIZED="${DIAGNOSTICS_DIR}/host/boot-serial.normalized.log"
-readonly OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
-readonly OVMF_VARS_TEMPLATE="${OVMF_VARS_TEMPLATE:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+# OVMF_CODE and OVMF_VARS_TEMPLATE come from lib/qemu.sh; this is the writable
+# per-run copy of the template that the guest's NVRAM boot entries land in.
 readonly OVMF_VARS="${OUTPUT_DIR}/OVMF_VARS.fd"
 
 http_pid=""
@@ -42,14 +48,13 @@ root_mount=""
 
 # shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
-    if [[ -n "${qemu_pid}" ]]; then
-        kill "${qemu_pid}" 2>/dev/null || true
-        wait "${qemu_pid}" 2>/dev/null || true
-    fi
-    if [[ -n "${http_pid}" ]]; then
-        kill "${http_pid}" 2>/dev/null || true
-        wait "${http_pid}" 2>/dev/null || true
-    fi
+    # Reaping the QEMU child is shared with test-hardware-matrix.sh (lib/qemu.sh
+    # explains why a leak here breaks the OTHER harness). The rest of this trap
+    # is not shared: the nbd device, the two read-only mounts, their temporary
+    # directories and the NVRAM snapshot are resources only this harness ever
+    # creates.
+    stop_child_process "${qemu_pid}"
+    stop_child_process "${http_pid}"
     if [[ -n "${root_mount}" ]] && mountpoint --quiet "${root_mount}"; then
         umount "${root_mount}" || true
     fi
@@ -79,10 +84,7 @@ if [[ ! -f "${ISO_PATH}" ]]; then
 fi
 require_file "${OUTPUT_DIR}/andromeda-v2.tar" \
     'the rev2 update payload (andromeda-v2.tar) built by build-iso.sh is required; the guest fetches it over slirp and verifies it against the fw_cfg SHA-256'
-require_file "${OVMF_CODE}" \
-    'the OVMF firmware image is required for the UEFI boot path; install the ovmf package or set OVMF_CODE'
-require_file "${OVMF_VARS_TEMPLATE}" \
-    'the OVMF variable-store template is required to give the guest fresh NVRAM; install the ovmf package or set OVMF_VARS_TEMPLATE'
+require_ovmf_firmware
 update_sha256="$(sha256sum "${OUTPUT_DIR}/andromeda-v2.tar" | cut -d' ' -f1)"
 readonly update_sha256
 
@@ -129,29 +131,21 @@ rm -f "${DISK_PATH}" "${INSTALL_LOG}" "${BOOT_LOG}" "${OVMF_VARS}"
 qemu-img create -f qcow2 "${DISK_PATH}" 64G
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS}"
 
-accel=tcg
-cpu=max
-if [[ -c /dev/kvm ]]; then
-    accel=kvm
-    cpu=host
-elif [[ "${ANDROMEDA_ALLOW_TCG:-0}" != "1" ]]; then
-    # Mirror test-gcp-nested.sh's `test -c /dev/kvm` precheck. Without KVM the
-    # TCG software fallback runs ~10x slower: the 45m install timeout plus the
-    # 2700s boot deadline can exceed the os-e2e lifecycle job
-    # `timeout-minutes: 140`, so a missing /dev/kvm would surface as a
-    # confusing timeout instead of a clear failure. Fail fast; set
-    # ANDROMEDA_ALLOW_TCG=1 to force TCG for local debug.
-    printf 'test-install.sh: /dev/kvm is unavailable.\n' >&2
-    printf 'The TCG software fallback can exceed the os-e2e lifecycle job timeout (140m) and surface as a confusing timeout rather than a clear failure.\n' >&2
-    printf 'Set ANDROMEDA_ALLOW_TCG=1 to force the slow TCG path for local debugging.\n' >&2
-    exit 1
-else
-    printf 'WARNING: /dev/kvm is unavailable; ANDROMEDA_ALLOW_TCG=1 is set, using slow TCG emulation. Expect a very slow run that may exceed CI budgets.\n' >&2
-fi
+# The accelerator gate is shared with test-hardware-matrix.sh (lib/qemu.sh); it
+# mirrors test-gcp-nested.sh's `test -c /dev/kvm` precheck. Only the second
+# argument is this harness's own: what TCG would cost HERE, which is the 45m
+# install timeout plus the 2700s boot deadline against the lifecycle job's
+# timeout-minutes.
+select_qemu_acceleration 'test-install.sh' \
+    'The TCG software fallback can exceed the os-e2e lifecycle job timeout (140m) and surface as a confusing timeout rather than a clear failure.'
 
+# Firmware wiring is shared; the machine, CPU count, memory and device topology
+# below are NOT. They are this harness's known-good virtio baseline, whereas the
+# matrix exists precisely to vary them.
+ovmf_pflash_args "${OVMF_VARS}"
 common_qemu=(
-    -machine "q35,accel=${accel}"
-    -cpu "${cpu}"
+    -machine "q35,accel=${ANDROMEDA_QEMU_ACCEL}"
+    -cpu "${ANDROMEDA_QEMU_CPU}"
     -smp 4
     -m 8192
     -nodefaults
@@ -163,8 +157,7 @@ common_qemu=(
     -device "hda-duplex,audiodev=audio0"
     -device "virtio-net-pci,netdev=net0"
     -netdev "user,id=net0"
-    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}"
-    -drive "if=pflash,format=raw,file=${OVMF_VARS}"
+    "${ANDROMEDA_OVMF_PFLASH_ARGS[@]}"
     -drive "if=virtio,format=qcow2,file=${DISK_PATH}"
     -display none
     -monitor none
@@ -512,44 +505,34 @@ while (( SECONDS < deadline )); do
         LC_ALL=C grep -aE \
             'ANDROMEDA_(SELINUX_LABELS|DAILY_DRIVER|FIRST_BOOT|UPDATE|ROLLBACK|E2E)' \
             "${BOOT_LOG_NORMALIZED}"
-        # The validator is fed the already-normalized log; it repeats the
-        # stripping because the transform is idempotent and it must stay correct
-        # if it is ever pointed at a raw log.
-        python3 - "${BOOT_LOG_NORMALIZED}" <<'PY'
-import pathlib
-import re
-import sys
-
-log = pathlib.Path(sys.argv[1]).read_bytes().replace(b"\0", b"").decode(errors="replace")
-log = log.replace("\r", "")
-log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log)
-# Rejoin markers cut in half by a kernel printk sharing the UART; see
-# repair_spliced_kernel_lines in os/scripts/lib/markers.sh for the mechanism and
-# the run that exposed it. Kept in step with that function because this
-# validator must stay correct if it is ever pointed at a raw log.
-log = re.sub(r"(?<!\n)\[ *\d+\.\d+\][^\n]*\n", "", log)
-markers = [
-    "ANDROMEDA_SELINUX_LABELS_OK",
-    "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1",
-    "ANDROMEDA_FIRST_BOOT_OK revision=1",
-    "ANDROMEDA_UPDATE_STAGED_OK revision=2",
-    "ANDROMEDA_DAILY_DRIVER_OK phase=updating revision=2",
-    "ANDROMEDA_UPDATE_BOOT_OK revision=2",
-    "ANDROMEDA_ROLLBACK_STAGED_OK revision=1",
-    "ANDROMEDA_DAILY_DRIVER_OK phase=rolling-back revision=1",
-    "ANDROMEDA_ROLLBACK_BOOT_OK revision=1",
-    "ANDROMEDA_E2E_OK",
-]
-failures = re.findall(r"ANDROMEDA_[A-Z0-9_]*FAILED[^\n]*", log)
-if failures:
-    raise SystemExit(f"Failure marker present: {failures}")
-counts = [log.count(marker) for marker in markers]
-if counts != [1] * len(markers):
-    raise SystemExit(f"Daily-driver markers must occur exactly once: {counts}")
-positions = [log.find(marker) for marker in markers]
-if positions != sorted(positions):
-    raise SystemExit(f"Daily-driver marker sequence invalid: {positions}")
-PY
+        # The strictest gate in the pipeline: each marker exactly once, in this
+        # order. It used to be an inline Python validator that re-implemented
+        # lib/markers.sh's NUL/CR/ANSI/printk stripping in a second language --
+        # a second copy of the transform whose FIRST copy had already drifted
+        # once (review P0 #3). The shared helper takes the log this loop has
+        # already normalized, so there is now exactly one normalizer and exactly
+        # one implementation of "exactly once and in order", which
+        # test-hardware-matrix.sh and test-gcp-nested.sh also call.
+        #
+        # The list stays here: it describes THIS harness's lifecycle, and
+        # test-ci-timeout-budget.sh counts the ANDROMEDA_DAILY_DRIVER_OK entries
+        # below to derive the guest boot count. A fourth lifecycle boot cannot
+        # be added without appearing in this list.
+        #
+        # No failure-marker check is needed here: the branch above runs first on
+        # every poll and exits on any ANDROMEDA_*_FAILED in the same file.
+        require_marker_sequence "${BOOT_LOG_NORMALIZED}" \
+            'the guest lifecycle did not produce its ten markers exactly once each in install -> first-boot -> update -> rollback order; a repeated marker means the guest re-entered a phase instead of progressing, and an out-of-order one means the state machine advanced in a way andromeda-ci-verify does not model' \
+            "ANDROMEDA_SELINUX_LABELS_OK" \
+            "ANDROMEDA_DAILY_DRIVER_OK phase=first-boot revision=1" \
+            "ANDROMEDA_FIRST_BOOT_OK revision=1" \
+            "ANDROMEDA_UPDATE_STAGED_OK revision=2" \
+            "ANDROMEDA_DAILY_DRIVER_OK phase=updating revision=2" \
+            "ANDROMEDA_UPDATE_BOOT_OK revision=2" \
+            "ANDROMEDA_ROLLBACK_STAGED_OK revision=1" \
+            "ANDROMEDA_DAILY_DRIVER_OK phase=rolling-back revision=1" \
+            "ANDROMEDA_ROLLBACK_BOOT_OK revision=1" \
+            "ANDROMEDA_E2E_OK"
         exit 0
     fi
     # The UEFI Shell prompt is written by firmware that also emits cursor
