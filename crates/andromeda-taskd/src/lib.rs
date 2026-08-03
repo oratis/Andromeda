@@ -23,6 +23,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub use auth::{AuthError, Authenticator};
+// The read bounds are part of the wire contract, not an implementation detail:
+// a client has to know how much history a task read can return before it can
+// tell a truncated answer from a complete one. Exported so a client repeating
+// them (`andromeda-cli`) can assert equality instead of drifting.
+pub use wire::{DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT};
 use wire::{EvaluationReportView, TaskListingView, TaskView};
 
 #[derive(Debug, Clone)]
