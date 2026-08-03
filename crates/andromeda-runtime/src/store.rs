@@ -422,7 +422,7 @@ mod tests {
     fn record() -> TaskRecord {
         TaskRecord {
             plan: ActionPlan::new(Intent::new("store test", "test"), Vec::new()),
-            state: TaskState::Draft,
+            state: TaskState::AwaitingApproval,
             revision: 0,
             capabilities: Vec::new(),
             events: Vec::new(),

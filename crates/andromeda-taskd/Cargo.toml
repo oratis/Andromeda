@@ -12,6 +12,10 @@ andromeda-core.workspace = true
 andromeda-policy.workspace = true
 andromeda-runtime.workspace = true
 axum.workspace = true
+# Timestamps on the wire DTOs (`src/wire.rs`). Already a dev-dependency here
+# and a normal dependency of `andromeda-core`/`-runtime`, so promoting it adds
+# no new crate to the lockfile.
+chrono.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

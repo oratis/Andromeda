@@ -1,6 +1,7 @@
 //! Local HTTP API for the Andromeda task control plane.
 
 pub mod auth;
+mod wire;
 
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -11,15 +12,18 @@ use andromeda_runtime::{
     CreateTaskRequest, EvaluationRequest, GrantCapabilitiesRequest, RecordOutcomeRequest,
     ServiceError, StateTransitionRequest, StoreError, TaskService, TransitionGuardError,
 };
-use axum::extract::{Path, Request, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub use auth::{AuthError, Authenticator};
+use wire::{EvaluationReportView, TaskListingView, TaskView};
 
 #[derive(Debug, Clone)]
 struct AppState {
@@ -244,24 +248,46 @@ async fn create_task(
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
     let record = run_blocking(&state, move |service| service.create(request)).await?;
-    Ok((StatusCode::CREATED, Json(serde_json::to_value(record)?)))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::to_value(TaskView::from(&record))?),
+    ))
 }
 
 async fn list_tasks(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
     let listing = run_blocking(&state, TaskService::list_detailed).await?;
-    Ok(Json(json!({
-        "tasks": serde_json::to_value(listing.records)?,
-        "warnings": serde_json::to_value(listing.warnings)?,
-    })))
+    Ok(Json(serde_json::to_value(TaskListingView::from(&listing))?))
+}
+
+/// Query string of `GET /v1/tasks/{id}`.
+///
+/// `deny_unknown_fields` on purpose: a mistyped parameter (`?event=200`) must
+/// fail loudly rather than be dropped and quietly answered with the default,
+/// which is the same silent-widening failure the capability review flagged for
+/// request bodies.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskReadQuery {
+    /// How many of the most recent events to return. Defaults to
+    /// [`wire::DEFAULT_EVENT_LIMIT`] and is clamped to
+    /// [`wire::MAX_EVENT_LIMIT`]; `event_count` in the response always reports
+    /// the true total, so truncation is observable.
+    #[serde(default)]
+    events: Option<usize>,
 }
 
 async fn get_task(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
+    query: Result<Query<TaskReadQuery>, QueryRejection>,
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
+    let Query(query) = query.map_err(|error| ApiError::BadRequest(error.body_text()))?;
+    let limit = query.events.unwrap_or(wire::DEFAULT_EVENT_LIMIT);
     let record = run_blocking(&state, move |service| service.get(task_id)).await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::bounded(
+        &record, limit,
+    ))?))
 }
 
 async fn grant_capabilities(
@@ -274,7 +300,7 @@ async fn grant_capabilities(
         service.grant_capabilities(task_id, request)
     })
     .await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 async fn record_outcome(
@@ -287,7 +313,7 @@ async fn record_outcome(
         service.record_outcome(task_id, request)
     })
     .await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 async fn evaluate_task(
@@ -297,7 +323,9 @@ async fn evaluate_task(
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
     let report = run_blocking(&state, move |service| service.evaluate(task_id, &request)).await?;
-    Ok(Json(serde_json::to_value(report)?))
+    Ok(Json(serde_json::to_value(EvaluationReportView::from(
+        &report,
+    ))?))
 }
 
 async fn transition_task(
@@ -307,7 +335,7 @@ async fn transition_task(
 ) -> Result<Json<Value>, ApiError> {
     let task_id = parse_task_id(&task_id)?;
     let record = run_blocking(&state, move |service| service.transition(task_id, request)).await?;
-    Ok(Json(serde_json::to_value(record)?))
+    Ok(Json(serde_json::to_value(TaskView::from(&record))?))
 }
 
 fn parse_task_id(value: &str) -> Result<TaskId, ApiError> {
@@ -774,6 +802,147 @@ mod tests {
         assert_eq!(fetched["revision"], 1);
         let events = fetched["events"].as_array().expect("events");
         assert_eq!(events.last().expect("event")["kind"]["type"], "evaluated");
+    }
+
+    /// Evaluates `task_id` `count` times, appending one `evaluated` event per
+    /// call — the cheapest way to grow a real event history over HTTP.
+    async fn grow_event_history(app: &Router, task_id: TaskId, count: usize) {
+        let evaluation = EvaluationRequest::default();
+        for _ in 0..count {
+            let (status, body) = send(
+                app,
+                local_request(
+                    "POST",
+                    &format!("/v1/tasks/{task_id}/evaluate"),
+                    Some(&evaluation),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+    }
+
+    /// A single-task read returns the most recent events and the true total,
+    /// and a caller can ask for more up to the ceiling.
+    #[tokio::test]
+    async fn get_bounds_the_event_history_and_reports_the_total() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let request = inspection_request(workspace_path());
+        let task_id = request.plan.task_id;
+        send(&app, local_request("POST", "/v1/tasks", Some(&request))).await;
+
+        let evaluations = wire::DEFAULT_EVENT_LIMIT + 10;
+        grow_event_history(&app, task_id, evaluations).await;
+        // One `created` event plus one `evaluated` event per evaluation.
+        let total = evaluations + 1;
+
+        let (status, fetched) = send(
+            &app,
+            local_request("GET", &format!("/v1/tasks/{task_id}"), None::<&Value>),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            fetched["events"].as_array().expect("events").len(),
+            wire::DEFAULT_EVENT_LIMIT,
+            "the default read must be bounded"
+        );
+        assert_eq!(fetched["event_count"], json!(total));
+        // The window is the newest end of the history, not the oldest.
+        assert_eq!(fetched["events"][0]["kind"]["type"], "evaluated");
+
+        // An explicit request widens the window up to the ceiling.
+        for (query, expected) in [
+            (format!("?events={total}"), total),
+            ("?events=0".to_owned(), 0),
+            (format!("?events={}", wire::MAX_EVENT_LIMIT + 1), total),
+        ] {
+            let (status, fetched) = send(
+                &app,
+                local_request(
+                    "GET",
+                    &format!("/v1/tasks/{task_id}{query}"),
+                    None::<&Value>,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{query}");
+            assert_eq!(
+                fetched["events"].as_array().expect("events").len(),
+                expected,
+                "{query}"
+            );
+            assert_eq!(fetched["event_count"], json!(total), "{query}");
+        }
+
+        // A mistyped parameter is refused, not silently answered with the
+        // default — the same rule the request bodies follow.
+        let (status, error) = send(
+            &app,
+            local_request(
+                "GET",
+                &format!("/v1/tasks/{task_id}?event=5"),
+                None::<&Value>,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["error"], "bad_request");
+    }
+
+    /// The listing carries no event bodies at all, so its size no longer grows
+    /// with the history of the tasks it lists.
+    #[tokio::test]
+    async fn list_returns_summaries_instead_of_full_records() {
+        let temp = TempDir::new().expect("tempdir");
+        let app = test_app(&temp);
+        let request = inspection_request(workspace_path());
+        let task_id = request.plan.task_id;
+        send(&app, local_request("POST", "/v1/tasks", Some(&request))).await;
+        // Enough history to be visibly expensive without making the test slow;
+        // `wire::tests::the_listing_projection_is_constant_in_the_event_count`
+        // measures the same projection at a thousand events, in memory.
+        let evaluations = wire::DEFAULT_EVENT_LIMIT;
+        grow_event_history(&app, task_id, evaluations).await;
+
+        let (status, listing) = send(&app, local_request("GET", "/v1/tasks", None::<&Value>)).await;
+        assert_eq!(status, StatusCode::OK);
+        let tasks = listing["tasks"].as_array().expect("tasks");
+        assert_eq!(tasks.len(), 1);
+        let summary = &tasks[0];
+        assert!(
+            summary.get("events").is_none() && summary.get("plan").is_none(),
+            "the listing must not carry event bodies: {summary}"
+        );
+        assert_eq!(summary["task_id"], json!(task_id.to_string()));
+        assert_eq!(summary["state"], "ready");
+        assert_eq!(summary["revision"], json!(evaluations));
+        assert_eq!(summary["event_count"], json!(evaluations + 1));
+        assert_eq!(listing["warnings"].as_array().expect("warnings").len(), 0);
+
+        // Measured, not asserted: compare the listing against what the same
+        // endpoint used to return — the complete record for every task.
+        let (_, full) = send(
+            &app,
+            local_request(
+                "GET",
+                &format!("/v1/tasks/{task_id}?events={}", wire::MAX_EVENT_LIMIT),
+                None::<&Value>,
+            ),
+        )
+        .await;
+        let before = serde_json::to_vec(&json!({"tasks": [full], "warnings": []}))
+            .expect("body")
+            .len();
+        let after = serde_json::to_vec(&listing).expect("body").len();
+        eprintln!(
+            "GET /v1/tasks with {evaluations} evaluations: {before} B before, {after} B after"
+        );
+        assert!(
+            before > after * 20,
+            "expected a large reduction, got {before} B -> {after} B"
+        );
     }
 
     #[tokio::test]

@@ -59,10 +59,16 @@ impl Intent {
 }
 
 /// Durable task lifecycle. Every transition is checked by deterministic code.
+///
+/// The only entry states are `AwaitingApproval` and `Ready`: task creation
+/// runs the policy engine over the whole plan and picks one of them, and no
+/// edge leads back into either from outside. There is deliberately no `Draft`
+/// state — one existed, produced by nothing and reachable by no edge, and a
+/// state a security-relevant machine can never be in is contract noise that
+/// still has to be handled by every client that reads `state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
-    Draft,
     AwaitingApproval,
     Ready,
     Running,
@@ -98,10 +104,7 @@ impl TaskState {
     pub fn transition(self, to: Self) -> Result<Self, TaskTransitionError> {
         let allowed = matches!(
             (self, to),
-            (
-                Self::Draft,
-                Self::AwaitingApproval | Self::Ready | Self::Cancelled
-            ) | (Self::AwaitingApproval, Self::Ready | Self::Cancelled)
+            (Self::AwaitingApproval, Self::Ready | Self::Cancelled)
                 | (Self::Ready, Self::Running | Self::Cancelled)
                 | (
                     Self::Running,
@@ -143,9 +146,89 @@ impl TaskState {
 mod tests {
     use super::*;
 
+    /// Every state, at its own index. Kept in one place so the matrix test
+    /// below cannot quietly stop covering part of the machine.
+    const ALL_STATES: [TaskState; 10] = [
+        TaskState::AwaitingApproval,
+        TaskState::Ready,
+        TaskState::Running,
+        TaskState::Verifying,
+        TaskState::Succeeded,
+        TaskState::Failed,
+        TaskState::Cancelling,
+        TaskState::Cancelled,
+        TaskState::Compensating,
+        TaskState::Compensated,
+    ];
+
+    /// Proves `ALL_STATES` lists every state exactly once: the `match` is
+    /// exhaustive, so a new variant forces a new arm (and a longer array),
+    /// and each element must sit at the index its own variant names.
+    #[test]
+    fn the_state_list_covers_the_whole_machine() {
+        for (position, state) in ALL_STATES.into_iter().enumerate() {
+            let index = match state {
+                TaskState::AwaitingApproval => 0,
+                TaskState::Ready => 1,
+                TaskState::Running => 2,
+                TaskState::Verifying => 3,
+                TaskState::Succeeded => 4,
+                TaskState::Failed => 5,
+                TaskState::Cancelling => 6,
+                TaskState::Cancelled => 7,
+                TaskState::Compensating => 8,
+                TaskState::Compensated => 9,
+            };
+            assert_eq!(
+                position, index,
+                "ALL_STATES must list {state:?} exactly once, in order"
+            );
+        }
+    }
+
+    /// The whole transition relation, pinned edge by edge over every ordered
+    /// pair of states. An edge added, removed, or widened anywhere in
+    /// [`TaskState::transition`] shows up here as a named failure.
+    #[test]
+    fn the_transition_matrix_is_pinned() {
+        const ALLOWED: [(TaskState, TaskState); 15] = [
+            // Creation lands in one of the two entry states; approval (or a
+            // late grant) is the only way forward from AwaitingApproval.
+            (TaskState::AwaitingApproval, TaskState::Ready),
+            (TaskState::AwaitingApproval, TaskState::Cancelled),
+            (TaskState::Ready, TaskState::Running),
+            (TaskState::Ready, TaskState::Cancelled),
+            (TaskState::Running, TaskState::Verifying),
+            (TaskState::Running, TaskState::Failed),
+            (TaskState::Running, TaskState::Cancelling),
+            (TaskState::Verifying, TaskState::Succeeded),
+            (TaskState::Verifying, TaskState::Failed),
+            (TaskState::Verifying, TaskState::Cancelling),
+            // The one outgoing edge of a terminal state: recovery reopens a
+            // failure when the plan asks for compensation.
+            (TaskState::Failed, TaskState::Compensating),
+            (TaskState::Cancelling, TaskState::Cancelled),
+            (TaskState::Cancelling, TaskState::Compensating),
+            (TaskState::Compensating, TaskState::Compensated),
+            (TaskState::Compensating, TaskState::Failed),
+        ];
+
+        for from in ALL_STATES {
+            for to in ALL_STATES {
+                let expected = ALLOWED.contains(&(from, to));
+                assert_eq!(
+                    from.transition(to).is_ok(),
+                    expected,
+                    "{from:?} -> {to:?} must be {}",
+                    if expected { "allowed" } else { "rejected" }
+                );
+            }
+        }
+    }
+
     #[test]
     fn successful_lifecycle_is_valid() {
-        let state = TaskState::Draft
+        let state = TaskState::AwaitingApproval
             .transition(TaskState::Ready)
             .and_then(|state| state.transition(TaskState::Running))
             .and_then(|state| state.transition(TaskState::Verifying))

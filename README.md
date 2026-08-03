@@ -422,10 +422,8 @@ cannot be normalized (relative paths, `..` past the root) are denied outright.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Draft
-    Draft --> AwaitingApproval
-    Draft --> Ready
-    Draft --> Cancelled
+    [*] --> AwaitingApproval
+    [*] --> Ready
     AwaitingApproval --> Ready
     AwaitingApproval --> Cancelled
     Ready --> Running
@@ -448,6 +446,8 @@ stateDiagram-v2
 
 Key invariants:
 
+- **the only entry states are `AwaitingApproval` and `Ready`** — creation evaluates the whole
+  plan and picks one of them, and nothing reaches them from outside;
 - **`Running` cannot jump straight to `Succeeded`** — it must pass through `Verifying`;
 - `Failed` is terminal but keeps one outgoing edge, `Failed → Compensating`, so recovery
   semantics can reopen it;
@@ -519,8 +519,8 @@ returns 401 `unauthorized` otherwise. See [Local authentication](#local-authenti
 |---|---|---|
 | `GET` | `/healthz` | Service status, API version, and the running security posture: `authentication` (always `bearer_token`) and `capability_admission` (`unsigned_allowed` or `require_signed`) |
 | `POST` | `/v1/tasks` | Validate and create a task |
-| `GET` | `/v1/tasks` | List tasks as `{"tasks": [...], "warnings": [...]}`; a corrupt record file is skipped and reported in `warnings` instead of failing the whole listing |
-| `GET` | `/v1/tasks/{id}` | Read one task |
+| `GET` | `/v1/tasks` | List task **summaries** as `{"tasks": [...], "warnings": [...]}` — id, state, revision, intent, timestamps, and counts, with **no event bodies**; a corrupt record file is skipped and reported in `warnings` instead of failing the whole listing |
+| `GET` | `/v1/tasks/{id}` | Read one task; returns the **50 most recent** events plus `event_count` (the true total). `?events=<n>` asks for more, clamped to a hard maximum of 1000 |
 | `POST` | `/v1/tasks/{id}/capabilities` | Grant capabilities to an existing task; each new capability must have `issued_to == plan.task_id` and be currently active; takes `expected_revision` |
 | `POST` | `/v1/tasks/{id}/outcomes` | Record one action's execution outcome and evidence; appends an `outcome_recorded` event and bumps the revision. Allowed only while `Running`/`Verifying`, at most one per action (append-only), and the action must belong to the plan |
 | `POST` | `/v1/tasks/{id}/evaluate` | Evaluate without executing; isolation is resolved **per action**, and the result is appended as an `evaluated` event, bumping the revision |
