@@ -469,13 +469,37 @@ Key invariants:
 
 ## CLI reference
 
-Global flag: `--state-dir <PATH>` (env `ANDROMEDA_STATE_DIR`, default `.andromeda/state`).
+Every `andromeda task` command must name **which tasks it acts on**. There is no default:
+
+| Global flag | Environment | Acts on |
+|---|---|---|
+| `--connect <URL>` | `ANDROMEDA_TASKD_URL` | A running `andromeda-taskd`, through its HTTP API — the single source of truth on an installed system |
+| `--state-dir <PATH>` | `ANDROMEDA_STATE_DIR` | A task store opened directly in this process, with no daemon involved |
+| `--auth-token-file <PATH>` | `ANDROMEDA_AUTH_TOKEN_FILE` | `--connect` only: the file holding taskd's local bearer token. Defaults to the first of `/run/andromeda-taskd/token` and `.andromeda/taskd-token` that exists |
+
+The two modes conflict, and naming neither is an error that prints both commands. This is
+deliberate: the CLI used to default to `.andromeda/state` under the working directory while an
+installed `andromeda-taskd` keeps its records in `/var/lib/andromeda-taskd/state` under a systemd
+`DynamicUser` at mode `0700` — so `andromeda task list` opened a *different, empty, and
+unreadable-from-here* store, and the only symptom was an empty list indistinguishable from "there
+are no tasks". Every task command also prints its target to stderr (stdout stays pure JSON):
+
+```console
+$ andromeda --state-dir .andromeda/state task list
+andromeda task: reading the local task store at /home/you/project/.andromeda/state (in process;
+this is NOT andromeda-taskd's store — pass --connect <URL> for the daemon's tasks)
+[]
+```
+
+There is **no flag and no variable that takes the token value itself**: `argv` is readable by every
+local process through `/proc`. `--connect` accepts loopback endpoints only, because the request
+carries that token; a non-loopback URL is refused before any byte is sent.
 
 | Command | Purpose |
 |---|---|
 | `andromeda task create-inspection <PATH> [--requested-by <ACTOR>]` | Create a read-only directory inspection plan and explicitly grant its scope |
-| `andromeda task list` | List all durable task records |
-| `andromeda task show <TASK_ID>` | Show one task record |
+| `andromeda task list` | List durable tasks. Connected mode returns taskd's **summaries** (no plan, no event bodies); local mode prints whole records |
+| `andromeda task show <TASK_ID> [--events <N>]` | Show one task record. Connected mode returns taskd's bounded event window and reports how much history was left behind; `--events` widens it and applies to `--connect` only |
 | `andromeda task evaluate <TASK_ID> [--isolation <LEVEL>] [--confirm-external]` | Evaluate policy without executing any action |
 | `andromeda task record-outcome <TASK_ID> --action-id <ID> --status <STATUS> --evidence <TEXT> --expected-revision <N>` | Record one action's execution outcome and evidence (repeat `--evidence` for multiple items) |
 | `andromeda task transition <TASK_ID> --to <STATE> --expected-revision <N> [--actor <ACTOR>] [--confirm-external]` | Apply a checked state transition with optimistic concurrency |
