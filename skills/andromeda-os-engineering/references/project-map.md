@@ -37,6 +37,7 @@ productize macOS on non-Apple hardware, or give an AI default administrator acce
 | `crates/andromeda-taskd` | Loopback-only development HTTP control plane |
 | `crates/andromeda-cli` | Task operations, policy evaluation and hardware commands |
 | `crates/andromeda-hardware` | Cross-platform privacy-aware probe, diagnosis, HCM matching and verification |
+| `crates/andromeda-migration` | Bounded read-only profile inventory, checksums, skipped-item evidence and migration manifest v1 |
 | `os/Containerfile` | Fedora bootc payload and installer image composition |
 | `os/installer` | Kickstarts, compatibility preflight, diagnostics and safe/CI installer profiles |
 | `os/scripts` | ISO build, QEMU lifecycle, matrix, GCP and regression harnesses |

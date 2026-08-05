@@ -4,6 +4,9 @@
 >
 > 日期：2026-07-30
 >
+> 最近实施审计：2026-08-05（见
+> [实施缺口总审计](./development/implementation-gap-review-2026-08-05.md)）
+>
 > 本计划建立在 `docs/research/` 专题研究与 [操作系统全景调研](./os-landscape-and-andromeda-architecture.md) 之上。
 
 ## 2026-07-28 工程检查点
@@ -31,6 +34,16 @@ GPU/无线/音频固件、Wi‑Fi/WWAN、摄像头、触控、存储文件系统
 XHCI/UHCI、HDA/AC97 与不同 CPU topology 的 pairwise 矩阵。它只证明模拟设备
 驱动路径，实体 PC、Intel Mac、T2 Mac 与 Apple Silicon 仍必须进入独立实机队列。
 详细边界见[硬件普适性工程](./development/hardware-enablement.md)。
+
+## 2026-08-05 迁移 inventory 检查点
+
+Migration Manifest v1 与 Windows/macOS/Linux profile 只读扫描器已实现：固定用户数据目录、
+逐文件 SHA-256、相对路径、应用候选、显式跳过项，以及文件数/总目录项/目录深度硬上限。
+它不跟随 symlink、不进入 credential store，也不写源 profile。完整边界见
+[迁移扫描器与 manifest v1](./development/migration-manifest.md)。
+
+该检查点只证明“可有界地清点并生成后续导入输入”，不代表文件已经复制，也不代表云盘、
+应用、身份、P2V、BitLocker/FileVault 或安全共存安装已经完成。
 
 ## 1. 产品定义
 
@@ -916,7 +929,7 @@ VTSR 必须绑定版本化任务集、环境、成功断言和人工裁决规则
 - KVM Windows Workspace 最小链路；
 - 完整 RDP Windows 桌面最小链路；
 - Office 候选引擎文档往返测试；
-- Windows/macOS 迁移扫描器；
+- Windows/macOS 只读迁移扫描器 v1（已交付 inventory、SHA-256、跳过项与硬上限；导入未实现）；
 - agent 目录整理 dry-run。
 
 ### 第 7–8 周
@@ -956,7 +969,8 @@ VTSR 必须绑定版本化任务集、环境、成功断言和人工裁决规则
 2. `agent-runtime-spec.md`
 3. [`hardware-compatibility-manifest.schema.json`](../schemas/hardware-compatibility-manifest.schema.json) —— 已交付
 4. `compatibility-database.schema.json`
-5. `migration-manifest.schema.json`
+5. [`migration-manifest.schema.json`](../schemas/migration-manifest.schema.json) —— v1 已交付；
+   只读扫描器见 [`migration-manifest.md`](./development/migration-manifest.md)，导入/恢复仍未交付
 6. `update-and-recovery-spec.md`
 7. `windows-workspace-spec.md`
 8. `format-safety-spec.md`
@@ -977,7 +991,7 @@ VTSR 必须绑定版本化任务集、环境、成功断言和人工裁决规则
 1. x86-64 PC 上的不可变 Linux 原型；
 2. Steam/Proton、Office 多引擎和 Windows VM；
 3. Capability Broker、审计与事务撤销；
-4. Windows/macOS 迁移扫描器；
+4. Windows/macOS 可暂停恢复的迁移 importer（只读 scanner v1 已交付）；
 5. QEMU + 真实硬件 CI。
 
 保持探索、尚不作产品承诺：

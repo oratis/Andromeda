@@ -3,6 +3,7 @@ members = [
     "crates/andromeda-cli",
     "crates/andromeda-core",
     "crates/andromeda-hardware",
+    "crates/andromeda-migration",
     "crates/andromeda-policy",
     "crates/andromeda-runtime",
     "crates/andromeda-taskd",
@@ -19,6 +20,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 andromeda-core = { path = "crates/andromeda-core" }
 andromeda-hardware = { path = "crates/andromeda-hardware" }
+andromeda-migration = { path = "crates/andromeda-migration" }
 andromeda-policy = { path = "crates/andromeda-policy" }
 andromeda-runtime = { path = "crates/andromeda-runtime" }
 andromeda-taskd = { path = "crates/andromeda-taskd" }
@@ -28,6 +30,7 @@ clap = { version = "4.5.38", features = ["derive", "env"] }
 fs4 = { version = "0.13.1", features = ["sync"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+sha2 = "0.10.9"
 thiserror = "2.0.12"
 tokio = { version = "1.45.0", features = ["macros", "net", "rt-multi-thread", "signal"] }
 tracing = "0.1.41"

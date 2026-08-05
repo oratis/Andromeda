@@ -14,6 +14,9 @@ use andromeda_hardware::{
     TrustedKeyring, diagnose_report, evaluate_manifest_verified, evaluate_manifest_with_verifier,
     probe_host,
 };
+use andromeda_migration::{
+    DEFAULT_MAX_ENTRIES, DEFAULT_MAX_FILES, ScanOptions, SourcePlatform, scan_profile,
+};
 use andromeda_policy::PolicyEngine;
 use andromeda_runtime::{
     CapabilityAdmission, CreateTaskRequest, EvaluationRequest, FileTaskStore, RecordOutcomeRequest,
@@ -79,6 +82,58 @@ enum Command {
         #[command(subcommand)]
         command: HardwareCommand,
     },
+    /// Inventory a Windows, macOS, or Linux profile without modifying it.
+    Migration {
+        #[command(subcommand)]
+        command: MigrationCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MigrationCommand {
+    /// Hash known user-data folders and list application candidates.
+    ///
+    /// The scan never follows symlinks, reads credential stores, imports data,
+    /// or writes into the source profile. Skipped entries are part of the
+    /// manifest so an incomplete scan cannot look complete.
+    Scan {
+        /// Source user-profile root. Defaults to USERPROFILE on Windows and
+        /// HOME elsewhere.
+        #[arg(long, value_name = "PATH")]
+        profile_root: Option<PathBuf>,
+        /// Source platform, useful when scanning a mounted profile from a
+        /// different host OS. Defaults to the current host.
+        #[arg(long, value_enum)]
+        source_platform: Option<CliSourcePlatform>,
+        /// Stop after hashing this many files and mark the manifest truncated.
+        #[arg(long, default_value_t = DEFAULT_MAX_FILES)]
+        max_files: usize,
+        /// Stop after visiting this many files, directories, links, or other entries.
+        #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
+        max_entries: usize,
+        /// Write JSON here instead of stdout. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        output: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliSourcePlatform {
+    Windows,
+    Macos,
+    Linux,
+    Other,
+}
+
+impl From<CliSourcePlatform> for SourcePlatform {
+    fn from(value: CliSourcePlatform) -> Self {
+        match value {
+            CliSourcePlatform::Windows => Self::Windows,
+            CliSourcePlatform::Macos => Self::Macos,
+            CliSourcePlatform::Linux => Self::Linux,
+            CliSourcePlatform::Other => Self::Other,
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -608,7 +663,83 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Command::Hardware { command } => handle_hardware(command)?,
+        Command::Migration { command } => handle_migration(command)?,
     }
+    Ok(())
+}
+
+fn handle_migration(command: MigrationCommand) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        MigrationCommand::Scan {
+            profile_root,
+            source_platform,
+            max_files,
+            max_entries,
+            output,
+        } => {
+            let root = profile_root.map_or_else(default_profile_root, Ok)?;
+            let mut options = ScanOptions::new(&root);
+            options.source_platform = source_platform.map_or_else(SourcePlatform::host, Into::into);
+            options.max_files = max_files;
+            options.max_entries = max_entries;
+            let manifest = scan_profile(&options)?;
+            let json = serde_json::to_string_pretty(&manifest)?;
+            match output {
+                Some(path) => write_new_file(&path, format!("{json}\n").as_bytes())?,
+                None => println!("{json}"),
+            }
+            eprintln!(
+                "andromeda migration: inventoried {} files ({} bytes), {} application candidates, \
+                 {} skipped; source was read-only{}",
+                manifest.summary.file_count,
+                manifest.summary.total_bytes,
+                manifest.summary.application_count,
+                manifest.summary.skipped_count,
+                if manifest.summary.truncated {
+                    "; SCAN TRUNCATED at a configured traversal bound"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+fn default_profile_root() -> Result<PathBuf, String> {
+    let variable = if cfg!(target_os = "windows") {
+        "USERPROFILE"
+    } else {
+        "HOME"
+    };
+    std::env::var_os(variable)
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("--profile-root was not supplied and {variable} is not set"))
+}
+
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "cannot create {} without overwriting it: {error}",
+                path.display()
+            )
+        })?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(format!(
+            "cannot write migration manifest {}: {error}",
+            path.display()
+        )
+        .into());
+    }
+    eprintln!("migration manifest written to {}", path.display());
     Ok(())
 }
 
@@ -1012,6 +1143,55 @@ mod tests {
         ["ANDROMEDA_TASKD_URL", "ANDROMEDA_STATE_DIR"]
             .iter()
             .all(|name| std::env::var_os(name).is_none())
+    }
+
+    #[test]
+    fn migration_scan_is_independent_of_task_store_selection() {
+        let cli = Cli::try_parse_from([
+            "andromeda",
+            "migration",
+            "scan",
+            "--profile-root",
+            "/source/profile",
+            "--source-platform",
+            "windows",
+            "--max-files",
+            "25",
+            "--max-entries",
+            "100",
+        ])
+        .expect("migration command parses");
+        assert!(cli.connect.is_none());
+        assert!(cli.state_dir.is_none());
+        let Command::Migration {
+            command:
+                MigrationCommand::Scan {
+                    profile_root,
+                    source_platform,
+                    max_files,
+                    max_entries,
+                    output,
+                },
+        } = cli.command
+        else {
+            panic!("wrong command")
+        };
+        assert_eq!(profile_root, Some(PathBuf::from("/source/profile")));
+        assert!(matches!(source_platform, Some(CliSourcePlatform::Windows)));
+        assert_eq!(max_files, 25);
+        assert_eq!(max_entries, 100);
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn migration_output_never_overwrites_an_existing_manifest() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let output = temp.path().join("migration.json");
+        std::fs::write(&output, b"owner data").expect("seed output");
+        let error = write_new_file(&output, b"replacement")
+            .expect_err("an existing manifest must not be overwritten");
+        assert!(error.to_string().contains("without overwriting"), "{error}");
+        assert_eq!(std::fs::read(&output).expect("read"), b"owner data");
     }
 
     /// The finding this whole change exists for: with neither mode named, the

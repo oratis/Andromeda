@@ -61,6 +61,8 @@ The project has reached its first installable **Daily Driver Candidate (virtual 
 - a durable task service, HTTP API, and developer CLI;
 - Linux, macOS, and Windows hardware probing with Hardware Compatibility Manifest (HCM)
   matching;
+- a bounded, read-only Windows/macOS/Linux profile migration inventory with SHA-256 file
+  evidence and explicit skipped-item reporting;
 - boot-time driver diagnosis, HCM v2 artifact/evidence gating, and a virtual hardware matrix
   covering NVMe/SATA/IDE, e1000e/e1000, XHCI/UHCI, and HDA/AC97;
 - cross-platform CI, a product plan, and topic research.
@@ -74,6 +76,13 @@ day-to-day workflows plus the AI task control plane, and complete update and rol
 > Supported or Certified**.
 
 ### Verified evidence
+
+**The 2026-08-05 pre-migration baseline (`03aab0e`)** passed the full push-triggered
+[CI run #30781393176](https://github.com/oratis/Andromeda/actions/runs/30781393176) and
+[Installable OS run #30781393177](https://github.com/oratis/Andromeda/actions/runs/30781393177).
+The same SHA passed a fresh scheduled build, blank-disk install, desktop/update/rollback lifecycle,
+and pairwise hardware matrix in
+[run #30978525635](https://github.com/oratis/Andromeda/actions/runs/30978525635) on 2026-08-05.
 
 **[Installable OS acceptance #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852) (2026-07-28)**
 passed end to end on a fresh 32 GiB virtual disk. The tested ISO has SHA-256
@@ -147,6 +156,7 @@ Intent
 | [`andromeda-taskd`](./crates/andromeda-taskd) | Task HTTP control plane, loopback-only by default |
 | [`andromeda-cli`](./crates/andromeda-cli) | Task creation/inspection/policy evaluation/state transitions and hardware probing |
 | [`andromeda-hardware`](./crates/andromeda-hardware) | Privacy-conscious Linux/macOS/Windows probing and HCM evaluation |
+| [`andromeda-migration`](./crates/andromeda-migration) | Read-only profile inventory, checksums, application candidates, and migration manifest v1 |
 
 ---
 
@@ -154,19 +164,20 @@ Intent
 
 ```text
 .
-├── crates/                    # Rust workspace (6 crates, unsafe forbidden)
+├── crates/                    # Rust workspace (7 crates, unsafe forbidden)
 │   ├── andromeda-core/        # Task, plan, capability, risk, and state-machine contracts
 │   ├── andromeda-policy/      # Deny-first deterministic authorization engine
 │   ├── andromeda-runtime/     # Atomic persistence, cross-process locking, TaskService
 │   ├── andromeda-taskd/       # Loopback-only HTTP control plane
 │   ├── andromeda-cli/         # The `andromeda` developer CLI
-│   └── andromeda-hardware/    # Cross-platform probing, driver diagnosis, HCM matching
+│   ├── andromeda-hardware/    # Cross-platform probing, driver diagnosis, HCM matching
+│   └── andromeda-migration/   # Bounded, read-only Windows/macOS/Linux migration inventory
 ├── os/                        # Fedora bootc 44 + KDE Plasma installable image
 │   ├── Containerfile          # bootc base image definition
 │   ├── files/                 # systemd / bootc / libexec files injected into the image
 │   ├── installer/             # Kickstart, preflight, platform guard
 │   └── scripts/               # build-iso / test-install / hardware matrix / GCP E2E
-├── schemas/                   # hardware-compatibility-manifest.schema.json
+├── schemas/                   # HCM and migration manifest machine-readable contracts
 ├── examples/hcm/              # Example Hardware Compatibility Manifest
 ├── skills/                    # In-repo engineering skill (boundaries, gates, failure defenses)
 ├── docs/                      # Research, product plan, development guides, ADRs, reviews
@@ -273,6 +284,21 @@ is not the same as being supported**:
 
 `effective_tier` equals the manifest's declared tier only when the selectors **and** the
 requirements are all satisfied; otherwise it drops to `blocked` (process exit code `2`).
+
+### Inventory a Windows or macOS profile without changing it
+
+The manifest records checksums and every observed item the scanner could not safely read. It does
+not copy data or claim migration success:
+
+```bash
+cargo run --locked --bin andromeda -- migration scan \
+  --profile-root /path/to/source/profile \
+  --source-platform windows \
+  --output migration.json
+```
+
+See the [Migration Manifest v1 guide](./docs/development/migration-manifest.md) for the privacy,
+symlink, traversal-budget, import, cloud-drive, and P2V boundaries.
 
 ### Create a task with an explicitly granted scope
 
@@ -729,8 +755,9 @@ the ISO, and starts the installed disk. The installed OS must then:
 
 Beyond the base lifecycle, the installed CI system enters a Plasma Wayland session and
 exercises PipeWire, Flatpak, LibreOffice DOCX/XLSX/PPTX/PDF conversion, a real Firefox Wayland
-launch, and persistent user data across update and rollback. Success is the serial marker
-`ANDROMEDA_E2E_OK`.
+launch, and persistent user data across update and rollback. Every lifecycle boot also runs the
+installed migration scanner as the desktop user and verifies the persistent file's relative path
+and SHA-256 in Migration Manifest v1. Success is the serial marker `ANDROMEDA_E2E_OK`.
 
 The boot also produces `hardware-diagnosis.json`; missing boot-critical storage, network,
 graphics, or USB-controller drivers block the E2E run.
@@ -890,7 +917,7 @@ Near-term engineering order:
 3. Plasma/KWin Task Center adapter and the Capability Broker daemon;
 4. Attested bubblewrap/SELinux sandboxes and a microVM executor;
 5. Steam/Proton managed domain, Windows Workspace, Office/format routing;
-6. Windows/macOS migration scanners;
+6. Resumable Windows/macOS migration importer (the read-only inventory v1 is implemented);
 7. A separate M1/M2 Asahi Preview.
 
 Full phases, SLOs, and the first 12-week plan are in the
@@ -913,6 +940,7 @@ Full phases, SLOs, and the first 12-week plan are in the
 - [Developer Preview installation and acceptance](./docs/development/installable-preview.md)
 - [Daily Driver Candidate and GCP E2E](./docs/development/daily-driver-e2e.md)
 - [Hardware Compatibility Manifest](./docs/development/hardware-compatibility.md)
+- [Migration Manifest v1 and read-only scanner](./docs/development/migration-manifest.md)
 - [Hardware enablement and the automated matrix](./docs/development/hardware-enablement.md)
 - [Physical hardware certification test plan](./docs/development/hardware-certification-test-plan.md)
 
