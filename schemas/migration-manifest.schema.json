@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://andromeda.invalid/schemas/migration-manifest.schema.json",
+  "title": "Andromeda Migration Manifest",
+  "description": "Read-only inventory of migratable user data and application candidates. It is not proof that any item was imported.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "collected_at",
+    "source_platform",
+    "hash_algorithm",
+    "files",
+    "applications",
+    "skipped",
+    "summary"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "manifest_id": { "type": "string", "format": "uuid" },
+    "collected_at": { "type": "string", "format": "date-time" },
+    "source_platform": {
+      "enum": ["windows", "macos", "linux", "other"]
+    },
+    "hash_algorithm": { "const": "sha256" },
+    "files": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/file" }
+    },
+    "applications": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/application" }
+    },
+    "skipped": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/skipped" }
+    },
+    "summary": { "$ref": "#/$defs/summary" }
+  },
+  "$defs": {
+    "category": {
+      "enum": ["desktop", "documents", "downloads", "pictures", "music", "videos"]
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "category", "size_bytes", "modified_at", "sha256"],
+      "properties": {
+        "relative_path": { "type": "string", "minLength": 1 },
+        "category": { "$ref": "#/$defs/category" },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "modified_at": {
+          "anyOf": [
+            { "type": "string", "format": "date-time" },
+            { "type": "null" }
+          ]
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "application": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["display_name", "relative_path", "source_kind"],
+      "properties": {
+        "display_name": { "type": "string", "minLength": 1 },
+        "relative_path": { "type": "string", "minLength": 1 },
+        "source_kind": {
+          "enum": [
+            "macos_bundle",
+            "windows_user_program",
+            "linux_desktop_entry",
+            "profile_application"
+          ]
+        }
+      }
+    },
+    "skipped": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "reason", "detail"],
+      "properties": {
+        "relative_path": { "type": "string" },
+        "reason": {
+          "enum": [
+            "symlink",
+            "unsupported_file_type",
+            "permission_denied",
+            "read_error",
+            "changed_during_scan",
+            "limit_reached"
+          ]
+        },
+        "detail": { "type": "string", "minLength": 1 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file_count",
+        "total_bytes",
+        "application_count",
+        "skipped_count",
+        "truncated",
+        "files_by_category"
+      ],
+      "properties": {
+        "file_count": { "type": "integer", "minimum": 0 },
+        "total_bytes": { "type": "integer", "minimum": 0 },
+        "application_count": { "type": "integer", "minimum": 0 },
+        "skipped_count": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" },
+        "files_by_category": {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/category" },
+          "additionalProperties": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

@@ -56,6 +56,8 @@
 - 有模型不可绕过的任务、风险、能力、隔离和状态机契约；
 - 有持久化任务服务、HTTP API 与开发者 CLI；
 - 有 Linux、macOS、Windows 硬件探测和 Hardware Compatibility Manifest（HCM）匹配；
+- 有带硬上限的 Windows/macOS/Linux profile 只读迁移 inventory、SHA-256 文件证据和
+  显式跳过项报告；
 - 有启动时驱动诊断、HCM v2 artifact/evidence 门禁，以及 NVMe/SATA/IDE、e1000e/e1000、
   XHCI/UHCI、HDA/AC97 的虚拟硬件矩阵；
 - 有跨平台 CI、产品计划和专题研究。
@@ -68,6 +70,12 @@
 > **没有宣称任何消费级 PC 或 Mac 已达到 Supported 或 Certified**。
 
 ### 已验证证据
+
+**2026-08-05 的迁移功能开发前基线（`03aab0e`）**通过完整 push 触发的
+[CI #30781393176](https://github.com/oratis/Andromeda/actions/runs/30781393176)与
+[Installable OS #30781393177](https://github.com/oratis/Andromeda/actions/runs/30781393177)。同一 SHA
+又在 2026-08-05 的[定时运行 #30978525635](https://github.com/oratis/Andromeda/actions/runs/30978525635)
+重新通过构建、空盘安装、桌面/更新/回滚生命周期和 pairwise 硬件矩阵。
 
 **[可安装 OS 验收 #30341131852](https://github.com/oratis/Andromeda/actions/runs/30341131852)（2026-07-28）**
 在全新 32 GiB 虚拟磁盘上完整通过。受测 ISO 的 SHA-256 为
@@ -137,6 +145,7 @@ Intent
 | [`andromeda-taskd`](./crates/andromeda-taskd) | 默认仅监听 loopback 的任务 HTTP 控制面 |
 | [`andromeda-cli`](./crates/andromeda-cli) | 任务创建/查看/策略评估/状态转换和硬件探测 |
 | [`andromeda-hardware`](./crates/andromeda-hardware) | Linux/macOS/Windows 隐私友好探测与 HCM 评估 |
+| [`andromeda-migration`](./crates/andromeda-migration) | profile 只读 inventory、校验和、应用候选与 migration manifest v1 |
 
 ---
 
@@ -144,19 +153,20 @@ Intent
 
 ```text
 .
-├── crates/                    # Rust workspace（6 个 crate，禁用 unsafe）
+├── crates/                    # Rust workspace（7 个 crate，禁用 unsafe）
 │   ├── andromeda-core/        # 任务、计划、能力、风险与状态机契约
 │   ├── andromeda-policy/      # deny-first 确定性授权引擎
 │   ├── andromeda-runtime/     # 原子持久化、跨进程锁、TaskService
 │   ├── andromeda-taskd/       # loopback-only HTTP 控制面
 │   ├── andromeda-cli/         # `andromeda` 开发者 CLI
-│   └── andromeda-hardware/    # 跨平台探测、驱动诊断、HCM 匹配
+│   ├── andromeda-hardware/    # 跨平台探测、驱动诊断、HCM 匹配
+│   └── andromeda-migration/   # 有界、只读的 Windows/macOS/Linux 迁移 inventory
 ├── os/                        # Fedora bootc 44 + KDE Plasma 可安装镜像
 │   ├── Containerfile          # bootc 基础镜像定义
 │   ├── files/                 # 注入镜像的 systemd / bootc / libexec 文件
 │   ├── installer/             # Kickstart、preflight、平台守卫
 │   └── scripts/               # build-iso / test-install / 硬件矩阵 / GCP E2E
-├── schemas/                   # hardware-compatibility-manifest.schema.json
+├── schemas/                   # HCM 与 migration manifest 机器可读契约
 ├── examples/hcm/              # 示例 Hardware Compatibility Manifest
 ├── skills/                    # 仓库内工程 skill（边界、门槛、故障防线）
 ├── docs/                      # 研究、产品计划、开发指南、ADR、评审
@@ -260,6 +270,21 @@ cargo run --locked --bin andromeda -- hardware check examples/hcm/developer-x86_
 
 只有 selector 与 requirements **全部**满足，`effective_tier` 才等于 manifest 声明的等级；
 否则一律降为 `blocked`（进程退出码 `2`）。
+
+### 在不修改源系统的前提下清点 Windows/macOS profile
+
+manifest 会记录校验和，以及扫描器观察到但无法安全读取的每个项目。它不会复制数据，也不
+宣称迁移已经成功：
+
+```bash
+cargo run --locked --bin andromeda -- migration scan \
+  --profile-root /path/to/source/profile \
+  --source-platform windows \
+  --output migration.json
+```
+
+隐私、符号链接、遍历预算、导入、云盘和 P2V 边界见
+[Migration Manifest v1 指南](./docs/development/migration-manifest.md)。
 
 ### 创建一个显式授权的检查任务
 
@@ -669,7 +694,9 @@ sudo os/scripts/test-install.sh
 
 在基础生命周期之外，CI 系统还会进入 Plasma Wayland 会话，验证 PipeWire、Flatpak、
 LibreOffice 的 DOCX/XLSX/PPTX/PDF 转换、真实 Firefox Wayland 启动，以及用户数据跨更新与
-回滚的持久性。成功标志是串口标记 `ANDROMEDA_E2E_OK`。
+回滚的持久性。每次生命周期启动还会以桌面用户运行镜像内的迁移扫描器，并在 Migration
+Manifest v1 中复验持久文件的相对路径与 SHA-256。成功标志是串口标记
+`ANDROMEDA_E2E_OK`。
 
 启动还会产出 `hardware-diagnosis.json`；缺失启动关键的存储、网络、图形或 USB 控制器驱动会
 直接阻断 E2E。
@@ -818,7 +845,7 @@ cargo fmt --all -- --check && cargo test --workspace --locked && cargo clippy --
 3. Plasma/KWin Task Center adapter 与 Capability Broker daemon；
 4. 受证明的 bubblewrap/SELinux sandbox 和 microVM executor；
 5. Steam/Proton 管理域、Windows Workspace、Office/格式路由；
-6. Windows/macOS 迁移扫描器；
+6. 可暂停恢复的 Windows/macOS 迁移 importer（只读 inventory v1 已实现）；
 7. M1/M2 Asahi 独立 Preview。
 
 完整阶段、SLO 和前 12 周计划见[产品开发计划](./docs/product-development-plan.md)。
@@ -840,6 +867,7 @@ cargo fmt --all -- --check && cargo test --workspace --locked && cargo clippy --
 - [Developer Preview 安装与验收](./docs/development/installable-preview.md)
 - [Daily Driver Candidate 与 GCP E2E](./docs/development/daily-driver-e2e.md)
 - [Hardware Compatibility Manifest](./docs/development/hardware-compatibility.md)
+- [Migration Manifest v1 与只读迁移扫描器](./docs/development/migration-manifest.md)
 - [硬件普适性工程与自动矩阵](./docs/development/hardware-enablement.md)
 - [实体硬件认证测试计划](./docs/development/hardware-certification-test-plan.md)
 

@@ -200,6 +200,33 @@ fi
 test "$(sha256sum "${persistence_file}" | cut -d' ' -f1)" \
     = a76c14260fc41a940d6d685ecff6fa6e958eee64c330f03745fbc7c2e67b64c7
 
+current_check=migration-inventory
+migration_manifest="${evidence_dir}/migration-${phase}.json"
+rm -f "${migration_manifest}"
+run_as_user /usr/bin/andromeda migration scan \
+    --profile-root "${test_home}" \
+    --source-platform linux \
+    --max-files 100 \
+    --max-entries 1000 \
+    --output "${migration_manifest}"
+# `$expected_sha256` is a jq variable supplied by --arg, not a shell expansion.
+# shellcheck disable=SC2016
+run_as_user jq --exit-status \
+    --arg expected_sha256 \
+        a76c14260fc41a940d6d685ecff6fa6e958eee64c330f03745fbc7c2e67b64c7 \
+    '
+      .schema_version == 1
+      and .source_platform == "linux"
+      and .hash_algorithm == "sha256"
+      and .summary.truncated == false
+      and .summary.file_count >= 1
+      and any(
+        .files[];
+        .relative_path == "Documents/andromeda-persistent.txt"
+        and .sha256 == $expected_sha256
+      )
+    ' "${migration_manifest}" >/dev/null
+
 case "${phase}" in
     first-boot)
         current_check=office-formats

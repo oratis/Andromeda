@@ -26,6 +26,7 @@ version = "0.1.0"
 dependencies = [
  "andromeda-core",
  "andromeda-hardware",
+ "andromeda-migration",
  "andromeda-policy",
  "andromeda-runtime",
  "andromeda-taskd",
@@ -61,6 +62,19 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "andromeda-migration"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

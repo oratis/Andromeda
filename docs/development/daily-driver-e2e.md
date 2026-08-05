@@ -37,9 +37,11 @@ Workspace、Microsoft Office 原版或某款游戏已经通过产品认证。
 5. 在真实 Plasma Wayland 会话中启动隔离配置的 Firefox，确认进程保持健康后
    由 systemd 用户服务精确回收；
 6. 创建用户持久文件并记录固定 SHA-256；
-7. 更新到 revision 2，确认桌面能力和用户文件仍在；
-8. 回滚到 revision 1，再次确认桌面能力和用户文件仍在；
-9. 严格验证成功标记的顺序，最终才输出 `ANDROMEDA_E2E_OK`。
+7. 以普通用户在首次启动、revision 2 和回滚后的 revision 1 生成 Migration Manifest v1，
+   验证持久文件的相对路径与 SHA-256；
+8. 更新到 revision 2，确认桌面能力和用户文件仍在；
+9. 回滚到 revision 1，再次确认桌面能力和用户文件仍在；
+10. 严格验证成功标记的顺序，最终才输出 `ANDROMEDA_E2E_OK`。
 
 预期串口顺序为：
 

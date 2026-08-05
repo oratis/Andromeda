@@ -19,10 +19,12 @@ Andromeda 的目标是探索一个以 AI agent 为核心、覆盖尽可能广泛
 ## 规格
 
 - [Andromeda 威胁模型 v0](./andromeda-threat-model.md)
+- [Migration Manifest v1 与只读迁移扫描器](./development/migration-manifest.md)
 
 ## 评审
 
 - [系统评审总览](./reviews/README.md)
+- [当前实施缺口总审计（2026-08-05）](./development/implementation-gap-review-2026-08-05.md)
 
 ## 开发
 
